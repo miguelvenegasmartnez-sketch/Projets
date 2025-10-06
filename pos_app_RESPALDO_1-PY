@@ -111,7 +111,7 @@ def apply_ui_settings():
 def create_pdf_with_logo(business_name, title, content, filename, align='C'):
     pdf = FPDF()
     pdf.add_page()
-    logo_path = resource_path("logo.png")
+    logo_path = resource_path("logo.jpg")
     if os.path.exists(logo_path):
         page_width = pdf.w - 2 * pdf.l_margin
         pdf.image(logo_path, x=(page_width / 2) + pdf.l_margin - 15, y=8, w=30)
@@ -198,7 +198,7 @@ class LoginScreen(ctk.CTkFrame):
 
         # --- LOGO y Nombre de la Empresa (REEMPLAZO DE TEXTO 1) ---
         try:
-            logo_image_path = resource_path("logo.png")
+            logo_image_path = resource_path("logo.jpg")
             # Adaptamos el logo existente al diseño de "Fundación Ayuda Mutua"
             logo_image = ctk.CTkImage(light_image=Image.open(logo_image_path), size=(120, 120))
             logo_label = ctk.CTkLabel(left_panel, image=logo_image, text="BOUTIQUE EL IMPULSO", # <--- TEXTO MODIFICADO
