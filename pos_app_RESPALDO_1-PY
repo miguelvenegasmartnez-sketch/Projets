@@ -46,11 +46,32 @@ def setup_database():
         }
         with open(DB_FILES["users"], "w") as f: json.dump(admin_user, f, indent=4)
     if not os.path.exists(DB_FILES["inventory"]):
-        # CAMBIO: Añadir wholesale_price al inventario de muestra
+        # INICIO MODIFICACIÓN MAYOREO: Añadir TODOS los tiers de precio mayorista al inventario de muestra
         sample_inventory = {
-            "SKU001": {"name": "Camisa de Lino Blanca", "price": 450.0, "quantity": 20, "wholesale_price": 400.0}, 
-            "SKU002": {"name": "Pantalón de Mezclilla Azul", "price": 750.0, "quantity": 15, "wholesale_price": 700.0}
+            "SKU001": {
+                "name": "Camisa de Lino Blanca", 
+                "price": 450.0, 
+                "quantity": 20, 
+                "wholesale_price": 400.0, # Usado para el tier de 5 piezas
+                "price_12": 380.0,
+                "price_50": 350.0,
+                "price_100": 300.0,
+                "price_300": 250.0,
+                "price_500": 200.0
+            }, 
+            "SKU002": {
+                "name": "Pantalón de Mezclilla Azul", 
+                "price": 750.0, 
+                "quantity": 15, 
+                "wholesale_price": 700.0, 
+                "price_12": 680.0,
+                "price_50": 650.0,
+                "price_100": 600.0,
+                "price_300": 550.0,
+                "price_500": 500.0
+            }
         }
+        # FIN MODIFICACIÓN MAYOREO
         with open(DB_FILES["inventory"], "w") as f: json.dump(sample_inventory, f, indent=4)
     if not os.path.exists(DB_FILES["sales"]):
         with open(DB_FILES["sales"], "w") as f: json.dump([], f, indent=4)
@@ -310,7 +331,6 @@ class MainScreen(ctk.CTkFrame):
             print(f"Error cargando logo en pantalla principal: {e}")
 
         ctk.CTkButton(top_bar, text="Menú", command=self.open_menu).pack(side="left", padx=10, pady=10)
-  
         self.time_user_label = ctk.CTkLabel(top_bar, text="", font=ctk.CTkFont(size=14))
         self.time_user_label.pack(side="right", padx=10, pady=10)
         self.update_time()
@@ -367,7 +387,6 @@ class MainScreen(ctk.CTkFrame):
                 self.create_suggestions_toplevel()
             self.suggestions_listbox.delete(0, END)
             for sku, data in matches.items():
-   
                 self.suggestions_listbox.insert(END, f"{data['name']} [{sku}]")
         else:
             self.hide_suggestions()
@@ -377,7 +396,6 @@ class MainScreen(ctk.CTkFrame):
         entry_y = self.product_search_entry.winfo_rooty() + self.product_search_entry.winfo_height()
         entry_width = self.product_search_entry.winfo_width()
         self.suggestions_toplevel = Toplevel(self)
-      
         self.suggestions_toplevel.overrideredirect(True)
         self.suggestions_toplevel.geometry(f"{entry_width}x150+{entry_x}+{entry_y}")
         self.suggestions_listbox = Listbox(self.suggestions_toplevel, bg="#343638", fg="white", selectbackground="#1f6aa5", border=1, relief="solid")
@@ -390,7 +408,6 @@ class MainScreen(ctk.CTkFrame):
     def hide_suggestions(self):
         if self.suggestions_toplevel:
             self.suggestions_toplevel.destroy()
-  
             self.suggestions_toplevel = None
 
     def focus_suggestions(self, event):
@@ -402,7 +419,6 @@ class MainScreen(ctk.CTkFrame):
         search_term = ""
         if self.suggestions_toplevel and self.suggestions_listbox.curselection():
             selection = self.suggestions_listbox.get(self.suggestions_listbox.curselection())
-        
             search_term = selection.split('[')[-1].strip(']')
         else:
             search_term = self.product_search_entry.get().strip()
@@ -411,44 +427,68 @@ class MainScreen(ctk.CTkFrame):
             self.product_search_entry.delete(0, 'end')
             self.hide_suggestions()
             
+    # INICIO MODIFICACIÓN MAYOREO: Lógica de precios por volumen
     def update_item_price(self, sku):
-        """Aplica el precio mayorista si la cantidad es >= 3."""
+        """Aplica el precio mayorista según las reglas de volumen (5, 12, 50, 100, 300, 500)."""
         item = next((item for item in self.current_sale_items if item["sku"] == sku), None)
         if item:
-            # Condición: Cantidad de 3 o más Y el precio mayorista es menor al precio normal (para evitar errores si no se configura)
-            if item["quantity"] >= 3 and item["wholesale_price"] < item["regular_price"]:
-                item["price"] = item["wholesale_price"]
-            else:
-                item["price"] = item["regular_price"]
+            quantity = item["quantity"]
+            inventory = read_db("inventory")
+            inventory_item = inventory.get(sku, {})
+            
+            # Obtener el precio regular guardado en el artículo de la venta como fallback
+            regular_price = item["regular_price"]
+
+            # Lista de umbrales y sus claves de precio, de mayor a menor cantidad
+            # El campo 'wholesale_price' se reutiliza para el tier de 5
+            tiers = [
+                (500, inventory_item.get("price_500", regular_price)),
+                (300, inventory_item.get("price_300", regular_price)),
+                (100, inventory_item.get("price_100", regular_price)),
+                (50, inventory_item.get("price_50", regular_price)),
+                (12, inventory_item.get("price_12", regular_price)),
+                (5, inventory_item.get("wholesale_price", regular_price)) 
+            ]
+            
+            best_price = regular_price
+            
+            # Iterar y aplicar el mejor precio de descuento aplicable
+            for threshold, tier_price in tiers:
+                try:
+                    # Se aplica el precio solo si la cantidad es suficiente Y es un precio más bajo que el actual
+                    if quantity >= threshold and float(tier_price) < float(best_price):
+                        best_price = float(tier_price)
+                except (ValueError, TypeError):
+                    # Ignorar si el precio en el JSON no es un número válido
+                    continue
+            
+            # El precio final se aplica al artículo de la venta
+            item["price"] = best_price
+    # FIN MODIFICACIÓN MAYOREO
 
     def add_product_to_cart(self, sku_to_add):
         inventory = read_db("inventory")
-      
+     
         sku_to_add = sku_to_add.upper()
         if sku_to_add in inventory:
             found_product = inventory[sku_to_add]
-            # NEW: Asegurar que existe wholesale_price (usar precio regular como fallback)
-            wholesale_price = found_product.get("wholesale_price", found_product["price"])
             
             existing_item = next((item for item in self.current_sale_items if item["sku"] == sku_to_add), None)
             
             if existing_item:
                 if inventory[sku_to_add]["quantity"] > existing_item["quantity"]:
-                
                     existing_item["quantity"] += 1
                 else: messagebox.showwarning("Sin Stock", "No hay más stock disponible.")
             else:
                 if inventory[sku_to_add]["quantity"] > 0:
-                    # NEW: Almacenar ambos precios, y "price" será el precio que se use en la venta.
+                    # MODIFICACIÓN: Ya no almacenamos wholesale_price aquí
                     self.current_sale_items.append({
                         "sku": sku_to_add, 
                         "name": found_product["name"], 
                         "regular_price": found_product["price"], 
-                        "wholesale_price": wholesale_price,
-                        "price": found_product["price"], 
+                        "price": found_product["price"], # Inicialmente es el precio regular
                         "quantity": 1
                     })
-             
                 else: messagebox.showwarning("Sin Stock", "El producto está agotado.")
 
             # NEW: Aplicar la lógica de precios después de modificar la cantidad
@@ -472,7 +512,6 @@ class MainScreen(ctk.CTkFrame):
         self.subtotal_label.configure(text=f"Subtotal: ${subtotal:.2f}")
 
     def get_selected_item_index(self):
-   
         if not (selected_indices := self.cart_listbox.curselection()):
             messagebox.showwarning("Sin Selección", "Por favor, seleccione un artículo de la lista.")
             return None
@@ -482,7 +521,7 @@ class MainScreen(ctk.CTkFrame):
         if (index := self.get_selected_item_index()) is None: return
         item = self.current_sale_items[index]
         inventory = read_db("inventory")
-        stock_disponible = inventory[item['sku']]['quantity']
+        stock_disponible = inventory.get(item['sku'], {}).get('quantity', 0)
         
         new_quantity = simpledialog.askinteger("Modificar Cantidad", f"Ingrese la nueva cantidad para '{item['name']}'\n(Stock disponible: {stock_disponible})", parent=self, minvalue=1, maxvalue=stock_disponible)
         
@@ -531,6 +570,7 @@ class MainScreen(ctk.CTkFrame):
         config["last_ticket_number"] = new_ticket_number
         write_db("config", config)
         inventory = read_db("inventory")
+        
         for item in self.current_sale_items:
             if item["sku"] in inventory: inventory[item["sku"]]["quantity"] -= item["quantity"]
         write_db("inventory", inventory)
@@ -566,7 +606,6 @@ class MainScreen(ctk.CTkFrame):
         footer = (f"----------------------------------------\n"
                   f"Metodo de Pago: {sale_record['payment_method']}\n"
                   f"TOTAL: ${sale_record['total']:.2f}\n\n"
-              
                   f"Este ticket de compra NO ES UN COMPROBANTE FISCAL.\n"
                   f"Para Devoluciones solamente se cuenta con 7\n"
                   f"días naturales a partir de la fecha de compra.\n")
@@ -599,7 +638,6 @@ class ShippingOptionsWindow(ctk.CTkToplevel):
     
     def print_to_pdf(self):
         ticket_text = self.master_screen.generate_ticket_text(self.sale_record)
-       
         ticket_filename = f"tickets/venta_{self.sale_record['ticket_number']}.pdf"
         os.makedirs("tickets", exist_ok=True)
         create_pdf_with_logo("Boutique El Impulso", "Ticket de Venta", ticket_text, ticket_filename)
@@ -637,7 +675,6 @@ class EmailTicketWindow(ctk.CTkToplevel):
     def handle_send_email(self, is_resend=False):
         email_address = self.email_entry.get().strip()
         if not email_address:
-     
             messagebox.showerror("Error", "Por favor, ingrese una dirección de correo.", parent=self)
             return
         self.send_button.configure(state="disabled", text="Enviando...")
@@ -649,11 +686,10 @@ class EmailTicketWindow(ctk.CTkToplevel):
         try:
             ticket_text = self.main_screen.generate_ticket_text(self.sale_record)
             create_pdf_with_logo("Boutique El Impulso", "Ticket de Venta", ticket_text, ticket_filename)
-   
             config = read_db("email")
             if config["sender_email"] == "tu_correo@gmail.com":
-                 messagebox.showerror("Configuración Requerida", "Debe configurar 'email_config.json' antes de enviar correos.", parent=self)
-                 return
+                messagebox.showerror("Configuración Requerida", "Debe configurar 'email_config.json' antes de enviar correos.", parent=self)
+                return
             self.send_email_logic(recipient=email_address, subject="Su Ticket de Compra - Boutique El Impulso", body="¡Hola!\n\nAdjunto encontrará su ticket de compra.\n\nGracias por su preferencia.", attachment_path=ticket_filename, config=config)
             messagebox.showinfo("Éxito", "Ticket enviado correctamente.")
             self.main_screen.reset_sale_screen()
@@ -664,7 +700,6 @@ class EmailTicketWindow(ctk.CTkToplevel):
         except (socket.gaierror, ConnectionRefusedError): messagebox.showerror("Error de Conexión", "No se pudo conectar al servidor de correo. Verifique su conexión a internet.", parent=self)
         except Exception as e: messagebox.showerror("Error de Envío", f"Ocurrió un error inesperado:\n{e}", parent=self)
         finally:
-   
             self.send_button.configure(state="normal", text="Enviar Ticket")
             self.resend_button.configure(state="normal")
             self.status_label.configure(text="")
@@ -720,7 +755,7 @@ class PaymentWindow(ctk.CTkToplevel):
             self.folio_entry.pack()
             
         ctk.CTkButton(self, text="Confirmar Pago", command=self.process_payment).pack(pady=20)
-        
+     
     def calculate_change(self, event=None):
         try: 
             self.change_label.configure(text=f"Cambio: ${float(self.amount_received_entry.get()) - self.total_amount:.2f}")
@@ -731,7 +766,6 @@ class PaymentWindow(ctk.CTkToplevel):
         method, details = self.payment_method.get(), {}
         if method == "Efectivo":
             try:
-               
                 if (received := float(self.amount_received_entry.get())) < self.total_amount: messagebox.showerror("Error", "El monto recibido es menor al total."); return
                 details = {"received": received, "change": received - self.total_amount}
             except ValueError: messagebox.showerror("Error", "Ingrese un monto válido."); return
@@ -762,7 +796,6 @@ class MenuWindow(ctk.CTkToplevel):
             ("Historial de Ventas", self.open_sales_history), 
             ("Ajustes del programa", self.open_settings), 
             ("Devolución", self.open_return_window), 
-      
             ("Dar de alta/Baja usuario", self.open_user_manager), 
             ("Administrar inventario", self.open_inventory_manager), 
             ("Corte de caja", self.open_cash_count)
@@ -774,7 +807,6 @@ class MenuWindow(ctk.CTkToplevel):
         self.protocol("WM_DELETE_WINDOW", self.on_closing) # Añadir protocolo de cierre
 
     def on_closing(self):
-      
         self.grab_release()
         self.destroy()
         
@@ -803,9 +835,9 @@ class MenuWindow(ctk.CTkToplevel):
     def open_user_manager(self): 
         if self.check_admin_role(): UserManagerWindow(self)
     def open_inventory_manager(self):
-   
         if self.check_admin_role(): InventoryManagerWindow(self)
-    def open_cash_count(self): CashCountWindow(self)
+    def open_cash_count(self): 
+        CashCountWindow(self)
 
 class ReturnWindow(ctk.CTkToplevel):
     def __init__(self, master):
@@ -834,7 +866,6 @@ class ReturnWindow(ctk.CTkToplevel):
 
     def on_closing(self):
         self.grab_release()
-       
         self.destroy()
         
     def search_ticket(self):
@@ -897,7 +928,6 @@ class ReturnWindow(ctk.CTkToplevel):
         for sale in sales:
             if sale.get("ticket_number") == self.found_sale["ticket_number"]:
                 sale["status"] = "DEVUELTA"
- 
                 break
         write_db("sales", sales)
         messagebox.showinfo("Éxito", "Devolución procesada correctamente.\nEl inventario y el registro de ventas han sido actualizados.", parent=self)
@@ -915,6 +945,7 @@ class SettingsWindow(ctk.CTkToplevel):
         ctk.CTkLabel(self, text="Ajustes", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=10)
         self.config = read_db("config")
         
+    
         # --- APARIENCIA ---
         appearance_frame = ctk.CTkFrame(self)
         appearance_frame.pack(pady=10, padx=10, fill="x")
@@ -925,8 +956,7 @@ class SettingsWindow(ctk.CTkToplevel):
         # --- TEMA DE COLOR (Solo temas base estables) ---
         ctk.CTkLabel(appearance_frame, text="Tema de Color:").pack(anchor="w", padx=10, pady=(10,0))
         self.color_theme_var = ctk.StringVar(value=self.config.get("color_theme", "blue"))
-        # Opciones de 
-        # tema base estables
+        # Opciones de tema base estables
         ctk.CTkOptionMenu(appearance_frame, variable=self.color_theme_var, values=["blue", "dark-blue", "green"], command=self.change_theme).pack(fill="x", padx=10, pady=5)
         
         # --- MANTENIMIENTO ---
@@ -1020,7 +1050,7 @@ class UserManagerWindow(ctk.CTkToplevel):
         # 1. Solicitar datos personales
         full_name = simpledialog.askstring("Añadir Usuario", "Nombre completo:", parent=self)
         if not full_name: return
-        
+    
         phone = simpledialog.askstring("Añadir Usuario", "Número telefónico (Opcional):", parent=self)
         if not phone: phone = "N/A"
         
@@ -1076,6 +1106,7 @@ class UserManagerWindow(ctk.CTkToplevel):
             if username in users: 
                 del users[username]
                 write_db("users", users)
+        
                 self.refresh_user_list()
             else:
                  messagebox.showerror("Error", "No se pudo encontrar el usuario en la base de datos.", parent=self)
@@ -1097,6 +1128,7 @@ class UserManagerWindow(ctk.CTkToplevel):
             if username in users:
                 users[username]["password"] = new_password
                 write_db("users", users)
+            
                 messagebox.showinfo("Éxito", f"Contraseña de '{username}' actualizada.", parent=self)
             else:
                 messagebox.showerror("Error", "No se pudo encontrar el usuario en la base de datos.", parent=self)
@@ -1116,37 +1148,68 @@ class InventoryManagerWindow(ctk.CTkToplevel):
         top_frame = ctk.CTkFrame(self)
         top_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
         
-        ctk.CTkLabel(top_frame, text="SKU:").pack(side="left", padx=5)
-        self.sku_entry = ctk.CTkEntry(top_frame, placeholder_text="Escanear o ingresar SKU")
+        # Primera fila de entradas
+        top_row_1 = ctk.CTkFrame(top_frame, fg_color="transparent")
+        top_row_1.pack(fill="x", pady=(5, 0))
+        
+        ctk.CTkLabel(top_row_1, text="SKU:").pack(side="left", padx=5)
+        self.sku_entry = ctk.CTkEntry(top_row_1, placeholder_text="Escanear o ingresar SKU")
         self.sku_entry.pack(side="left", padx=5, fill="x", expand=True)
         
-        ctk.CTkLabel(top_frame, text="Nombre:").pack(side="left", padx=5)
-        self.name_entry = ctk.CTkEntry(top_frame, placeholder_text="Nombre del producto")
+        ctk.CTkLabel(top_row_1, text="Nombre:").pack(side="left", padx=5)
+        self.name_entry = ctk.CTkEntry(top_row_1, placeholder_text="Nombre del producto")
         self.name_entry.pack(side="left", padx=5, fill="x", expand=True)
         
-        ctk.CTkLabel(top_frame, text="Precio:").pack(side="left", padx=5)
-        self.price_entry = ctk.CTkEntry(top_frame, placeholder_text="0.00", width=80)
+        ctk.CTkLabel(top_row_1, text="P. Normal:").pack(side="left", padx=5)
+        self.price_entry = ctk.CTkEntry(top_row_1, placeholder_text="0.00", width=80)
         self.price_entry.pack(side="left", padx=5)
         
-        # NUEVO CAMBIO: Precio Mayorista
-        ctk.CTkLabel(top_frame, text="P. Mayorista:").pack(side="left", padx=5)
-        self.wholesale_price_entry = ctk.CTkEntry(top_frame, placeholder_text="0.00", width=100) 
-        self.wholesale_price_entry.pack(side="left", padx=5)
-        # --------------------------------
-        
-        ctk.CTkLabel(top_frame, text="Cantidad:").pack(side="left", padx=5)
-        self.quantity_entry = ctk.CTkEntry(top_frame, placeholder_text="0", width=80)
+        ctk.CTkLabel(top_row_1, text="Cantidad:").pack(side="left", padx=5)
+        self.quantity_entry = ctk.CTkEntry(top_row_1, placeholder_text="0", width=80)
         self.quantity_entry.pack(side="left", padx=5)
         
+        # Segunda fila de entradas (Precios Mayoristas)
+        top_row_2 = ctk.CTkFrame(top_frame, fg_color="transparent")
+        top_row_2.pack(fill="x", pady=5)
+        
+        ctk.CTkLabel(top_row_2, text="P. 5:").pack(side="left", padx=(5, 2)) # wholesale_price original
+        self.price_5_entry = ctk.CTkEntry(top_row_2, placeholder_text="0.00", width=80) 
+        self.price_5_entry.pack(side="left", padx=5)
+
+        ctk.CTkLabel(top_row_2, text="P. 12:").pack(side="left", padx=2)
+        self.price_12_entry = ctk.CTkEntry(top_row_2, placeholder_text="0.00", width=80) 
+        self.price_12_entry.pack(side="left", padx=5)
+
+        ctk.CTkLabel(top_row_2, text="P. 50:").pack(side="left", padx=2)
+        self.price_50_entry = ctk.CTkEntry(top_row_2, placeholder_text="0.00", width=80) 
+        self.price_50_entry.pack(side="left", padx=5)
+
+        ctk.CTkLabel(top_row_2, text="P. 100:").pack(side="left", padx=2)
+        self.price_100_entry = ctk.CTkEntry(top_row_2, placeholder_text="0.00", width=80) 
+        self.price_100_entry.pack(side="left", padx=5)
+
+        ctk.CTkLabel(top_row_2, text="P. 300:").pack(side="left", padx=2)
+        self.price_300_entry = ctk.CTkEntry(top_row_2, placeholder_text="0.00", width=80) 
+        self.price_300_entry.pack(side="left", padx=5)
+
+        ctk.CTkLabel(top_row_2, text="P. 500:").pack(side="left", padx=2)
+        self.price_500_entry = ctk.CTkEntry(top_row_2, placeholder_text="0.00", width=80) 
+        self.price_500_entry.pack(side="left", padx=5)
+        
         # Botón renombrado a "Añadir Producto" (no suma, reemplaza/crea)
-        ctk.CTkButton(top_frame, text="Añadir Producto", command=self.add_update_item, width=140).pack(side="left", padx=10)
+        ctk.CTkButton(top_row_2, text="Añadir/Actualizar", command=self.add_update_item, width=140).pack(side="left", padx=10)
         
         # --- NUEVOS BINDINGS DEL TECLADO ---
         # BINDINGS: Permite agregar/actualizar presionando Enter en cualquier campo
         self.sku_entry.bind("<Return>", lambda e: self.add_update_item())
         self.name_entry.bind("<Return>", lambda e: self.add_update_item())
         self.price_entry.bind("<Return>", lambda e: self.add_update_item())
-        self.wholesale_price_entry.bind("<Return>", lambda e: self.add_update_item())
+        self.price_5_entry.bind("<Return>", lambda e: self.add_update_item())
+        self.price_12_entry.bind("<Return>", lambda e: self.add_update_item())
+        self.price_50_entry.bind("<Return>", lambda e: self.add_update_item())
+        self.price_100_entry.bind("<Return>", lambda e: self.add_update_item())
+        self.price_300_entry.bind("<Return>", lambda e: self.add_update_item())
+        self.price_500_entry.bind("<Return>", lambda e: self.add_update_item())
         self.quantity_entry.bind("<Return>", lambda e: self.add_update_item())
         # -----------------------------------
 
@@ -1159,15 +1222,27 @@ class InventoryManagerWindow(ctk.CTkToplevel):
         style.theme_use("default")
         style.configure("Treeview", background="#2b2b2b", foreground="white", fieldbackground="#2b2b2b", borderwidth=0)
         style.map('Treeview', background=[('selected', '#1f6aa5')])
-        
+  
         # CAMBIO: Columnas del Treeview
-        self.tree = ttk.Treeview(tree_frame, columns=("SKU", "Nombre", "Precio", "P. Mayorista", "Cantidad"), show="headings")
+        self.tree = ttk.Treeview(tree_frame, columns=("SKU", "Nombre", "P. Normal", "P. 5", "Cantidad"), show="headings")
         self.tree.heading("SKU", text="SKU")
         self.tree.heading("Nombre", text="Nombre")
-        self.tree.heading("Precio", text="Precio")
-        self.tree.heading("P. Mayorista", text="P. Mayorista") # Nueva columna
+        self.tree.heading("P. Normal", text="P. Normal")
+        self.tree.heading("P. 5", text="P. 5 (Mayorista)") # Columna de referencia del tier 5
         self.tree.heading("Cantidad", text="Cantidad")
+        
+        # Anchos de columna
+        self.tree.column("SKU", width=100, anchor='center')
+        self.tree.column("Nombre", width=250, anchor='w')
+        self.tree.column("P. Normal", width=100, anchor='e')
+        self.tree.column("P. 5", width=120, anchor='e')
+        self.tree.column("Cantidad", width=80, anchor='center')
+        
         self.tree.grid(row=0, column=0, sticky="nsew")
+        
+        tree_scrollbar_y = ctk.CTkScrollbar(tree_frame, command=self.tree.yview)
+        tree_scrollbar_y.grid(row=0, column=1, sticky="ns")
+        self.tree.configure(yscrollcommand=tree_scrollbar_y.set)
         
         bottom_frame = ctk.CTkFrame(self)
         bottom_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=10)
@@ -1185,33 +1260,55 @@ class InventoryManagerWindow(ctk.CTkToplevel):
         for i in self.tree.get_children(): self.tree.delete(i)
         inventory = read_db("inventory")
         for sku, data in sorted(inventory.items()): # Ordenado por SKU
-            # CAMBIO: Leer el precio mayorista
-            wholesale_price = data.get("wholesale_price", 0.0) 
-            self.tree.insert("", "end", iid=sku, values=(sku, data["name"], f"${data['price']:.2f}", f"${wholesale_price:.2f}", data["quantity"]))
+            # CAMBIO: Leer el precio de referencia para la columna P. 5
+            price_5 = data.get("wholesale_price", 0.0) 
+            self.tree.insert("", "end", iid=sku, values=(sku, data["name"], f"${data['price']:.2f}", f"${price_5:.2f}", data["quantity"]))
     
     def add_update_item(self):
         sku = self.sku_entry.get().strip().upper()
         name = self.name_entry.get().strip()
         price = self.price_entry.get().strip()
-        wholesale_price = self.wholesale_price_entry.get().strip() # NUEVO
+        
+        # INICIO MODIFICACIÓN MAYOREO: Leer todos los tiers
+        price_5 = self.price_5_entry.get().strip()
+        price_12 = self.price_12_entry.get().strip()
+        price_50 = self.price_50_entry.get().strip()
+        price_100 = self.price_100_entry.get().strip()
+        price_300 = self.price_300_entry.get().strip()
+        price_500 = self.price_500_entry.get().strip()
+        # FIN MODIFICACIÓN MAYOREO
+        
         quantity = self.quantity_entry.get().strip()
         
-        if not all([sku, name, price, wholesale_price, quantity]): 
-            messagebox.showerror("Error", "Todos los campos son obligatorios.", parent=self);
-            return
+        # MODIFICACIÓN: Incluir todos los precios en la validación
+        if not all([sku, name, price, price_5, price_12, price_50, price_100, price_300, price_500, quantity]): 
+            messagebox.showerror("Error", "Todos los campos (incluidos los 6 precios de mayoreo) son obligatorios.", parent=self); return
 
         try: 
             # --- VALIDACIÓN DE DATOS ---
             price_val = float(price)
             quant_val = int(quantity)
-            wholesale_price_val = float(wholesale_price)
             
-            if wholesale_price_val > price_val:
-                messagebox.showerror("Error", "El precio mayorista no puede ser mayor que el precio normal.", parent=self)
-                return
-            if price_val < 0 or wholesale_price_val < 0:
+            # INICIO MODIFICACIÓN MAYOREO: Validar todos los tiers
+            p5_val = float(price_5)
+            p12_val = float(price_12)
+            p50_val = float(price_50)
+            p100_val = float(price_100)
+            p300_val = float(price_300)
+            p500_val = float(price_500)
+            
+            # 1. Chequeo de precios negativos
+            all_prices = [price_val, p5_val, p12_val, p50_val, p100_val, p300_val, p500_val]
+            if any(p < 0 for p in all_prices):
                  messagebox.showerror("Error", "Los precios no pueden ser negativos.", parent=self)
                  return
+            
+            # 2. Chequeo de orden progresivo: P.Normal >= P.5 >= P.12... >= P.500
+            if not (price_val >= p5_val >= p12_val >= p50_val >= p100_val >= p300_val >= p500_val):
+                 messagebox.showerror("Error", "Los precios de mayoreo deben ser decrecientes (P.Normal >= P.5 >= P.12...) y nunca mayores al precio anterior.", parent=self)
+                 return
+            # FIN MODIFICACIÓN MAYOREO
+ 
             if quant_val < 0:
                 messagebox.showerror("Error", "La cantidad debe ser un número positivo.", parent=self)
                 return
@@ -1219,7 +1316,19 @@ class InventoryManagerWindow(ctk.CTkToplevel):
             # --- LÓGICA DE ACTUALIZACIÓN ---
             inventory = read_db("inventory")
             
-            item_data = {"name": name, "price": price_val, "quantity": quant_val, "wholesale_price": wholesale_price_val}
+            # INICIO MODIFICACIÓN MAYOREO: Guardar todos los tiers
+            item_data = {
+                "name": name, 
+                "price": price_val, 
+                "quantity": quant_val, 
+                "wholesale_price": p5_val, # Se mantiene para el tier 5
+                "price_12": p12_val,
+                "price_50": p50_val,
+                "price_100": p100_val,
+                "price_300": p300_val,
+                "price_500": p500_val
+            }
+            # FIN MODIFICACIÓN MAYOREO
             
             if sku in inventory:
                 inventory[sku] = item_data
@@ -1236,20 +1345,23 @@ class InventoryManagerWindow(ctk.CTkToplevel):
             self.sku_entry.delete(0, END)
             self.name_entry.delete(0, END)
             self.price_entry.delete(0, END)
-            self.wholesale_price_entry.delete(0, END)
+            self.price_5_entry.delete(0, END)
+            self.price_12_entry.delete(0, END)
+            self.price_50_entry.delete(0, END)
+            self.price_100_entry.delete(0, END)
+            self.price_300_entry.delete(0, END)
+            self.price_500_entry.delete(0, END)
             self.quantity_entry.delete(0, END)
             self.sku_entry.focus()
         
         except ValueError:
-            # Captura errores de conversión float/int
-            messagebox.showerror("Error", "Precio, Precio Mayorista y Cantidad deben ser números válidos.", parent=self)
+            messagebox.showerror("Error", "Precio, Precios Mayoristas y Cantidad deben ser números válidos.", parent=self)
             return
         
         except Exception as e:
-            # Captura cualquier otro error de ejecución (para diagnóstico)
             messagebox.showerror("Error Crítico de Inventario", f"Ocurrió un error inesperado al guardar: {e}", parent=self)
     
-    # NUEVO MÉTODO: Editar Precios
+    # NUEVO MÉTODO: Editar Precios (simplificado para solo P. Normal y P. 5)
     def edit_prices(self):
         selected_item = self.tree.focus() 
         if not selected_item:
@@ -1265,12 +1377,12 @@ class InventoryManagerWindow(ctk.CTkToplevel):
         item = inventory[sku]
         
         new_price_str = simpledialog.askstring("Editar Precios", f"Ingrese el nuevo Precio Normal para el producto SKU: {sku}\n(Actual: ${item['price']:.2f})", 
-                                               initialvalue=str(item['price']), parent=self)
+                                                         initialvalue=str(item['price']), parent=self)
         if new_price_str is None: return
 
         # Usar 0.0 como valor inicial si no existe (para compatibilidad)
         current_wholesale = item.get('wholesale_price', 0.0) 
-        new_wholesale_price_str = simpledialog.askstring("Editar Precios", f"Ingrese el nuevo Precio Mayorista para el producto SKU: {sku}\n(Actual: ${current_wholesale:.2f})", 
+        new_wholesale_price_str = simpledialog.askstring("Editar Precios", f"Ingrese el nuevo Precio Mayorista (5 unidades) para el producto SKU: {sku}\n(Actual: ${current_wholesale:.2f})", 
                                                          initialvalue=str(current_wholesale), parent=self)
         if new_wholesale_price_str is None: return
 
@@ -1290,11 +1402,13 @@ class InventoryManagerWindow(ctk.CTkToplevel):
             return
 
         item['price'] = new_price
-        item['wholesale_price'] = new_wholesale_price
+        item['wholesale_price'] = new_wholesale_price # Solo actualizamos el tier 5
+        
+        # Nota: Los tiers P.12, P.50, etc., deben actualizarse usando el formulario principal arriba.
         
         write_db("inventory", inventory)
         self.refresh_inventory_list()
-        messagebox.showinfo("Éxito", f"Precios de {sku} actualizados.", parent=self)
+        messagebox.showinfo("Éxito", f"Precios Normal y Mayorista (5 uds.) de {sku} actualizados.", parent=self)
     
     def adjust_stock(self):
         selected_item = self.tree.focus() 
@@ -1332,7 +1446,6 @@ class InventoryManagerWindow(ctk.CTkToplevel):
                 self.refresh_inventory_list()
                 messagebox.showinfo("Éxito", f"Stock de {sku} ajustado a {new_quantity}.", parent=self)
             else:
-          
                 messagebox.showerror("Error", "El producto no se encontró en la base de datos.", parent=self)
 
     # CORRECCIÓN DE ESTABILIDAD: Usa el item ID como SKU
@@ -1374,9 +1487,9 @@ class InventoryManagerWindow(ctk.CTkToplevel):
         
         if messagebox.askyesno("Confirmar Eliminación", f"¿Seguro que quieres eliminar al producto '{product_name}'?", parent=self):
             inventory = read_db("inventory")
+            
             if sku in inventory:
                 del inventory[sku]
-  
                 write_db("inventory", inventory)
                 self.refresh_inventory_list()
                 messagebox.showinfo("Éxito", "Producto eliminado correctamente.", parent=self)
@@ -1386,11 +1499,20 @@ class InventoryManagerWindow(ctk.CTkToplevel):
     def save_pdf(self):
  
         inventory = read_db("inventory")
-        content = f"{'SKU':<15}{'Nombre':<35}{'Precio':>10}{'P. Mayorista':>15}{'Cantidad':>10}\n"
-        content += "-" * 85 + "\n"
+        # Columnas ajustadas para el PDF
+        content = f"{'SKU':<15}{'Nombre':<35}{'P. Normal':>12}{'P. 5':>8}{'P. 12':>8}{'P. 50':>8}{'P. 100':>8}{'P. 300':>8}{'P. 500':>8}{'Cant.':>8}\n"
+        content += "-" * 125 + "\n"
         for sku, data in sorted(inventory.items()):
-            wholesale_price = data.get("wholesale_price", 0.0)
-            content += f"{sku:<15}{data['name']:<35}${data['price']:>9.2f}${wholesale_price:>14.2f}{data['quantity']:>10}\n"
+            # Obtener todos los precios de forma segura
+            price_5 = data.get("wholesale_price", 0.0)
+            price_12 = data.get("price_12", 0.0)
+            price_50 = data.get("price_50", 0.0)
+            price_100 = data.get("price_100", 0.0)
+            price_300 = data.get("price_300", 0.0)
+            price_500 = data.get("price_500", 0.0)
+            
+            content += f"{sku:<15}{data['name']:<35}${data['price']:>11.2f}${price_5:>7.2f}${price_12:>7.2f}${price_50:>7.2f}${price_100:>7.2f}${price_300:>7.2f}${price_500:>7.2f}{data['quantity']:>8}\n"
+            
         os.makedirs("reportes", exist_ok=True)
         filename = f"reportes/inventario_{datetime.datetime.now().strftime('%Y%m%d')}.pdf"
         create_pdf_with_logo("Boutique El Impulso", "Reporte de Inventario", content, filename, align='L')
@@ -1415,6 +1537,7 @@ class SalesHistoryWindow(ctk.CTkToplevel):
         filter_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=10)
         filter_frame.grid_columnconfigure((1, 3), weight=1)
 
+     
         ctk.CTkLabel(filter_frame, text="De:").grid(row=0, column=0, padx=5, pady=5)
         self.date_start_entry = ctk.CTkEntry(filter_frame, placeholder_text="YYYY-MM-DD")
         self.date_start_entry.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
@@ -1424,6 +1547,7 @@ class SalesHistoryWindow(ctk.CTkToplevel):
         self.date_end_entry.grid(row=0, column=3, padx=5, pady=5, sticky="ew")
         
         # Botones de Filtrado
+        
         ctk.CTkButton(filter_frame, text="Buscar", command=self.filter_sales).grid(row=0, column=4, padx=5, pady=5)
         ctk.CTkButton(filter_frame, text="Ventas de Hoy", command=lambda: self.load_sales('today')).grid(row=0, column=5, padx=5, pady=5)
         ctk.CTkButton(filter_frame, text="Solo Ventas", command=lambda: self.load_sales('all', status_filter='COMPLETADA')).grid(row=1, column=4, padx=5, pady=5)
@@ -1444,16 +1568,17 @@ class SalesHistoryWindow(ctk.CTkToplevel):
         style.configure("Treeview", background="#2b2b2b", foreground="white", fieldbackground="#2b2b2b", borderwidth=0)
         style.map('Treeview', background=[('selected', '#1f6aa5')])
         
+     
         columns = ("Ticket", "Fecha", "Usuario", "Método Pago", "Total", "Estado")
         self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
         
         for col in columns:
             self.tree.heading(col, text=col)
-          
             self.tree.column(col, width=100, anchor='center')
 
         self.tree.column("Fecha", width=180, anchor='center')
         self.tree.column("Total", width=120, anchor='e')
+ 
         self.tree.column("Ticket", width=80, anchor='center')
         self.tree.column("Usuario", width=120, anchor='center')
 
@@ -1477,18 +1602,19 @@ class SalesHistoryWindow(ctk.CTkToplevel):
         today = datetime.datetime.now().date()
 
         if filter_type == 'today':
-        
+  
             filtered_sales = [s for s in sales if datetime.datetime.fromisoformat(s['timestamp']).date() == today]
         
         elif start_date and end_date:
             try:
                 start_dt = datetime.datetime.strptime(start_date, '%Y-%m-%d').date()
                 # Sumar un día a la fecha final para incluir ventas de ese día
-       
+ 
                 end_dt = datetime.datetime.strptime(end_date, '%Y-%m-%d').date() + datetime.timedelta(days=1)
                 
                 filtered_sales = [
                     s for s in sales 
+              
                     if start_dt <= datetime.datetime.fromisoformat(s['timestamp']).date() < end_dt
   
                 ]
@@ -1502,6 +1628,7 @@ class SalesHistoryWindow(ctk.CTkToplevel):
              filtered_sales = [s for s in filtered_sales if s.get("status", "COMPLETADA") == status_filter]
 
 
+      
         if not filtered_sales:
             self.tree.insert("", "end", values=("", "No hay ventas en este rango.", "", "", "", ""), tags=('no_sales',))
             self.tree.tag_configure('no_sales', foreground='gray')
@@ -1516,6 +1643,7 @@ class SalesHistoryWindow(ctk.CTkToplevel):
             values = (
                 sale['ticket_number'],
                 sale_date,
+      
                 sale['user'],
                 sale['payment_method'],
                 f"${sale['total']:.2f}",
@@ -1523,6 +1651,7 @@ class SalesHistoryWindow(ctk.CTkToplevel):
             )
             tag = 'returned' if sale_status == 'DEVUELTA' else 'completed'
   
+        
             # Usar el número de ticket como iid para facilitar la búsqueda en show_sale_details
             self.tree.insert("", "end", iid=sale['ticket_number'], values=values, tags=(tag,))
             
@@ -1545,6 +1674,7 @@ class SalesHistoryWindow(ctk.CTkToplevel):
         
         if sale_record:
             # El master de SalesHistoryWindow es MenuWindow, cuyo master es MainScreen
+        
             main_screen = self.master.master 
             SaleDetailWindow(self, sale_record, main_screen)
             
@@ -1569,6 +1699,7 @@ class SaleDetailWindow(ctk.CTkToplevel):
         self.transient(master)
         self.grab_set()
 
+      
         # Obtener el texto formateado del ticket
         ticket_text = main_screen.generate_ticket_text(sale_record)
         
@@ -1603,11 +1734,13 @@ class CashCountWindow(ctk.CTkToplevel):
       
         sales = read_db("sales")
         today = datetime.date.today()
+     
         daily_sales = [s for s in sales if datetime.datetime.fromisoformat(s['timestamp']).date() == today and s.get("status") == "COMPLETADA"]
         daily_returns = [s for s in sales if datetime.datetime.fromisoformat(s['timestamp']).date() == today and s.get("status") == "DEVUELTA"]
         total_cash = sum(s['total'] for s in daily_sales if s['payment_method'] == 'Efectivo')
         total_card = sum(s['total'] for s in daily_sales if s['payment_method'] == 'Tarjeta Bancaria')
         total_transfer = sum(s['total'] for s in daily_sales if s['payment_method'] == 'Transferencia')
+      
         total_day_gross = sum(s['total'] for s in daily_sales)
         total_returned = sum(r['total'] for r in daily_returns)
         net_total = total_day_gross - total_returned
@@ -1615,6 +1748,7 @@ class CashCountWindow(ctk.CTkToplevel):
             f"Ventas en Efectivo:    ${total_cash:10.2f}\n"
             f"Ventas con Tarjeta:    ${total_card:10.2f}\n"
     
+            
             f"Ventas con Transferencia:${total_transfer:10.2f}\n"
             f"----------------------------------\n"
             f"Total Ventas Bruto:    ${total_day_gross:10.2f}\n\n"
@@ -1639,3 +1773,6 @@ if __name__ == "__main__":
     setup_database()
     app = POSApp()
     app.mainloop()
+
+        
+
