@@ -1,0 +1,1740 @@
+# -*- coding: utf-8 -*-
+"""
+Aplicación de Punto de Venta con PyQt6 y estructura de una sola ventana.
+Versión corregida para resolver NameError y mejorar la visibilidad del texto.
+"""
+import sys
+import json
+import os
+import datetime
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
+
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QLabel, QLineEdit, QStackedWidget, QFrame, QTableWidget,
+    QTableWidgetItem, QHeaderView, QMessageBox, QDialog, QFormLayout,
+    QDialogButtonBox, QDateEdit, QComboBox, QInputDialog, QTextEdit,
+    QGridLayout, QCompleter, QCheckBox
+)
+from PyQt6.QtCore import pyqtSignal, Qt, QDate, QTimer
+from PyQt6.QtGui import QDoubleValidator, QPixmap, QPalette, QBrush
+
+from fpdf import FPDF
+
+# --- Función de Ayuda para Rutas de Archivos ---
+def resource_path(relative_path):
+    """ Obtiene la ruta absoluta al recurso, funciona para desarrollo y para PyInstaller """
+    try:
+        # PyInstaller crea una carpeta temporal y guarda la ruta en _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+
+    return os.path.join(base_path, relative_path)
+
+# --- Lógica de Base de Datos (Adaptada de tu script original) ---
+
+DB_FILES = {
+    "users": "users.json",
+    "inventory": "inventory.json",
+    "sales": "sales.json",
+    "config": "config.json",
+    "email": "email_config.json"
+}
+
+def setup_database():
+    """Inicializa los archivos JSON si no existen."""
+    try:
+        for key, filename in DB_FILES.items():
+            path = resource_path(filename)
+            if not os.path.exists(path):
+                # Ensure directory exists
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                
+                if key == "users":
+                    data = {
+                        "E001": {
+                            "password": "admin", "full_name": "Administrador Principal",
+                            "permissions": { "can_sell": True, "can_manage_inventory": True, "can_view_history": True, "can_process_returns": True, "can_manage_users": True, "can_view_settings": True, "can_do_cash_count": True }
+                        },
+                        "E002": {
+                            "password": "123", "full_name": "Vendedor de Prueba",
+                            "permissions": { "can_sell": True, "can_manage_inventory": False, "can_view_history": False, "can_process_returns": False, "can_manage_users": False, "can_view_settings": False, "can_do_cash_count": True }
+                        }
+                    }
+                elif key == "inventory":
+                    data = {
+                        "SKU001": {"name": "Camisa de Lino Blanca", "price": 450.0, "quantity": 20, "price_5": 400.0, "price_12": 380.0, "price_50": 350.0, "price_100": 300.0, "price_300": 250.0, "price_500": 200.0},
+                        "SKU002": {"name": "Pantalón de Mezclilla Azul", "price": 750.0, "quantity": 15, "price_5": 700.0, "price_12": 680.0, "price_50": 650.0, "price_100": 600.0, "price_300": 550.0, "price_500": 500.0}
+                    }
+                elif key == "sales":
+                    data = []
+                elif key == "config":
+                    data = {"last_ticket_number": 0, "appearance_mode": "Oscuro", "color_theme": "Azul"}
+                elif key == "email":
+                    data = {"smtp_server": "smtp.gmail.com", "smtp_port": 587, "sender_email": "tu_correo@gmail.com", "sender_password": "tu_contraseña_de_aplicacion"}
+                else:
+                    data = {}
+                
+                with open(path, "w", encoding='utf-8') as f:
+                    json.dump(data, f, indent=4)
+    except Exception as e:
+        print(f"Error setting up database: {e}")
+
+
+def read_db(file_key):
+    file_path = resource_path(DB_FILES[file_key])
+    try:
+        with open(file_path, "r", encoding='utf-8') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        print(f"File '{file_path}' not found or corrupted. Attempting to recreate.")
+        setup_database()
+        try:
+            with open(file_path, "r", encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"CRITICAL: Failed to read or create database file '{file_path}'. Error: {e}")
+            QMessageBox.critical(None, "Error Crítico de Base de Datos", f"No se pudo leer ni crear el archivo de base de datos necesario: {os.path.basename(file_path)}\n\nLa aplicación no puede continuar.\n\nError: {e}")
+            sys.exit(1)
+
+def write_db(file_key, data):
+    with open(resource_path(DB_FILES[file_key]), "w", encoding='utf-8') as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+
+def get_next_employee_id():
+    users = read_db("users")
+    max_id_num = 0
+    for username in users.keys():
+        if username.startswith("E") and username[1:].isdigit():
+            num = int(username[1:])
+            if num > max_id_num: max_id_num = num
+    return f"E{max_id_num + 1:03d}"
+
+# --- Funciones de Tickets y Correo ---
+
+def generate_ticket_text(sale_record):
+    customer_name = sale_record.get("customer_name", "Público General")
+    if not customer_name.strip():
+        customer_name = "Público General"
+
+    try:
+        date_str = datetime.datetime.fromisoformat(sale_record.get('timestamp', '')).strftime('%Y-%m-%d %H:%M:%S')
+    except (ValueError, TypeError):
+        date_str = "Fecha inválida"
+
+    header = (
+        f"BOUTIQUE EL IMPULSO\n"
+        f"----------------------------------------\n"
+        f"Ticket N°: {sale_record.get('ticket_number', 'N/A')}\n"
+        f"Fecha: {date_str}\n"
+        f"Cliente: {customer_name}\n"
+        f"Atendido por: {sale_record.get('user', 'N/A')}\n"
+        f"----------------------------------------\n"
+    )
+    items_text = ""
+    for item in sale_record.get('items', []):
+        line = f"{item.get('quantity', 0)}x {item.get('name', 'Producto Desconocido')}"
+        total_line = f"${item.get('price', 0.0) * item.get('quantity', 0):.2f}"
+        items_text += f"{line:<30}{total_line:>10}\n"
+            
+    footer = (
+        f"----------------------------------------\n"
+        f"Metodo de Pago: {sale_record.get('payment_method', 'N/A')}\n"
+        f"TOTAL: ${sale_record.get('total', 0.0):.2f}\n\n"
+        f"¡Gracias por su compra!\n\n"
+        f"Este ticket de compra NO ES UN\n"
+        f"COMPROBANTE FISCAL.\n"
+        f"Para devoluciones solamente se cuenta\n"
+        f"con 7 días naturales a partir de la\n"
+        f"fecha de compra.\n"
+    )
+    return header + items_text + footer
+
+def generate_ticket_pdf(sale_record, filename="ticket.pdf"):
+    pdf = FPDF()
+    pdf.add_page()
+    
+    logo_path = resource_path("logo.jpg")
+    if os.path.exists(logo_path):
+        page_width = pdf.w - 2 * pdf.l_margin
+        pdf.image(logo_path, x=(page_width / 2) + pdf.l_margin - 15, y=8, w=30)
+        pdf.ln(30)
+
+    pdf.set_font("Courier", size=10)
+    ticket_text = generate_ticket_text(sale_record)
+    ticket_text_encoded = ticket_text.encode('latin-1', 'replace').decode('latin-1')
+    pdf.multi_cell(0, 5, txt=ticket_text_encoded, align='C')
+    pdf.output(filename)
+
+def send_email_with_attachment(recipient_email, sale_record):
+    try:
+        email_config = read_db("email")
+        if email_config["sender_email"] == "tu_correo@gmail.com":
+            QMessageBox.critical(None, "Error de Configuración", "Debe configurar 'email_config.json' antes de enviar correos.")
+            return
+
+        pdf_filename = resource_path(f"temp_ticket_{sale_record['ticket_number']}.pdf")
+        generate_ticket_pdf(sale_record, pdf_filename)
+
+        msg = MIMEMultipart()
+        msg['From'] = f"Boutique El Impulso <{email_config['sender_email']}>"
+        msg['To'] = recipient_email
+        msg['Subject'] = f"Su Ticket de Compra - Boutique El Impulso (Ticket #{sale_record['ticket_number']})"
+        body = "¡Hola!\n\nAdjunto encontrará su ticket de compra.\n\nGracias por su preferencia."
+        msg.attach(MIMEText(body, 'plain'))
+
+        with open(pdf_filename, "rb") as attachment:
+            part = MIMEBase("application", "octet-stream")
+            part.set_payload(attachment.read())
+        encoders.encode_base64(part)
+        part.add_header("Content-Disposition", f"attachment; filename=ticket_{sale_record['ticket_number']}.pdf")
+        msg.attach(part)
+
+        server = smtplib.SMTP(email_config['smtp_server'], email_config['smtp_port'])
+        server.starttls()
+        server.login(email_config['sender_email'], email_config['sender_password'])
+        server.send_message(msg)
+        server.quit()
+        
+        QMessageBox.information(None, "Éxito", f"Ticket enviado correctamente a {recipient_email}.")
+
+    except Exception as e:
+        QMessageBox.critical(None, "Error de Envío", f"No se pudo enviar el correo. Error: {e}")
+    finally:
+        if 'pdf_filename' in locals() and os.path.exists(pdf_filename):
+            os.remove(pdf_filename)
+
+def print_thermal_ticket(sale_record):
+    ticket_text = generate_ticket_text(sale_record)
+    try:
+        # from escpos.printer import Usb
+        # p = Usb(idVendor=0xAAAA, idProduct=0xBBBB, profile="TM-T88V")
+        # p.text(ticket_text)
+        # p.cut()
+        QMessageBox.information(None, "Impresión Simulada", 
+            "La función de impresión real está comentada.\n"
+            "Abra el archivo .py, descomente las líneas en la función 'print_thermal_ticket' "
+            "y ajuste los valores de idVendor y idProduct para su impresora.\n\n"
+            f"DATOS A IMPRIMIR:\n{ticket_text}")
+
+    except Exception as e:
+        QMessageBox.critical(None, "Error de Impresión", 
+            f"No se pudo conectar con la impresora térmica. Asegúrese de que esté conectada, "
+            f"los drivers instalados y los valores de idVendor/idProduct sean correctos.\n\nError: {e}")
+
+def open_cash_drawer():
+    """
+    Envía el comando para abrir el cajón de dinero a través de la impresora.
+    """
+    try:
+        # --- CONFIGURACIÓN DE LA IMPRESORA ---
+        # Descomenta las siguientes líneas y ajusta los parámetros para tu impresora.
+        # from escpos.printer import Usb
+        # p = Usb(idVendor=0xAAAA, idProduct=0xBBBB)
+        # p.cashdraw(2) # Envía el pulso al pin 2
+        # p.cashdraw(5) # Envía el pulso al pin 5
+        # --- FIN DE CONFIGURACIÓN ---
+
+        QMessageBox.information(None, "Simulación", "Comando para abrir el cajón de dinero enviado.")
+    except Exception as e:
+        QMessageBox.critical(None, "Error de Cajón", 
+            f"No se pudo enviar el comando al cajón de dinero.\n"
+            f"Asegúrese de que la impresora esté conectada y configurada.\nError: {e}")
+
+
+def generate_cash_count_pdf(summary_text, user_id):
+    folder = resource_path("cortes")
+    os.makedirs(folder, exist_ok=True)
+    filename = os.path.join(folder, f"corte_{datetime.date.today()}.pdf")
+    
+    pdf = FPDF()
+    pdf.add_page()
+
+    logo_path = resource_path("logo.jpg")
+    if os.path.exists(logo_path):
+        page_width = pdf.w - 2 * pdf.l_margin
+        pdf.image(logo_path, x=(page_width / 2) + pdf.l_margin - 15, y=8, w=30)
+        pdf.ln(30)
+
+    pdf.set_font("Courier", 'B', 16)
+    pdf.cell(0, 10, "Corte de Caja", 0, 1, 'C')
+    pdf.ln(5)
+    
+    header = (
+        f"Fecha: {datetime.date.today()}\n"
+        f"Hora: {datetime.datetime.now().strftime('%H:%M:%S')}\n"
+        f"Usuario: {user_id}\n"
+    )
+    pdf.set_font("Courier", size=10)
+    pdf.multi_cell(0, 5, txt=header, align='C')
+    pdf.ln(5)
+    pdf.multi_cell(0, 5, txt=summary_text.encode('latin-1', 'replace').decode('latin-1'), align='C')
+    
+    pdf.output(filename)
+    return filename
+
+# --- Diálogos Personalizados ---
+class ProductDialog(QDialog):
+    def __init__(self, parent=None, product_data=None):
+        super().__init__(parent)
+        self.setWindowTitle("Detalles del Producto")
+        self.setMinimumWidth(400)
+
+        self.layout = QFormLayout(self)
+        self.sku_input = QLineEdit(self)
+        self.name_input = QLineEdit(self)
+        self.price_input = QLineEdit("0.00")
+        self.quantity_input = QLineEdit("0")
+        
+        # Grid for tiered prices
+        price_grid = QGridLayout()
+        self.price_5_input = QLineEdit("0.00")
+        self.price_12_input = QLineEdit("0.00")
+        self.price_50_input = QLineEdit("0.00")
+        self.price_100_input = QLineEdit("0.00")
+        self.price_300_input = QLineEdit("0.00")
+        self.price_500_input = QLineEdit("0.00")
+
+        price_grid.addWidget(QLabel("P. 5:"), 0, 0)
+        price_grid.addWidget(self.price_5_input, 0, 1)
+        price_grid.addWidget(QLabel("P. 12:"), 0, 2)
+        price_grid.addWidget(self.price_12_input, 0, 3)
+        price_grid.addWidget(QLabel("P. 50:"), 1, 0)
+        price_grid.addWidget(self.price_50_input, 1, 1)
+        price_grid.addWidget(QLabel("P. 100:"), 1, 2)
+        price_grid.addWidget(self.price_100_input, 1, 3)
+        price_grid.addWidget(QLabel("P. 300:"), 2, 0)
+        price_grid.addWidget(self.price_300_input, 2, 1)
+        price_grid.addWidget(QLabel("P. 500:"), 2, 2)
+        price_grid.addWidget(self.price_500_input, 2, 3)
+
+        self.layout.addRow("SKU:", self.sku_input)
+        self.layout.addRow("Nombre:", self.name_input)
+        self.layout.addRow("Precio Normal:", self.price_input)
+        self.layout.addRow("Cantidad:", self.quantity_input)
+        self.layout.addRow(QLabel("--- Precios de Mayoreo ---"))
+        self.layout.addRow(price_grid)
+
+        self.button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        self.layout.addWidget(self.button_box)
+
+        if product_data:
+            self.sku_input.setText(product_data.get("sku", ""))
+            self.sku_input.setReadOnly(True)
+            self.name_input.setText(product_data.get("name", ""))
+            self.price_input.setText(str(product_data.get("price", "0.0")))
+            self.quantity_input.setText(str(product_data.get("quantity", "0")))
+            self.price_5_input.setText(str(product_data.get("price_5", "0.0")))
+            self.price_12_input.setText(str(product_data.get("price_12", "0.0")))
+            self.price_50_input.setText(str(product_data.get("price_50", "0.0")))
+            self.price_100_input.setText(str(product_data.get("price_100", "0.0")))
+            self.price_300_input.setText(str(product_data.get("price_300", "0.0")))
+            self.price_500_input.setText(str(product_data.get("price_500", "0.0")))
+
+    def get_data(self):
+        return {
+            "sku": self.sku_input.text().upper(),
+            "name": self.name_input.text(),
+            "price": self.price_input.text(),
+            "quantity": self.quantity_input.text(),
+            "price_5": self.price_5_input.text(),
+            "price_12": self.price_12_input.text(),
+            "price_50": self.price_50_input.text(),
+            "price_100": self.price_100_input.text(),
+            "price_300": self.price_300_input.text(),
+            "price_500": self.price_500_input.text(),
+        }
+
+class UserPermissionsDialog(QDialog):
+    def __init__(self, parent=None, user_data=None, is_new_user=False):
+        super().__init__(parent)
+        self.setWindowTitle("Detalles y Permisos de Usuario")
+        self.setMinimumWidth(450)
+
+        self.layout = QFormLayout(self)
+        self.full_name_input = QLineEdit()
+        self.password_input = QLineEdit()
+        self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
+
+        self.layout.addRow("Nombre Completo:", self.full_name_input)
+        self.layout.addRow("Contraseña:", self.password_input)
+
+        if is_new_user:
+            self.template_combo = QComboBox()
+            self.template_combo.addItems(["Vendedor", "Administrador"])
+            self.template_combo.currentTextChanged.connect(self.apply_template)
+            self.layout.addRow("Plantilla de Permisos:", self.template_combo)
+
+        permissions_group = QFrame(self)
+        permissions_layout = QGridLayout(permissions_group)
+        self.permission_checkboxes = {}
+        
+        permissions_map = [
+            ("can_sell", "Realizar Ventas"), ("can_manage_inventory", "Admin. Inventario"),
+            ("can_view_history", "Ver Historial"), ("can_process_returns", "Procesar Devoluciones"),
+            ("can_manage_users", "Gestionar Usuarios"), ("can_view_settings", "Ver Ajustes"),
+            ("can_do_cash_count", "Realizar Corte de Caja")
+        ]
+        
+        row, col = 0, 0
+        for key, text in permissions_map:
+            checkbox = QCheckBox(text)
+            self.permission_checkboxes[key] = checkbox
+            permissions_layout.addWidget(checkbox, row, col)
+            col += 1
+            if col > 1:
+                col = 0
+                row += 1
+        
+        self.layout.addRow(QLabel("--- Permisos ---"))
+        self.layout.addRow(permissions_group)
+
+        self.button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        self.layout.addWidget(self.button_box)
+
+        if user_data:
+            self.full_name_input.setText(user_data.get("full_name", ""))
+            self.password_input.setPlaceholderText("Dejar en blanco para no cambiar")
+            permissions = user_data.get("permissions", {})
+            for key, checkbox in self.permission_checkboxes.items():
+                checkbox.setChecked(permissions.get(key, False))
+        else: # Nuevo usuario
+            self.apply_template("Vendedor")
+            
+    def apply_template(self, template_name):
+        if template_name == "Vendedor":
+            perms = {"can_sell": True, "can_manage_inventory": False, "can_view_history": False, "can_process_returns": False, "can_manage_users": False, "can_view_settings": False, "can_do_cash_count": True}
+        else: # Administrador
+            perms = {"can_sell": True, "can_manage_inventory": True, "can_view_history": True, "can_process_returns": True, "can_manage_users": True, "can_view_settings": True, "can_do_cash_count": True}
+        
+        for key, checkbox in self.permission_checkboxes.items():
+            checkbox.setChecked(perms.get(key, False))
+
+    def get_data(self):
+        permissions = {key: checkbox.isChecked() for key, checkbox in self.permission_checkboxes.items()}
+        return {
+            "full_name": self.full_name_input.text(),
+            "password": self.password_input.text(),
+            "permissions": permissions
+        }
+
+class PaymentDialog(QDialog):
+    def __init__(self, total, parent=None):
+        super().__init__(parent)
+        self.total = total
+        self.setWindowTitle("Procesar Pago")
+        self.setMinimumWidth(350)
+        self.layout = QVBoxLayout(self)
+        total_label = QLabel(f"Total a Pagar: ${self.total:.2f}")
+        total_label.setStyleSheet("font-size: 20px; font-weight: bold;")
+        self.layout.addWidget(total_label)
+        self.payment_method_combo = QComboBox(self)
+        self.payment_method_combo.addItems(["Efectivo", "Tarjeta Bancaria", "Transferencia Bancaria"])
+        self.layout.addWidget(self.payment_method_combo)
+        self.stacked_widget = QStackedWidget(self)
+        self.setup_cash_view()
+        self.setup_folio_view()
+        self.layout.addWidget(self.stacked_widget)
+        self.button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.layout.addWidget(self.button_box)
+        self.payment_method_combo.currentIndexChanged.connect(self.stacked_widget.setCurrentIndex)
+        self.button_box.accepted.connect(self.validate_and_accept)
+        self.button_box.rejected.connect(self.reject)
+    def setup_cash_view(self):
+        cash_widget = QWidget()
+        cash_layout = QFormLayout(cash_widget)
+        self.amount_received_input = QLineEdit(self)
+        self.amount_received_input.setValidator(QDoubleValidator(0.0, 1000000.0, 2))
+        self.change_label = QLabel("$0.00")
+        cash_layout.addRow("Monto Recibido:", self.amount_received_input)
+        cash_layout.addRow("Cambio a devolver:", self.change_label)
+        self.amount_received_input.textChanged.connect(self.calculate_change)
+        self.amount_received_input.returnPressed.connect(self.validate_and_accept)
+        self.stacked_widget.addWidget(cash_widget)
+    def setup_folio_view(self):
+        folio_widget = QWidget()
+        folio_layout = QFormLayout(folio_widget)
+        self.folio_input = QLineEdit(self)
+        folio_layout.addRow("Número de Folio:", self.folio_input)
+        self.folio_input.returnPressed.connect(self.validate_and_accept)
+        self.stacked_widget.addWidget(folio_widget)
+        self.stacked_widget.addWidget(folio_widget) 
+    def calculate_change(self):
+        try:
+            received = float(self.amount_received_input.text())
+            change = received - self.total
+            self.change_label.setText(f"${change:.2f}")
+        except ValueError:
+            self.change_label.setText("$0.00")
+    def validate_and_accept(self):
+        method = self.payment_method_combo.currentText()
+        if method == "Efectivo":
+            try:
+                received = float(self.amount_received_input.text())
+                if received < self.total:
+                    QMessageBox.warning(self, "Monto insuficiente", "El monto recibido no puede ser menor que el total.")
+                    return
+            except ValueError:
+                QMessageBox.warning(self, "Monto inválido", "Por favor, ingrese un monto recibido válido.")
+                return
+        else:
+            if not self.folio_input.text().strip():
+                QMessageBox.warning(self, "Folio requerido", "Por favor, ingrese el número de folio de la transacción.")
+                return
+        self.accept()
+    def get_data(self):
+        method = self.payment_method_combo.currentText()
+        details = {}
+        if method == "Efectivo":
+            try:
+                received = float(self.amount_received_input.text())
+            except ValueError:
+                received = 0.0
+            details = {"received": received, "change": received - self.total}
+        else:
+            details = {"folio": self.folio_input.text().strip()}
+        return {"method": method, "details": details}
+
+class PostSaleDialog(QDialog):
+    def __init__(self, sale_record, parent=None):
+        super().__init__(parent)
+        self.sale_record = sale_record
+        self.setWindowTitle("Acciones de Venta")
+        
+        layout = QVBoxLayout(self)
+        label = QLabel(f"Venta #{sale_record['ticket_number']} finalizada con éxito.")
+        label.setStyleSheet("font-size: 16px; margin-bottom: 10px;")
+        
+        print_button = QPushButton("Imprimir Ticket Térmico")
+        email_button = QPushButton("Enviar por Correo")
+        close_button = QPushButton("Finalizar")
+        
+        layout.addWidget(label)
+        layout.addWidget(print_button)
+        layout.addWidget(email_button)
+        layout.addWidget(close_button)
+        
+        print_button.clicked.connect(self.print_ticket)
+        email_button.clicked.connect(self.email_ticket)
+        close_button.clicked.connect(self.accept)
+
+    def print_ticket(self):
+        print_thermal_ticket(self.sale_record)
+        self.accept()
+
+    def email_ticket(self):
+        email, ok = QInputDialog.getText(self, "Enviar Ticket", "Correo electrónico del cliente:")
+        if ok and email:
+            send_email_with_attachment(email, self.sale_record)
+            self.accept()
+
+# --- Vistas o Pantallas de la Aplicación ---
+# El orden de las clases es importante para evitar NameError
+# Definimos todas las pantallas antes de MainScreen y MainWindow
+
+class LoginScreen(QWidget):
+    login_successful = pyqtSignal(dict, str)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.init_ui()
+
+    def init_ui(self):
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        left_panel = QFrame(self)
+        left_panel.setObjectName("leftPanel")
+        left_panel.setMaximumWidth(350)
+        
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(40, 40, 40, 40)
+
+        logo_label = QLabel(self)
+        logo_path = resource_path("logo.jpg")
+        if os.path.exists(logo_path):
+            pixmap = QPixmap(logo_path)
+            logo_label.setPixmap(pixmap.scaled(120, 120, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        else:
+            logo_label.setText("BOUTIQUE EL IMPULSO")
+            logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            logo_label.setStyleSheet("font-size: 18px; font-weight: bold;")
+        
+        user_label = QLabel("Usuario (E### o admin):")
+        user_label.setObjectName("loginFormLabel")
+        self.username_input = QLineEdit(self)
+        self.username_input.setPlaceholderText("E001 / admin")
+        
+        pass_label = QLabel("Contraseña:")
+        pass_label.setObjectName("loginFormLabel")
+        self.password_input = QLineEdit(self)
+        self.password_input.setPlaceholderText("Contraseña")
+        self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
+
+        self.login_button = QPushButton("INICIAR SESIÓN")
+        self.login_button.setObjectName("loginButton")
+        self.recover_button = QPushButton("RECUPERAR CONTRASEÑA")
+        self.recover_button.setObjectName("recoverButton")
+        
+        left_layout.addWidget(logo_label, alignment=Qt.AlignmentFlag.AlignCenter)
+        left_layout.addSpacing(30)
+        left_layout.addWidget(user_label)
+        left_layout.addWidget(self.username_input)
+        left_layout.addSpacing(10)
+        left_layout.addWidget(pass_label)
+        left_layout.addWidget(self.password_input)
+        left_layout.addSpacing(20)
+        left_layout.addWidget(self.login_button)
+        left_layout.addWidget(self.recover_button)
+        left_layout.addStretch()
+
+        right_panel = QFrame(self)
+        right_panel.setObjectName("rightPanel")
+        
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        greeting_label = QLabel(f"¡{self.get_dynamic_greeting()}!\nBienvenido(a)", self)
+        greeting_label.setObjectName("greetingLabel")
+        greeting_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        footer_label = QLabel("SISTEMA PUNTO DE VENTA BOUTIQUE EL IMPULSO", self)
+        footer_label.setObjectName("footerLabel")
+
+        right_layout.addStretch(1)
+        right_layout.addWidget(greeting_label)
+        right_layout.addStretch(1)
+        right_layout.addWidget(footer_label, alignment=Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignBottom)
+
+        main_layout.addWidget(left_panel)
+        main_layout.addWidget(right_panel, 1)
+
+        self.username_input.returnPressed.connect(self.password_input.setFocus)
+        self.password_input.returnPressed.connect(self.check_login)
+        self.login_button.clicked.connect(self.check_login)
+
+        bg_path = resource_path("background.png")
+        if os.path.exists(bg_path):
+            bg_path_stylesheet = bg_path.replace("\\", "/") 
+            right_panel.setStyleSheet(f"QFrame#rightPanel {{ border-image: url('{bg_path_stylesheet}') 0 0 0 0 stretch stretch; border: none; }}")
+
+    def get_dynamic_greeting(self):
+        h = datetime.datetime.now().hour
+        if 5 <= h < 12: return "Buen día"
+        elif 12 <= h < 19: return "Buena tarde"
+        else: return "Buena noche"
+
+    def check_login(self):
+        username = self.username_input.text().upper().strip()
+        password = self.password_input.text()
+        users = read_db("users")
+        
+        user_id_to_check = "E001" if username == "ADMIN" else username
+
+        if user_id_to_check in users and users[user_id_to_check]["password"] == password:
+            permissions = users[user_id_to_check].get("permissions", {})
+            self.login_successful.emit(permissions, user_id_to_check)
+        else:
+             QMessageBox.warning(self, "Error de Autenticación", "Usuario o contraseña incorrectos.")
+
+
+# ... (El resto de las clases de pantallas vienen aquí, antes de MainWindow)
+# ... (Clases InventoryScreen, SalesScreen, etc. sin cambios)
+
+class InventoryScreen(QWidget):
+    inventory_changed = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.init_ui()
+        self.load_inventory()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        title_label = QLabel("Gestión de Inventario", self)
+        title_label.setStyleSheet("font-size: 18px; font-weight: bold;")
+        layout.addWidget(title_label)
+
+        self.table = QTableWidget(self)
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(["SKU", "Nombre", "P. Normal", "P. 5 (Mayoreo)", "Cantidad"])
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for i in range(2, 5):
+            header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+        layout.addWidget(self.table)
+        
+        button_layout = QHBoxLayout()
+        add_button = QPushButton("Añadir Producto")
+        remove_button = QPushButton("Eliminar Producto")
+        pdf_button = QPushButton("Guardar como PDF")
+        refresh_button = QPushButton("Refrescar Lista")
+        
+        button_layout.addWidget(add_button)
+        button_layout.addWidget(remove_button)
+        button_layout.addWidget(pdf_button)
+        button_layout.addStretch()
+        button_layout.addWidget(refresh_button)
+        layout.addLayout(button_layout)
+        
+        refresh_button.clicked.connect(self.load_inventory)
+        add_button.clicked.connect(self.add_product)
+        remove_button.clicked.connect(self.remove_product)
+        pdf_button.clicked.connect(self.save_inventory_pdf)
+        self.table.cellClicked.connect(self.handle_cell_click)
+        self.table.cellDoubleClicked.connect(self.handle_cell_double_click)
+
+    def load_inventory(self):
+        inventory_data = read_db("inventory")
+        self.table.setRowCount(0)
+        self.table.setRowCount(len(inventory_data))
+        for row, (sku, data) in enumerate(inventory_data.items()):
+            sku_item = QTableWidgetItem(sku)
+            name_item = QTableWidgetItem(data.get("name", "N/A"))
+            
+            sku_item.setFlags(sku_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            
+            self.table.setItem(row, 0, sku_item)
+            self.table.setItem(row, 1, name_item)
+            self.table.setItem(row, 2, QTableWidgetItem(f"${data.get('price', 0.0):.2f}"))
+            self.table.setItem(row, 3, QTableWidgetItem(f"${data.get('price_5', 0.0):.2f}"))
+            self.table.setItem(row, 4, QTableWidgetItem(str(data.get("quantity", 0))))
+
+    def add_product(self):
+        dialog = ProductDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.save_product_data(dialog.get_data())
+
+    def handle_cell_double_click(self, row, column):
+        sku = self.table.item(row, 0).text()
+        inventory = read_db("inventory")
+        product_data = inventory.get(sku, {})
+        product_data["sku"] = sku
+
+        dialog = ProductDialog(self, product_data=product_data)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.save_product_data(dialog.get_data(), is_edit=True)
+
+    def handle_cell_click(self, row, column):
+        if column not in [0, 1]:
+            return
+        
+        old_value = self.table.item(row, column).text()
+        
+        if column == 0:
+            new_sku, ok = QInputDialog.getText(self, "Editar SKU", "Nuevo SKU:", text=old_value)
+            if ok and new_sku and new_sku.upper() != old_value:
+                inventory = read_db("inventory")
+                if new_sku.upper() in inventory:
+                    QMessageBox.warning(self, "SKU Duplicado", "El nuevo SKU ya existe.")
+                    return
+                product_data = inventory.pop(old_value)
+                inventory[new_sku.upper()] = product_data
+                write_db("inventory", inventory)
+                self.load_inventory()
+                self.inventory_changed.emit()
+
+        elif column == 1:
+            sku = self.table.item(row, 0).text()
+            new_name, ok = QInputDialog.getText(self, "Editar Nombre", "Nuevo Nombre:", text=old_value)
+            if ok and new_name and new_name != old_value:
+                inventory = read_db("inventory")
+                if sku in inventory:
+                    inventory[sku]["name"] = new_name
+                    write_db("inventory", inventory)
+                    self.load_inventory()
+                    self.inventory_changed.emit()
+
+    def save_product_data(self, data, is_edit=False):
+        if not data["sku"] or not data["name"]:
+            QMessageBox.warning(self, "Datos incompletos", "El SKU y el Nombre son obligatorios.")
+            return
+
+        try:
+            product_record = {
+                "name": data["name"],
+                "price": float(data["price"]), "quantity": int(data["quantity"]),
+                "price_5": float(data["price_5"]), "price_12": float(data["price_12"]),
+                "price_50": float(data["price_50"]), "price_100": float(data["price_100"]),
+                "price_300": float(data["price_300"]), "price_500": float(data["price_500"]),
+            }
+
+            inventory = read_db("inventory")
+            sku = data["sku"]
+            
+            if not is_edit and sku in inventory:
+                QMessageBox.warning(self, "SKU duplicado", "El SKU ya existe.")
+                return
+
+            inventory[sku] = product_record
+            write_db("inventory", inventory)
+            self.load_inventory()
+            self.inventory_changed.emit()
+
+        except ValueError:
+            QMessageBox.warning(self, "Error de Formato", "Todos los campos de precio y cantidad deben ser números válidos.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Ocurrió un error inesperado: {e}")
+
+    def remove_product(self):
+        selected_rows = self.table.selectionModel().selectedRows()
+        if not selected_rows:
+            QMessageBox.warning(self, "Sin Selección", "Por favor, seleccione un producto para eliminar.")
+            return
+
+        selected_row = selected_rows[0].row()
+        sku = self.table.item(selected_row, 0).text()
+        name = self.table.item(selected_row, 1).text()
+        
+        reply = QMessageBox.question(self, "Confirmar eliminación",
+                                     f"¿Está seguro de que desea eliminar '{name}' (SKU: {sku})?",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+
+        if reply == QMessageBox.StandardButton.Yes:
+            inventory = read_db("inventory")
+            if sku in inventory:
+                del inventory[sku]
+                write_db("inventory", inventory)
+                self.load_inventory()
+                self.inventory_changed.emit()
+
+    def save_inventory_pdf(self):
+        inventory = read_db("inventory")
+        folder = resource_path("reportes")
+        os.makedirs(folder, exist_ok=True)
+        filename = os.path.join(folder, f"inventario_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
+
+        try:
+            pdf = FPDF(orientation='L', unit='mm', format='A4')
+            pdf.add_page()
+            
+            logo_path = resource_path("logo.jpg")
+            if os.path.exists(logo_path):
+                page_width = pdf.w - 2 * pdf.l_margin
+                pdf.image(logo_path, x=(page_width / 2) + pdf.l_margin - 15, y=8, w=30)
+                pdf.ln(30)
+
+            pdf.set_font("Courier", 'B', 16)
+            pdf.cell(0, 10, "Reporte de Inventario", new_x="LMARGIN", new_y="NEXT", align='C')
+            pdf.ln(5)
+            
+            pdf.set_font("Courier", 'B', 8)
+            col_widths = [25, 60, 20, 20, 20, 20, 20, 20, 20]
+            headers = ["SKU", "Nombre", "P. Normal", "P. 5", "P. 12", "P. 50", "P. 100", "P. 300/500", "Cant."]
+            for i, header in enumerate(headers):
+                pdf.cell(col_widths[i], 8, header, border=1, align='C')
+            pdf.ln()
+
+            pdf.set_font("Courier", '', 8)
+            for sku, data in sorted(inventory.items()):
+                pdf.cell(col_widths[0], 6, sku, 1)
+                safe_name = data.get('name', '').encode('latin-1', 'replace').decode('latin-1')
+                pdf.cell(col_widths[1], 6, safe_name, 1)
+                pdf.cell(col_widths[2], 6, f"${data.get('price', 0):.2f}", 1, align='R')
+                pdf.cell(col_widths[3], 6, f"${data.get('price_5', 0):.2f}", 1, align='R')
+                pdf.cell(col_widths[4], 6, f"${data.get('price_12', 0):.2f}", 1, align='R')
+                pdf.cell(col_widths[5], 6, f"${data.get('price_50', 0):.2f}", 1, align='R')
+                pdf.cell(col_widths[6], 6, f"${data.get('price_100', 0):.2f}", 1, align='R')
+                pdf.cell(col_widths[7], 6, f"${data.get('price_300', 0):.2f}/${data.get('price_500', 0):.2f}", 1, align='R')
+                pdf.cell(col_widths[8], 6, str(data.get('quantity', 0)), 1, align='C')
+                pdf.ln()
+
+            pdf.output(filename)
+            QMessageBox.information(self, "Éxito", f"Reporte de inventario guardado como:\n{filename}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error al generar PDF", f"No se pudo crear el archivo PDF.\nError: {e}")
+
+class SalesScreen(QWidget):
+    sale_finalized = pyqtSignal()
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.current_sale_items = []
+        self.current_user_id = None
+        self.init_ui()
+    def set_current_user(self, user_id):
+        self.current_user_id = user_id
+    def init_ui(self):
+        layout = QHBoxLayout(self)
+        left_panel = QFrame(self)
+        left_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        left_panel.setMaximumWidth(400)
+        left_layout = QVBoxLayout(left_panel)
+        
+        customer_label = QLabel("Nombre del Cliente (Opcional):")
+        self.customer_name_input = QLineEdit(self)
+        self.customer_name_input.setPlaceholderText("Público General")
+        
+        search_label = QLabel("Buscar Producto (SKU o Nombre):")
+        self.product_search_input = QLineEdit(self)
+        self.product_search_input.setPlaceholderText("Escanear o buscar y presionar Enter")
+        
+        left_layout.addWidget(customer_label)
+        left_layout.addWidget(self.customer_name_input)
+        left_layout.addSpacing(20)
+        left_layout.addWidget(search_label)
+        left_layout.addWidget(self.product_search_input)
+        left_layout.addStretch()
+
+        right_panel = QFrame(self)
+        right_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        right_layout = QVBoxLayout(right_panel)
+        cart_label = QLabel("Carrito de Compras")
+        cart_label.setStyleSheet("font-size: 16px; font-weight: bold;")
+        self.cart_table = QTableWidget(self)
+        self.cart_table.setColumnCount(4)
+        self.cart_table.setHorizontalHeaderLabels(["Nombre", "Cantidad", "Precio Unitario", "Total"])
+        self.cart_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.cart_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.cart_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+
+        cart_actions_layout = QHBoxLayout()
+        modify_qty_button = QPushButton("Modificar Cantidad")
+        remove_item_button = QPushButton("Eliminar Producto")
+        cart_actions_layout.addWidget(modify_qty_button)
+        cart_actions_layout.addWidget(remove_item_button)
+        cart_actions_layout.addStretch()
+
+        total_layout = QHBoxLayout()
+        self.subtotal_label = QLabel("Subtotal: $0.00")
+        self.subtotal_label.setStyleSheet("font-size: 18px; font-weight: bold;")
+        pay_button = QPushButton("Pagar")
+        pay_button.setStyleSheet("font-size: 18px; padding: 10px;")
+        total_layout.addWidget(self.subtotal_label)
+        total_layout.addStretch()
+        total_layout.addWidget(pay_button)
+        
+        right_layout.addWidget(cart_label)
+        right_layout.addWidget(self.cart_table)
+        right_layout.addLayout(cart_actions_layout)
+        right_layout.addLayout(total_layout)
+        
+        layout.addWidget(left_panel)
+        layout.addWidget(right_panel, stretch=1)
+        
+        self.product_search_input.returnPressed.connect(self.add_product_to_cart)
+        pay_button.clicked.connect(self.process_payment)
+        modify_qty_button.clicked.connect(self.modify_quantity)
+        remove_item_button.clicked.connect(self.remove_item)
+        self.cart_table.cellDoubleClicked.connect(self.modify_quantity_from_cell)
+
+    def setup_completer(self):
+        inventory = read_db("inventory")
+        name_list = [f"{data['name']} [{sku}]" for sku, data in inventory.items()]
+        self.completer = QCompleter(name_list, self)
+        self.completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.product_search_input.setCompleter(self.completer)
+
+    def modify_quantity_from_cell(self, row, column):
+        self.modify_quantity()
+
+    def get_price_for_quantity(self, product_info, quantity):
+        tiers = [(500, "price_500"), (300, "price_300"), (100, "price_100"), 
+                 (50, "price_50"), (12, "price_12"), (5, "price_5")]
+        
+        for threshold, key in tiers:
+            if quantity >= threshold and key in product_info and product_info[key] > 0:
+                return product_info[key]
+        
+        return product_info.get("price", 0.0)
+
+    def add_product_to_cart(self):
+        search_term = self.product_search_input.text().strip()
+        if not search_term:
+            return
+
+        sku_to_add = None
+        
+        if '[' in search_term and ']' in search_term:
+            try:
+                sku_to_add = search_term.split('[')[-1].split(']')[0].upper()
+            except IndexError:
+                pass
+        else:
+            sku_to_add = search_term.upper()
+
+        inventory = read_db("inventory")
+        product_info = inventory.get(sku_to_add)
+
+        if not product_info:
+            search_lower = search_term.lower()
+            for sku, data in inventory.items():
+                if search_lower in data.get('name', '').lower():
+                    product_info = data
+                    sku_to_add = sku
+                    break
+        
+        if not product_info:
+            QMessageBox.warning(self, "No encontrado", f"No se encontró un producto con el SKU o nombre '{search_term}'.")
+            return
+
+        stock_available = product_info.get("quantity", 0)
+        existing_item = next((item for item in self.current_sale_items if item["sku"] == sku_to_add), None)
+        
+        current_qty_in_cart = existing_item["quantity"] if existing_item else 0
+        
+        if current_qty_in_cart >= stock_available:
+            QMessageBox.warning(self, "Stock Insuficiente", f"No hay más stock disponible para '{product_info['name']}'.")
+            return
+
+        if existing_item:
+            existing_item["quantity"] += 1
+        else:
+            self.current_sale_items.append({"sku": sku_to_add, "name": product_info["name"], "quantity": 1})
+        
+        self.update_cart_display()
+        self.product_search_input.clear()
+
+    def update_cart_display(self):
+        inventory = read_db("inventory")
+        self.cart_table.setRowCount(len(self.current_sale_items))
+        subtotal = 0
+
+        for row, item in enumerate(self.current_sale_items):
+            product_info = inventory.get(item["sku"], {})
+            effective_price = self.get_price_for_quantity(product_info, item["quantity"])
+            item["price"] = effective_price
+            
+            total_item_price = effective_price * item["quantity"]
+            subtotal += total_item_price
+            
+            self.cart_table.setItem(row, 0, QTableWidgetItem(item["name"]))
+            self.cart_table.setItem(row, 1, QTableWidgetItem(str(item["quantity"])))
+            self.cart_table.setItem(row, 2, QTableWidgetItem(f"${effective_price:.2f}"))
+            self.cart_table.setItem(row, 3, QTableWidgetItem(f"${total_item_price:.2f}"))
+        
+        self.subtotal_label.setText(f"Subtotal: ${subtotal:.2f}")
+    
+    def modify_quantity(self):
+        selected_rows = self.cart_table.selectionModel().selectedRows()
+        if not selected_rows:
+            QMessageBox.warning(self, "Sin Selección", "Por favor, seleccione un producto del carrito para modificar.")
+            return
+        
+        selected_row = selected_rows[0].row()
+        item = self.current_sale_items[selected_row]
+
+        inventory = read_db("inventory")
+        stock_available = inventory.get(item["sku"], {}).get("quantity", 0)
+
+        new_quantity, ok = QInputDialog.getInt(
+            self, "Modificar Cantidad", 
+            f"Ingrese la nueva cantidad para '{item['name']}'\n(Stock disponible: {stock_available})",
+            value=item["quantity"], min=1, max=stock_available
+        )
+
+        if ok:
+            self.current_sale_items[selected_row]["quantity"] = new_quantity
+            self.update_cart_display()
+
+    def remove_item(self):
+        selected_rows = self.cart_table.selectionModel().selectedRows()
+        if not selected_rows:
+            QMessageBox.warning(self, "Sin Selección", "Por favor, seleccione un producto del carrito para eliminar.")
+            return
+
+        selected_row = selected_rows[0].row()
+        item = self.current_sale_items[selected_row]
+
+        reply = QMessageBox.question(self, "Confirmar Eliminación",
+                                     f"¿Está seguro de que desea eliminar '{item['name']}' del carrito?",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+
+        if reply == QMessageBox.StandardButton.Yes:
+            del self.current_sale_items[selected_row]
+            self.update_cart_display()
+
+    def process_payment(self):
+        if not self.current_sale_items:
+            QMessageBox.warning(self, "Carrito vacío", "Añada productos antes de pagar.")
+            return
+        
+        total = sum(item['price'] * item['quantity'] for item in self.current_sale_items)
+        payment_dialog = PaymentDialog(total, self)
+        
+        if payment_dialog.exec() == QDialog.DialogCode.Accepted:
+            payment_data = payment_dialog.get_data()
+            self.finalize_sale(total, payment_data)
+
+    def finalize_sale(self, total, payment_data):
+        config = read_db("config")
+        sales = read_db("sales")
+        inventory = read_db("inventory")
+        
+        new_ticket_number = config.get("last_ticket_number", 0) + 1
+        
+        sale_record = {
+            "ticket_number": new_ticket_number,
+            "timestamp": datetime.datetime.now().isoformat(),
+            "user": self.current_user_id,
+            "customer_name": self.customer_name_input.text(),
+            "items": self.current_sale_items,
+            "total": total,
+            "payment_method": payment_data["method"],
+            "payment_details": payment_data["details"],
+            "status": "COMPLETADA"
+        }
+        sales.append(sale_record)
+        
+        for item in self.current_sale_items:
+            if item["sku"] in inventory:
+                inventory[item["sku"]]["quantity"] -= item["quantity"]
+        
+        config["last_ticket_number"] = new_ticket_number
+        
+        write_db("sales", sales)
+        write_db("inventory", inventory)
+        write_db("config", config)
+        
+        if payment_data["method"] == "Efectivo":
+            open_cash_drawer()
+
+        post_sale_dialog = PostSaleDialog(sale_record, self)
+        post_sale_dialog.exec()
+
+        self.current_sale_items = []
+        self.update_cart_display()
+        self.customer_name_input.clear()
+        self.sale_finalized.emit()
+
+class UserManagementScreen(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.init_ui()
+        self.load_users()
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        title = QLabel("Gestión de Usuarios", self)
+        title.setStyleSheet("font-size: 18px; font-weight: bold;")
+        self.table = QTableWidget(self)
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["EID", "Nombre Completo", "Rol"])
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        
+        button_layout = QHBoxLayout()
+        add_btn = QPushButton("Añadir Usuario")
+        del_btn = QPushButton("Eliminar Usuario")
+        refresh_btn = QPushButton("Refrescar")
+        button_layout.addWidget(add_btn)
+        button_layout.addWidget(del_btn)
+        button_layout.addStretch()
+        button_layout.addWidget(refresh_btn)
+        
+        layout.addWidget(title)
+        layout.addWidget(self.table)
+        layout.addLayout(button_layout)
+
+        add_btn.clicked.connect(self.add_user)
+        del_btn.clicked.connect(self.remove_user)
+        refresh_btn.clicked.connect(self.load_users)
+        self.table.cellDoubleClicked.connect(self.edit_user)
+
+    def load_users(self):
+        users = read_db("users")
+        self.table.setRowCount(0)
+        self.table.setRowCount(len(users))
+        for row, (eid, data) in enumerate(users.items()):
+            role = "Administrador" if all(data.get("permissions", {}).values()) else "Vendedor"
+            self.table.setItem(row, 0, QTableWidgetItem(eid))
+            self.table.setItem(row, 1, QTableWidgetItem(data.get("full_name", "")))
+            self.table.setItem(row, 2, QTableWidgetItem(role))
+            
+    def add_user(self):
+        dialog = UserPermissionsDialog(self, is_new_user=True)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            data = dialog.get_data()
+            if not all([data["full_name"], data["password"]]):
+                QMessageBox.warning(self, "Datos incompletos", "El nombre y la contraseña son obligatorios.")
+                return
+
+            users = read_db("users")
+            new_eid = get_next_employee_id()
+            users[new_eid] = {"full_name": data["full_name"], "password": data["password"], "permissions": data["permissions"]}
+            write_db("users", users)
+            self.load_users()
+
+    def edit_user(self, row, column):
+        eid = self.table.item(row, 0).text()
+        if eid == "E001":
+            QMessageBox.warning(self, "Acción no Permitida", "No se pueden modificar los permisos del administrador principal.")
+            return
+            
+        users = read_db("users")
+        user_data = users.get(eid)
+
+        dialog = UserPermissionsDialog(self, user_data=user_data)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            new_data = dialog.get_data()
+            users[eid]["full_name"] = new_data["full_name"]
+            if new_data["password"]: # Only update password if a new one was entered
+                users[eid]["password"] = new_data["password"]
+            users[eid]["permissions"] = new_data["permissions"]
+            write_db("users", users)
+            self.load_users()
+
+    def remove_user(self):
+        row = self.table.currentRow()
+        if row < 0:
+            QMessageBox.warning(self, "Sin selección", "Seleccione un usuario para eliminar.")
+            return
+        eid = self.table.item(row, 0).text()
+        if eid == "E001":
+            QMessageBox.critical(self, "Acción no permitida", "No se puede eliminar al administrador principal.")
+            return
+
+        reply = QMessageBox.question(self, "Confirmar", f"¿Seguro que desea eliminar al usuario {eid}?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            users = read_db("users")
+            if eid in users:
+                del users[eid]
+                write_db("users", users)
+                self.load_users()
+
+class SalesHistoryScreen(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.init_ui()
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        title = QLabel("Historial de Ventas", self)
+        title.setStyleSheet("font-size: 18px; font-weight: bold;")
+        
+        filter_layout = QHBoxLayout()
+        self.start_date_edit = QDateEdit(self, calendarPopup=True)
+        self.start_date_edit.setDate(QDate.currentDate())
+        self.end_date_edit = QDateEdit(self, calendarPopup=True)
+        self.end_date_edit.setDate(QDate.currentDate())
+        
+        today_btn = QPushButton("Ventas de Hoy")
+        search_btn = QPushButton("Buscar por Rango")
+        all_btn = QPushButton("Mostrar Todo")
+
+        filter_layout.addWidget(QLabel("Desde:"))
+        filter_layout.addWidget(self.start_date_edit)
+        filter_layout.addWidget(QLabel("Hasta:"))
+        filter_layout.addWidget(self.end_date_edit)
+        filter_layout.addWidget(search_btn)
+        filter_layout.addStretch()
+        filter_layout.addWidget(today_btn)
+        filter_layout.addWidget(all_btn)
+
+        self.table = QTableWidget(self)
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels(["Ticket #", "Fecha y Hora", "Cliente", "Usuario", "Método Pago", "Total", "Estado"])
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        
+        layout.addWidget(title)
+        layout.addLayout(filter_layout)
+        layout.addWidget(self.table)
+
+        today_btn.clicked.connect(self.load_today_sales)
+        all_btn.clicked.connect(self.load_all_sales)
+        search_btn.clicked.connect(self.load_date_range_sales)
+        
+        self.load_today_sales()
+
+    def load_sales(self, filtered_sales):
+        self.table.setRowCount(0)
+        self.table.setRowCount(len(filtered_sales))
+        for row, sale in enumerate(sorted(filtered_sales, key=lambda s: s['timestamp'], reverse=True)):
+            ts = datetime.datetime.fromisoformat(sale['timestamp']).strftime('%Y-%m-%d %H:%M:%S')
+            self.table.setItem(row, 0, QTableWidgetItem(str(sale.get("ticket_number", ""))))
+            self.table.setItem(row, 1, QTableWidgetItem(ts))
+            self.table.setItem(row, 2, QTableWidgetItem(sale.get("customer_name", "N/A")))
+            self.table.setItem(row, 3, QTableWidgetItem(sale.get("user", "")))
+            self.table.setItem(row, 4, QTableWidgetItem(sale.get("payment_method", "N/A")))
+            self.table.setItem(row, 5, QTableWidgetItem(f"${sale.get('total', 0.0):.2f}"))
+            self.table.setItem(row, 6, QTableWidgetItem(sale.get("status", "")))
+
+    def load_all_sales(self):
+        self.load_sales(read_db("sales"))
+        
+    def load_today_sales(self):
+        sales = read_db("sales")
+        today = datetime.date.today()
+        today_sales = [s for s in sales if datetime.datetime.fromisoformat(s['timestamp']).date() == today]
+        self.load_sales(today_sales)
+        
+    def load_date_range_sales(self):
+        sales = read_db("sales")
+        start_date = self.start_date_edit.date().toPyDate()
+        end_date = self.end_date_edit.date().toPyDate()
+        range_sales = [s for s in sales if start_date <= datetime.datetime.fromisoformat(s['timestamp']).date() <= end_date]
+        self.load_sales(range_sales)
+
+class ReturnScreen(QWidget):
+    return_processed = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.found_sale = None
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        title = QLabel("Devoluciones", self)
+        title.setStyleSheet("font-size: 18px; font-weight: bold;")
+        
+        search_layout = QHBoxLayout()
+        self.ticket_input = QLineEdit(self)
+        self.ticket_input.setPlaceholderText("Ingrese Número de Ticket")
+        search_btn = QPushButton("Buscar Ticket")
+        search_layout.addWidget(QLabel("Ticket:"))
+        search_layout.addWidget(self.ticket_input)
+        search_layout.addWidget(search_btn)
+        
+        self.details_text = QTextEdit(self)
+        self.details_text.setReadOnly(True)
+        
+        self.process_button = QPushButton("Procesar Devolución")
+        self.process_button.setEnabled(False)
+        
+        layout.addWidget(title)
+        layout.addLayout(search_layout)
+        layout.addWidget(self.details_text)
+        layout.addWidget(self.process_button)
+
+        self.ticket_input.returnPressed.connect(self.search_ticket)
+        search_btn.clicked.connect(self.search_ticket)
+        self.process_button.clicked.connect(self.process_return)
+
+    def search_ticket(self):
+        self.details_text.clear()
+        self.process_button.setEnabled(False)
+        self.found_sale = None
+        
+        try:
+            ticket_number = int(self.ticket_input.text())
+        except ValueError:
+            QMessageBox.warning(self, "Entrada inválida", "El número de ticket debe ser un número.")
+            return
+
+        try:
+            sales = read_db("sales")
+            sale = next((s for s in sales if s.get("ticket_number") == ticket_number), None)
+            
+            if not sale:
+                self.details_text.setText(f"No se encontró ninguna venta con el ticket N° {ticket_number}.")
+                return
+            
+            self.found_sale = sale
+            ticket_text = generate_ticket_text(sale)
+            
+            sale_status = sale.get('status', 'DESCONOCIDO')
+            status_text = f"\nESTADO ACTUAL: {sale_status}"
+            self.details_text.setText(ticket_text + status_text)
+            
+            if sale_status == "COMPLETADA":
+                self.process_button.setEnabled(True)
+            else:
+                self.details_text.append("\n\nEsta venta no se puede devolver.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error Inesperado", f"Ocurrió un error al buscar el ticket: {e}")
+            
+    def process_return(self):
+        if not self.found_sale: return
+        
+        reply = QMessageBox.question(self, "Confirmar Devolución", "¿Está seguro de realizar la devolución de este ticket?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.No: return
+
+        inventory = read_db("inventory")
+        for item in self.found_sale.get("items", []):
+            if item.get("sku") in inventory:
+                inventory[item["sku"]]["quantity"] += item.get("quantity", 0)
+        write_db("inventory", inventory)
+
+        sales = read_db("sales")
+        for sale in sales:
+            if sale.get("ticket_number") == self.found_sale.get("ticket_number"):
+                sale["status"] = "DEVUELTA"
+                break
+        write_db("sales", sales)
+
+        QMessageBox.information(self, "Éxito", "Devolución procesada correctamente.")
+        self.return_processed.emit()
+        self.details_text.clear()
+        self.ticket_input.clear()
+        self.process_button.setEnabled(False)
+
+class CashCountScreen(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.current_user_id = "N/A"
+        self.summary_text = ""
+        self.init_ui()
+
+    def set_current_user(self, user_id):
+        self.current_user_id = user_id
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        title = QLabel("Corte de Caja Diario", self)
+        title.setStyleSheet("font-size: 18px; font-weight: bold;")
+        
+        self.summary_label = QLabel("Calculando...", self)
+        self.summary_label.setStyleSheet("font-family: Courier; font-size: 15px;")
+        self.summary_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        
+        self.process_button = QPushButton("Iniciar Corte de Caja y Salir")
+        
+        layout.addWidget(title)
+        layout.addWidget(self.summary_label, 1)
+        layout.addWidget(self.process_button)
+
+        self.process_button.clicked.connect(self.perform_cash_count)
+        
+    def calculate_summary(self):
+        sales = read_db("sales")
+        today = datetime.date.today()
+        
+        today_sales = [s for s in sales if datetime.datetime.fromisoformat(s['timestamp']).date() == today and s.get('status') == 'COMPLETADA']
+        today_returns = [s for s in sales if datetime.datetime.fromisoformat(s['timestamp']).date() == today and s.get('status') == 'DEVUELTA']
+
+        total_cash = sum(s['total'] for s in today_sales if s.get('payment_method') == 'Efectivo')
+        total_card = sum(s['total'] for s in today_sales if s.get('payment_method') == 'Tarjeta Bancaria')
+        total_transfer = sum(s['total'] for s in today_sales if s.get('payment_method') == 'Transferencia Bancaria')
+        total_gross = sum(s['total'] for s in today_sales)
+        total_returned = sum(s['total'] for s in today_returns)
+        total_net = total_gross - total_returned
+
+        self.summary_text = (
+            f"--- Desglose de Ventas ---\n\n"
+            f"Ventas en Efectivo: ${total_cash:.2f}\n"
+            f"Ventas con Tarjeta: ${total_card:.2f}\n"
+            f"Ventas con Transferencia: ${total_transfer:.2f}\n"
+            f"----------------------------------------\n"
+            f"Total Ventas Bruto: ${total_gross:.2f}\n\n"
+            f"Devoluciones del Día: -${total_returned:.2f}\n"
+            f"========================================\n"
+            f"Total Neto en Caja: ${total_net:.2f}"
+        )
+        self.summary_label.setText(self.summary_text)
+
+    def perform_cash_count(self):
+        reply = QMessageBox.question(self, "Confirmar Corte de Caja", 
+            "¿Está seguro de realizar el corte? Se generará un PDF de respaldo y la aplicación se cerrará.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            
+        if reply == QMessageBox.StandardButton.Yes:
+            pdf_path = generate_cash_count_pdf(self.summary_text, self.current_user_id)
+            QMessageBox.information(self, "Corte Realizado", f"El corte de caja se ha guardado en:\n{pdf_path}\n\nLa aplicación se cerrará ahora.")
+            QApplication.instance().quit()
+
+
+class SettingsScreen(QWidget):
+    theme_changed = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        
+        title = QLabel("Ajustes", self)
+        title.setStyleSheet("font-size: 18px; font-weight: bold;")
+        layout.addWidget(title)
+        
+        form_layout = QFormLayout()
+        
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["Oscuro", "Claro"])
+        
+        self.color_combo = QComboBox()
+        self.color_combo.addItems(["Azul", "Naranja", "Verde"])
+        
+        form_layout.addRow("Modo de Apariencia:", self.mode_combo)
+        form_layout.addRow("Color del Tema:", self.color_combo)
+        
+        layout.addLayout(form_layout)
+        
+        update_button = QPushButton("Buscar Actualizaciones")
+        update_button.clicked.connect(self.check_for_updates)
+        layout.addWidget(update_button, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        layout.addStretch()
+
+        self.load_settings()
+
+        self.mode_combo.currentTextChanged.connect(self.save_settings)
+        self.color_combo.currentTextChanged.connect(self.save_settings)
+
+    def load_settings(self):
+        config = read_db("config")
+        self.mode_combo.setCurrentText(config.get("appearance_mode", "Oscuro"))
+        self.color_combo.setCurrentText(config.get("color_theme", "Azul"))
+
+    def save_settings(self):
+        config = read_db("config")
+        config["appearance_mode"] = self.mode_combo.currentText()
+        config["color_theme"] = self.color_combo.currentText()
+        write_db("config", config)
+        self.theme_changed.emit()
+
+    def check_for_updates(self):
+        QMessageBox.information(self, "Actualizaciones", "Su sistema está actualizado a la última versión.")
+
+
+class MainScreen(QWidget):
+    logout_requested = pyqtSignal()
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.current_user_id = None
+        self.permissions = {}
+        self.init_ui()
+        
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_time)
+        self.timer.start(1000)
+        self.update_time()
+
+    def set_user_permissions(self, permissions, user_id):
+        self.permissions = permissions
+        self.current_user_id = user_id
+        self.sales_view.set_current_user(user_id) 
+        self.cash_count_view.set_current_user(user_id)
+        self.welcome_label.setText(f"Usuario: {self.current_user_id}")
+        
+        self.sales_button.setVisible(self.permissions.get('can_sell', False))
+        self.inventory_button.setVisible(self.permissions.get('can_manage_inventory', False))
+        self.history_button.setVisible(self.permissions.get('can_view_history', False))
+        self.return_button.setVisible(self.permissions.get('can_process_returns', False))
+        self.admin_button.setVisible(self.permissions.get('can_manage_users', False))
+        self.settings_button.setVisible(self.permissions.get('can_view_settings', False))
+        self.cash_count_button.setVisible(self.permissions.get('can_do_cash_count', False))
+        
+    def init_ui(self):
+        main_layout = QHBoxLayout(self)
+        nav_bar = QFrame(self)
+        nav_bar.setFrameShape(QFrame.Shape.StyledPanel)
+        nav_bar.setFixedWidth(200) 
+        nav_layout = QVBoxLayout(nav_bar)
+        
+        logo_label = QLabel(self)
+        logo_path = resource_path("logo.jpg")
+        if os.path.exists(logo_path):
+            pixmap = QPixmap(logo_path)
+            logo_label.setPixmap(pixmap.scaledToWidth(150, Qt.TransformationMode.SmoothTransformation))
+            logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        else:
+            logo_label.setText("BOUTIQUE EL IMPULSO")
+            logo_label.setStyleSheet("font-size: 16px; font-weight: bold;")
+            logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        self.clock_label = QLabel("", self)
+        self.clock_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.clock_label.setStyleSheet("font-size: 14px; font-weight: bold; margin-bottom: 10px;")
+
+        self.welcome_label = QLabel("Bienvenido", self)
+        self.welcome_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        
+        self.sales_button = QPushButton("Punto de Venta", self)
+        self.inventory_button = QPushButton("Inventario", self)
+        self.history_button = QPushButton("Historial de Ventas", self)
+        self.return_button = QPushButton("Devoluciones", self)
+        self.admin_button = QPushButton("Gestión de Usuarios", self)
+        self.settings_button = QPushButton("Ajustes", self)
+        self.cash_count_button = QPushButton("Corte de Caja", self)
+        logout_button = QPushButton("Cerrar Sesión", self)
+        
+        nav_layout.addWidget(logo_label)
+        nav_layout.addWidget(self.clock_label)
+        nav_layout.addWidget(self.welcome_label)
+        nav_layout.addSpacing(20)
+        nav_layout.addWidget(self.sales_button)
+        nav_layout.addWidget(self.inventory_button)
+        nav_layout.addWidget(self.history_button)
+        nav_layout.addWidget(self.return_button)
+        nav_layout.addWidget(self.admin_button)
+        nav_layout.addWidget(self.settings_button)
+        nav_layout.addStretch()
+        nav_layout.addWidget(self.cash_count_button)
+        nav_layout.addWidget(logout_button)
+        
+        self.content_stack = QStackedWidget(self)
+        self.sales_view = SalesScreen(self)
+        self.inventory_view = InventoryScreen(self)
+        self.history_view = SalesHistoryScreen(self)
+        self.return_view = ReturnScreen(self)
+        self.admin_view = UserManagementScreen(self)
+        self.settings_view = SettingsScreen(self)
+        self.cash_count_view = CashCountScreen(self)
+
+        self.content_stack.addWidget(self.sales_view)
+        self.content_stack.addWidget(self.inventory_view)
+        self.content_stack.addWidget(self.history_view)
+        self.content_stack.addWidget(self.return_view)
+        self.content_stack.addWidget(self.admin_view)
+        self.content_stack.addWidget(self.settings_view)
+        self.content_stack.addWidget(self.cash_count_view)
+        
+        main_layout.addWidget(nav_bar)
+        main_layout.addWidget(self.content_stack, stretch=1)
+        
+        logout_button.clicked.connect(self.logout_requested.emit)
+        self.sales_button.clicked.connect(lambda: self.content_stack.setCurrentIndex(0))
+        self.inventory_button.clicked.connect(lambda: self.content_stack.setCurrentIndex(1))
+        self.history_button.clicked.connect(lambda: self.content_stack.setCurrentIndex(2))
+        self.return_button.clicked.connect(lambda: self.content_stack.setCurrentIndex(3))
+        self.admin_button.clicked.connect(lambda: self.content_stack.setCurrentIndex(4))
+        self.settings_button.clicked.connect(lambda: self.content_stack.setCurrentIndex(5))
+        self.cash_count_button.clicked.connect(self.show_cash_count)
+
+        self.sales_view.sale_finalized.connect(self.inventory_view.load_inventory)
+        self.sales_view.sale_finalized.connect(self.history_view.load_today_sales)
+        self.return_view.return_processed.connect(self.inventory_view.load_inventory)
+        self.return_view.return_processed.connect(self.history_view.load_today_sales)
+        self.inventory_view.inventory_changed.connect(self.sales_view.setup_completer)
+        
+    def show_cash_count(self):
+        self.cash_count_view.calculate_summary()
+        self.content_stack.setCurrentIndex(6)
+        
+    def update_time(self):
+        now = datetime.datetime.now()
+        date_str = now.strftime("%Y-%m-%d")
+        time_str = now.strftime("%H:%M:%S")
+        self.clock_label.setText(f"{date_str}\n{time_str}")
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Sistema Punto de Venta (PyQt6)")
+        self.setGeometry(100, 100, 1200, 700)
+        
+        self.login_screen = LoginScreen()
+        self.main_screen = MainScreen()
+
+        self.stacked_widget = QStackedWidget()
+        self.stacked_widget.addWidget(self.login_screen)
+        self.stacked_widget.addWidget(self.main_screen)
+        
+        self.setCentralWidget(self.stacked_widget)
+        
+        self.login_screen.login_successful.connect(self.show_main_screen)
+        self.main_screen.logout_requested.connect(self.show_login_screen)
+        self.main_screen.settings_view.theme_changed.connect(self.apply_stylesheet)
+        self.show_login_screen()
+
+    def show_login_screen(self):
+        self.main_screen.sales_view.current_sale_items = []
+        self.main_screen.sales_view.update_cart_display()
+        self.main_screen.sales_view.customer_name_input.clear()
+        self.stacked_widget.setCurrentIndex(0)
+
+    def show_main_screen(self, permissions, user_id):
+        self.main_screen.set_user_permissions(permissions, user_id)
+        self.main_screen.sales_view.setup_completer()
+        self.stacked_widget.setCurrentIndex(1)
+        
+    def apply_stylesheet(self):
+        config = read_db("config")
+        mode = config.get("appearance_mode", "Oscuro")
+        theme = config.get("color_theme", "Azul")
+        
+        dark_palette = {
+            "base": "#2b2b2b", "alt_base": "#3c3c3c", "text": "white",
+            "button": "#555", "button_hover": "#666", "button_pressed": "#444",
+            "border": "#777"
+        }
+        light_palette = {
+            "base": "#f0f0f0", "alt_base": "#ffffff", "text": "black",
+            "button": "#e1e1e1", "button_hover": "#f6f6f6", "button_pressed": "#dcdcdc",
+            "border": "#c0c0c0"
+        }
+        
+        accent_colors = {
+            "Azul": ("#4f86a9", "#ffffff"),
+            "Naranja": ("#f59e0b", "#ffffff"),
+            "Verde": ("#16a085", "#ffffff")
+        }
+        
+        p = dark_palette if mode == "Oscuro" else light_palette
+        accent, accent_text_color_on_accent = accent_colors.get(theme, accent_colors["Azul"])
+
+        style = f"""
+            QWidget {{
+                background-color: {p["base"]};
+                color: {p["text"]};
+                font-size: 14px;
+            }}
+            QPushButton {{
+                background-color: {p["button"]};
+                border: 1px solid {p["border"]};
+                padding: 8px;
+                border-radius: 5px;
+                text-align: left;
+                padding-left: 10px;
+            }}
+            QPushButton:hover {{ background-color: {p["button_hover"]}; }}
+            QPushButton:pressed {{ background-color: {p["button_pressed"]}; }}
+            QLineEdit, QDateEdit, QComboBox, QTextEdit {{
+                background-color: {p["alt_base"]};
+                border: 1px solid {p["border"]};
+                padding: 6px;
+                border-radius: 5px;
+            }}
+            QTableWidget {{ gridline-color: {p["border"]}; }}
+            QHeaderView::section {{ background-color: {p["alt_base"]}; padding: 4px; border: 1px solid {p["border"]}; }}
+            QDialog {{ background-color: {p["alt_base"]}; }}
+            QScrollBar:vertical {{ border: none; background: {p["alt_base"]}; width: 14px; }}
+            QScrollBar::handle:vertical {{ background: {p["button"]}; min-height: 20px; border-radius: 4px; }}
+            QScrollBar:horizontal {{ border: none; background: {p["alt_base"]}; height: 14px; }}
+            QScrollBar::handle:horizontal {{ background: {p["button"]}; min-width: 20px; border-radius: 4px; }}
+            
+            QFrame#leftPanel {{ background-color: {p["base"]}; border: none; }}
+            
+            QFrame#leftPanel QLabel, QFrame#leftPanel QLineEdit, QFrame#leftPanel QPushButton {{
+                font-size: 16px;
+            }}
+            QFrame#leftPanel QLineEdit {{ padding: 8px; }}
+
+            QLabel#greetingLabel {{
+                color: {accent_text_color_on_accent};
+                background-color: rgba(0, 0, 0, 0.7);
+                padding: 20px;
+                border-radius: 8px;
+                font-size: 48px;
+                font-weight: bold;
+            }}
+            QLabel#footerLabel {{
+                color: {accent_text_color_on_accent};
+                background-color: rgba(0, 0, 0, 0.7);
+                padding: 8px;
+                border-radius: 5px;
+                font-size: 16px;
+            }}
+            QPushButton#loginButton, QPushButton#recoverButton {{
+                background-color: {accent}; color: {accent_text_color_on_accent};
+                text-align: center; font-weight: bold; height: 44px; font-size: 16px;
+            }}
+            QPushButton#loginButton:hover, QPushButton#recoverButton:hover {{ background-color: {p["button_hover"]}; }}
+        """
+        self.setStyleSheet(style)
+
+
+# --- Punto de Entrada de la Aplicación ---
+if __name__ == "__main__":
+    setup_database()
+    app = QApplication(sys.argv)
+    
+    window = MainWindow()
+    window.apply_stylesheet()
+    window.show()
+    sys.exit(app.exec())
