@@ -21,9 +21,12 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QLineEdit, QStackedWidget, QFrame, QTableWidget,
     QTableWidgetItem, QHeaderView, QMessageBox, QDialog, QFormLayout,
     QDialogButtonBox, QDateEdit, QComboBox, QInputDialog, QTextEdit,
-    QGridLayout, QCompleter, QCheckBox
+    QGridLayout, QCompleter, QCheckBox, QGraphicsOpacityEffect
 )
-from PyQt6.QtCore import pyqtSignal, Qt, QDate, QTimer
+from PyQt6.QtCore import (
+    pyqtSignal, Qt, QDate, QTimer, QPropertyAnimation, 
+    QEasingCurve, QPoint
+)
 from PyQt6.QtGui import QDoubleValidator, QPixmap
 
 from fpdf import FPDF
@@ -1749,19 +1752,50 @@ class MainScreen(QWidget):
         main_layout.addWidget(self.content_stack, stretch=1)
         
         logout_button.clicked.connect(self.logout_requested.emit)
-        self.sales_button.clicked.connect(lambda: self.content_stack.setCurrentIndex(0))
-        self.inventory_button.clicked.connect(lambda: self.content_stack.setCurrentIndex(1))
-        self.history_button.clicked.connect(lambda: self.content_stack.setCurrentIndex(2))
-        self.return_button.clicked.connect(lambda: self.content_stack.setCurrentIndex(3))
-        self.admin_button.clicked.connect(lambda: self.content_stack.setCurrentIndex(4))
-        self.settings_button.clicked.connect(lambda: self.content_stack.setCurrentIndex(5))
-        self.cash_count_button.clicked.connect(self.show_cash_count)
+        # --- INICIO DE LA MODIFICACIÓN: Conectar botones a la función de animación ---
+        self.sales_button.clicked.connect(lambda: self.switch_view(0))
+        self.inventory_button.clicked.connect(lambda: self.switch_view(1))
+        self.history_button.clicked.connect(lambda: self.switch_view(2))
+        self.return_button.clicked.connect(lambda: self.switch_view(3))
+        self.admin_button.clicked.connect(lambda: self.switch_view(4))
+        self.settings_button.clicked.connect(lambda: self.switch_view(5))
+        self.cash_count_button.clicked.connect(self.show_cash_count_animated)
+        # --- FIN DE LA MODIFICACIÓN ---
 
         self.sales_view.sale_finalized.connect(self.inventory_view.load_inventory)
         self.sales_view.sale_finalized.connect(self.history_view.load_today_sales)
         self.return_view.return_processed.connect(self.inventory_view.load_inventory)
         self.return_view.return_processed.connect(self.history_view.load_today_sales)
         self.inventory_view.inventory_changed.connect(self.sales_view.setup_completer)
+        
+    # --- INICIO DE LA MODIFICACIÓN: Nuevas funciones para animaciones ---
+    def show_cash_count_animated(self):
+        """Prepara y luego anima la vista de corte de caja."""
+        self.cash_count_view.calculate_summary()
+        self.switch_view(6)
+
+    def switch_view(self, index):
+        """
+        Anima el cambio de vistas en la pantalla principal con un efecto de deslizamiento.
+        """
+        current_index = self.content_stack.currentIndex()
+        if current_index == index:
+            return  # No hacer nada si ya estamos en la vista correcta
+
+        target_widget = self.content_stack.widget(index)
+        width = self.content_stack.width()
+
+        # Crear animación para que la nueva vista se deslice desde la derecha
+        self.slide_animation = QPropertyAnimation(target_widget, b"pos")
+        self.slide_animation.setDuration(300)  # Duración en milisegundos
+        self.slide_animation.setStartValue(QPoint(width, 0))
+        self.slide_animation.setEndValue(QPoint(0, 0))
+        self.slide_animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
+
+        # Cambiar a la nueva vista justo antes de que comience la animación
+        self.content_stack.setCurrentIndex(index)
+        self.slide_animation.start()
+    # --- FIN DE LA MODIFICACIÓN ---
         
     def show_cash_count(self):
         self.cash_count_view.calculate_summary()
@@ -1931,6 +1965,11 @@ class MainWindow(QMainWindow):
         self.login_screen = LoginScreen()
         self.main_screen = MainScreen()
 
+        # --- INICIO DE LA MODIFICACIÓN: Preparar efectos de opacidad para animaciones ---
+        self.main_opacity_effect = QGraphicsOpacityEffect(self.main_screen)
+        self.main_screen.setGraphicsEffect(self.main_opacity_effect)
+        # --- FIN DE LA MODIFICACIÓN ---
+
         self.stacked_widget = QStackedWidget()
         self.stacked_widget.addWidget(self.login_screen)
         self.stacked_widget.addWidget(self.main_screen)
@@ -1946,12 +1985,39 @@ class MainWindow(QMainWindow):
         self.main_screen.sales_view.current_sale_items = []
         self.main_screen.sales_view.update_cart_display()
         self.main_screen.sales_view.customer_name_input.clear()
-        self.stacked_widget.setCurrentIndex(0)
+
+        # --- INICIO DE LA MODIFICACIÓN: Animar la salida de la pantalla principal ---
+        # Crear animación de desvanecimiento (fade-out)
+        self.fade_out_anim = QPropertyAnimation(self.main_opacity_effect, b"opacity")
+        self.fade_out_anim.setDuration(250)
+        self.fade_out_anim.setStartValue(1.0)
+        self.fade_out_anim.setEndValue(0.0)
+        
+        # Cuando la animación termine, cambiar a la pantalla de login
+        def on_finished():
+            self.stacked_widget.setCurrentIndex(0)
+            self.main_opacity_effect.setOpacity(1.0) # Restaurar opacidad para el próximo inicio de sesión
+
+        self.fade_out_anim.finished.connect(on_finished)
+        self.fade_out_anim.start()
+        # --- FIN DE LA MODIFICACIÓN ---
 
     def show_main_screen(self, permissions, user_id):
         self.main_screen.set_user_permissions(permissions, user_id)
         self.main_screen.sales_view.setup_completer()
+
+        # --- INICIO DE LA MODIFICACIÓN: Animar la entrada de la pantalla principal ---
+        # Preparar la pantalla para que aparezca (empezará transparente)
+        self.main_opacity_effect.setOpacity(0.0)
         self.stacked_widget.setCurrentIndex(1)
+
+        # Crear y empezar la animación de aparición (fade-in)
+        self.fade_in_anim = QPropertyAnimation(self.main_opacity_effect, b"opacity")
+        self.fade_in_anim.setDuration(400)
+        self.fade_in_anim.setStartValue(0.0)
+        self.fade_in_anim.setEndValue(1.0)
+        self.fade_in_anim.start()
+        # --- FIN DE LA MODIFICACIÓN ---
         
     def create_backup(self):
         backup_folder = resource_path('backups')
