@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Aplicación de Punto de Venta con PyQt6 y estructura de una sola ventana.
-Versión corregida para resolver NameError y mejorar la visibilidad del texto.
+Aplicación de Punto de Venta con PyQt6.
+Versión conectada a la base de datos en la nube Firebase Firestore.
 """
 import sys
 import json
@@ -13,6 +13,9 @@ from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
 
+import firebase_admin
+from firebase_admin import credentials, firestore
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QLineEdit, QStackedWidget, QFrame, QTableWidget,
@@ -21,9 +24,17 @@ from PyQt6.QtWidgets import (
     QGridLayout, QCompleter, QCheckBox
 )
 from PyQt6.QtCore import pyqtSignal, Qt, QDate, QTimer
-from PyQt6.QtGui import QDoubleValidator, QPixmap, QPalette, QBrush
+from PyQt6.QtGui import QDoubleValidator, QPixmap
 
 from fpdf import FPDF
+
+# Se mueve la importación aquí para verificarla después de iniciar la app
+try:
+    from barcode import Code128
+    from barcode.writer import ImageWriter
+except ImportError:
+    pass
+
 
 # --- Función de Ayuda para Rutas de Archivos ---
 def resource_path(relative_path):
@@ -32,88 +43,68 @@ def resource_path(relative_path):
         # PyInstaller crea una carpeta temporal y guarda la ruta en _MEIPASS
         base_path = sys._MEIPASS
     except Exception:
-        base_path = os.path.abspath(".")
-
+        # Esta línea asegura que la ruta base sea siempre la del script
+        base_path = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_path, relative_path)
 
-# --- Lógica de Base de Datos (Adaptada de tu script original) ---
 
-DB_FILES = {
-    "users": "users.json",
-    "inventory": "inventory.json",
-    "sales": "sales.json",
-    "config": "config.json",
-    "email": "email_config.json"
-}
+db = None
+
 
 def setup_database():
-    """Inicializa los archivos JSON si no existen."""
+    """
+    Verifica y crea los documentos iniciales en Firestore si no existen.
+    """
     try:
-        for key, filename in DB_FILES.items():
-            path = resource_path(filename)
-            if not os.path.exists(path):
-                # Ensure directory exists
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                
-                if key == "users":
-                    data = {
-                        "E001": {
-                            "password": "admin", "full_name": "Administrador Principal",
-                            "permissions": { "can_sell": True, "can_manage_inventory": True, "can_view_history": True, "can_process_returns": True, "can_manage_users": True, "can_view_settings": True, "can_do_cash_count": True }
-                        },
-                        "E002": {
-                            "password": "123", "full_name": "Vendedor de Prueba",
-                            "permissions": { "can_sell": True, "can_manage_inventory": False, "can_view_history": False, "can_process_returns": False, "can_manage_users": False, "can_view_settings": False, "can_do_cash_count": True }
-                        }
-                    }
-                elif key == "inventory":
-                    data = {
-                        "SKU001": {"name": "Camisa de Lino Blanca", "price": 450.0, "quantity": 20, "price_5": 400.0, "price_12": 380.0, "price_50": 350.0, "price_100": 300.0, "price_300": 250.0, "price_500": 200.0},
-                        "SKU002": {"name": "Pantalón de Mezclilla Azul", "price": 750.0, "quantity": 15, "price_5": 700.0, "price_12": 680.0, "price_50": 650.0, "price_100": 600.0, "price_300": 550.0, "price_500": 500.0}
-                    }
-                elif key == "sales":
-                    data = []
-                elif key == "config":
-                    data = {"last_ticket_number": 0, "appearance_mode": "Oscuro", "color_theme": "Azul"}
-                elif key == "email":
-                    data = {"smtp_server": "smtp.gmail.com", "smtp_port": 587, "sender_email": "tu_correo@gmail.com", "sender_password": "tu_contraseña_de_aplicacion"}
-                else:
-                    data = {}
-                
-                with open(path, "w", encoding='utf-8') as f:
-                    json.dump(data, f, indent=4)
+        # 1. Verificar/Crear configuración de la app
+        config_ref = db.collection('config').document('app_config')
+        if not config_ref.get().exists:
+            default_config = {
+                "last_ticket_number": 0,
+                "appearance_mode": "Oscuro",
+                "color_theme": "Azul"
+            }
+            config_ref.set(default_config)
+            print("Documento de configuración inicial creado en Firebase.")
+
+        # 2. Verificar/Crear usuario administrador principal
+        admin_ref = db.collection('users').document('E001')
+        if not admin_ref.get().exists:
+            admin_user = {
+                "password": "admin",
+                "full_name": "Administrador Principal",
+                "permissions": {
+                    "can_sell": True,
+                    "can_manage_inventory": True,
+                    "can_view_history": True,
+                    "can_process_returns": True,
+                    "can_manage_users": True,
+                    "can_view_settings": True,
+                    "can_do_cash_count": True
+                }
+            }
+            admin_ref.set(admin_user)
+            print("Usuario administrador principal creado en Firebase.")
     except Exception as e:
-        print(f"Error setting up database: {e}")
+        QMessageBox.critical(None, "Error de Inicialización",
+                             f"No se pudo configurar la base de datos inicial en Firebase.\n\nError: {e}")
 
-
-def read_db(file_key):
-    file_path = resource_path(DB_FILES[file_key])
-    try:
-        with open(file_path, "r", encoding='utf-8') as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        print(f"File '{file_path}' not found or corrupted. Attempting to recreate.")
-        setup_database()
-        try:
-            with open(file_path, "r", encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"CRITICAL: Failed to read or create database file '{file_path}'. Error: {e}")
-            QMessageBox.critical(None, "Error Crítico de Base de Datos", f"No se pudo leer ni crear el archivo de base de datos necesario: {os.path.basename(file_path)}\n\nLa aplicación no puede continuar.\n\nError: {e}")
-            sys.exit(1)
-
-def write_db(file_key, data):
-    with open(resource_path(DB_FILES[file_key]), "w", encoding='utf-8') as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
 
 def get_next_employee_id():
-    users = read_db("users")
+    """
+    Genera el siguiente ID de empleado (ej. E002, E003).
+    """
+    users_ref = db.collection('users')
+    docs = users_ref.stream()
     max_id_num = 0
-    for username in users.keys():
+    for doc in docs:
+        username = doc.id
         if username.startswith("E") and username[1:].isdigit():
             num = int(username[1:])
-            if num > max_id_num: max_id_num = num
+            if num > max_id_num:
+                max_id_num = num
     return f"E{max_id_num + 1:03d}"
+
 
 # --- Funciones de Tickets y Correo ---
 
@@ -171,23 +162,39 @@ def generate_ticket_pdf(sale_record, filename="ticket.pdf"):
     pdf.multi_cell(0, 5, txt=ticket_text_encoded, align='C')
     pdf.output(filename)
 
+# --- INICIO DE LA MODIFICACIÓN ---
+# La función ahora lee la configuración de correo desde Firebase.
 def send_email_with_attachment(recipient_email, sale_record):
     try:
-        email_config = read_db("email")
-        if email_config["sender_email"] == "tu_correo@gmail.com":
-            QMessageBox.critical(None, "Error de Configuración", "Debe configurar 'email_config.json' antes de enviar correos.")
+        # Obtener configuración de correo desde Firebase
+        email_config_doc = db.collection('config').document('email_config').get()
+        if not email_config_doc.exists or 'sender_email' not in email_config_doc.to_dict() or 'sender_password' not in email_config_doc.to_dict():
+            QMessageBox.critical(None, "Configuración Requerida", 
+                                 "La configuración de correo no se ha establecido.\n\n"
+                                 "Vaya a 'Ajustes' para ingresar el correo y la contraseña de aplicación.")
             return
 
+        email_config = email_config_doc.to_dict()
+        sender_email = email_config.get('sender_email')
+        sender_password = email_config.get('sender_password')
+
+        if not sender_email or not sender_password:
+            QMessageBox.critical(None, "Configuración Incompleta", "Faltan el correo o la contraseña en la configuración de 'Ajustes'.")
+            return
+
+        # Generar el PDF temporalmente
         pdf_filename = resource_path(f"temp_ticket_{sale_record['ticket_number']}.pdf")
         generate_ticket_pdf(sale_record, pdf_filename)
 
+        # Crear el mensaje de correo
         msg = MIMEMultipart()
-        msg['From'] = f"Boutique El Impulso <{email_config['sender_email']}>"
+        msg['From'] = f"Boutique El Impulso <{sender_email}>"
         msg['To'] = recipient_email
         msg['Subject'] = f"Su Ticket de Compra - Boutique El Impulso (Ticket #{sale_record['ticket_number']})"
         body = "¡Hola!\n\nAdjunto encontrará su ticket de compra.\n\nGracias por su preferencia."
         msg.attach(MIMEText(body, 'plain'))
 
+        # Adjuntar el PDF
         with open(pdf_filename, "rb") as attachment:
             part = MIMEBase("application", "octet-stream")
             part.set_payload(attachment.read())
@@ -195,56 +202,43 @@ def send_email_with_attachment(recipient_email, sale_record):
         part.add_header("Content-Disposition", f"attachment; filename=ticket_{sale_record['ticket_number']}.pdf")
         msg.attach(part)
 
-        server = smtplib.SMTP(email_config['smtp_server'], email_config['smtp_port'])
+        # Conectar al servidor SMTP y enviar
+        server = smtplib.SMTP("smtp.gmail.com", 587)
         server.starttls()
-        server.login(email_config['sender_email'], email_config['sender_password'])
+        server.login(sender_email, sender_password)
         server.send_message(msg)
         server.quit()
         
         QMessageBox.information(None, "Éxito", f"Ticket enviado correctamente a {recipient_email}.")
 
+    except smtplib.SMTPAuthenticationError:
+        QMessageBox.critical(None, "Error de Autenticación", 
+                             "El correo o la contraseña de aplicación son incorrectos. Verifique la configuración en 'Ajustes'.")
     except Exception as e:
         QMessageBox.critical(None, "Error de Envío", f"No se pudo enviar el correo. Error: {e}")
     finally:
+        # Limpiar el archivo PDF temporal
         if 'pdf_filename' in locals() and os.path.exists(pdf_filename):
             os.remove(pdf_filename)
+# --- FIN DE LA MODIFICACIÓN ---
+
 
 def print_thermal_ticket(sale_record):
     ticket_text = generate_ticket_text(sale_record)
     try:
-        # from escpos.printer import Usb
-        # p = Usb(idVendor=0xAAAA, idProduct=0xBBBB, profile="TM-T88V")
-        # p.text(ticket_text)
-        # p.cut()
         QMessageBox.information(None, "Impresión Simulada", 
-            "La función de impresión real está comentada.\n"
-            "Abra el archivo .py, descomente las líneas en la función 'print_thermal_ticket' "
-            "y ajuste los valores de idVendor y idProduct para su impresora.\n\n"
+            "La función de impresión real está comentada.\n\n"
             f"DATOS A IMPRIMIR:\n{ticket_text}")
-
     except Exception as e:
         QMessageBox.critical(None, "Error de Impresión", 
-            f"No se pudo conectar con la impresora térmica. Asegúrese de que esté conectada, "
-            f"los drivers instalados y los valores de idVendor/idProduct sean correctos.\n\nError: {e}")
+            f"No se pudo conectar con la impresora térmica.\n\nError: {e}")
 
 def open_cash_drawer():
-    """
-    Envía el comando para abrir el cajón de dinero a través de la impresora.
-    """
     try:
-        # --- CONFIGURACIÓN DE LA IMPRESORA ---
-        # Descomenta las siguientes líneas y ajusta los parámetros para tu impresora.
-        # from escpos.printer import Usb
-        # p = Usb(idVendor=0xAAAA, idProduct=0xBBBB)
-        # p.cashdraw(2) # Envía el pulso al pin 2
-        # p.cashdraw(5) # Envía el pulso al pin 5
-        # --- FIN DE CONFIGURACIÓN ---
-
         QMessageBox.information(None, "Simulación", "Comando para abrir el cajón de dinero enviado.")
     except Exception as e:
         QMessageBox.critical(None, "Error de Cajón", 
-            f"No se pudo enviar el comando al cajón de dinero.\n"
-            f"Asegúrese de que la impresora esté conectada y configurada.\nError: {e}")
+            f"No se pudo enviar el comando al cajón de dinero.\nError: {e}")
 
 
 def generate_cash_count_pdf(summary_text, user_id):
@@ -291,7 +285,6 @@ class ProductDialog(QDialog):
         self.price_input = QLineEdit("0.00")
         self.quantity_input = QLineEdit("0")
         
-        # Grid for tiered prices
         price_grid = QGridLayout()
         self.price_5_input = QLineEdit("0.00")
         self.price_12_input = QLineEdit("0.00")
@@ -357,23 +350,27 @@ class UserPermissionsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Detalles y Permisos de Usuario")
         self.setMinimumWidth(450)
-
-        self.layout = QFormLayout(self)
+        
+        self.main_layout = QVBoxLayout(self)
+        form_layout = QFormLayout()
+        
         self.full_name_input = QLineEdit()
         self.password_input = QLineEdit()
         self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
 
-        self.layout.addRow("Nombre Completo:", self.full_name_input)
-        self.layout.addRow("Contraseña:", self.password_input)
+        form_layout.addRow("Nombre Completo:", self.full_name_input)
+        form_layout.addRow("Contraseña:", self.password_input)
+        
+        self.main_layout.addLayout(form_layout)
 
         if is_new_user:
             self.template_combo = QComboBox()
             self.template_combo.addItems(["Vendedor", "Administrador"])
             self.template_combo.currentTextChanged.connect(self.apply_template)
-            self.layout.addRow("Plantilla de Permisos:", self.template_combo)
-
-        permissions_group = QFrame(self)
-        permissions_layout = QGridLayout(permissions_group)
+            form_layout.addRow("Plantilla de Permisos:", self.template_combo)
+        
+        permissions_container = QWidget()
+        permissions_layout = QGridLayout(permissions_container)
         self.permission_checkboxes = {}
         
         permissions_map = [
@@ -393,13 +390,13 @@ class UserPermissionsDialog(QDialog):
                 col = 0
                 row += 1
         
-        self.layout.addRow(QLabel("--- Permisos ---"))
-        self.layout.addRow(permissions_group)
+        self.main_layout.addWidget(QLabel("--- Permisos ---"))
+        self.main_layout.addWidget(permissions_container)
 
         self.button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
-        self.layout.addWidget(self.button_box)
+        self.main_layout.addWidget(self.button_box)
 
         if user_data:
             self.full_name_input.setText(user_data.get("full_name", ""))
@@ -407,14 +404,18 @@ class UserPermissionsDialog(QDialog):
             permissions = user_data.get("permissions", {})
             for key, checkbox in self.permission_checkboxes.items():
                 checkbox.setChecked(permissions.get(key, False))
-        else: # Nuevo usuario
+        elif is_new_user:
             self.apply_template("Vendedor")
             
     def apply_template(self, template_name):
-        if template_name == "Vendedor":
-            perms = {"can_sell": True, "can_manage_inventory": False, "can_view_history": False, "can_process_returns": False, "can_manage_users": False, "can_view_settings": False, "can_do_cash_count": True}
-        else: # Administrador
-            perms = {"can_sell": True, "can_manage_inventory": True, "can_view_history": True, "can_process_returns": True, "can_manage_users": True, "can_view_settings": True, "can_do_cash_count": True}
+        perms = {
+            "can_sell": True, "can_manage_inventory": False, 
+            "can_view_history": False, "can_process_returns": False, 
+            "can_manage_users": False, "can_view_settings": False, 
+            "can_do_cash_count": True
+        }
+        if template_name == "Administrador":
+            perms = {key: True for key in perms}
         
         for key, checkbox in self.permission_checkboxes.items():
             checkbox.setChecked(perms.get(key, False))
@@ -467,7 +468,6 @@ class PaymentDialog(QDialog):
         folio_layout.addRow("Número de Folio:", self.folio_input)
         self.folio_input.returnPressed.connect(self.validate_and_accept)
         self.stacked_widget.addWidget(folio_widget)
-        self.stacked_widget.addWidget(folio_widget) 
     def calculate_change(self):
         try:
             received = float(self.amount_received_input.text())
@@ -538,9 +538,6 @@ class PostSaleDialog(QDialog):
             self.accept()
 
 # --- Vistas o Pantallas de la Aplicación ---
-# El orden de las clases es importante para evitar NameError
-# Definimos todas las pantallas antes de MainScreen y MainWindow
-
 class LoginScreen(QWidget):
     login_successful = pyqtSignal(dict, str)
     
@@ -623,6 +620,7 @@ class LoginScreen(QWidget):
         self.username_input.returnPressed.connect(self.password_input.setFocus)
         self.password_input.returnPressed.connect(self.check_login)
         self.login_button.clicked.connect(self.check_login)
+        self.recover_button.clicked.connect(self.recover_password)
 
         bg_path = resource_path("background.png")
         if os.path.exists(bg_path):
@@ -638,19 +636,40 @@ class LoginScreen(QWidget):
     def check_login(self):
         username = self.username_input.text().upper().strip()
         password = self.password_input.text()
-        users = read_db("users")
         
         user_id_to_check = "E001" if username == "ADMIN" else username
+        
+        try:
+            user_doc = db.collection('users').document(user_id_to_check).get()
+            if user_doc.exists:
+                user_data = user_doc.to_dict()
+                if user_data.get("password") == password:
+                    permissions = user_data.get("permissions", {})
+                    # Forzar todos los permisos para el administrador principal
+                    if user_id_to_check == "E001":
+                        permissions = {k: True for k, v in permissions.items()}
+                    self.login_successful.emit(permissions, user_id_to_check)
+                else:
+                    QMessageBox.warning(self, "Error de Autenticación", "Contraseña incorrecta.")
+            else:
+                QMessageBox.warning(self, "Error de Autenticación", "Usuario no encontrado.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error de Conexión", f"No se pudo verificar el usuario: {e}")
 
-        if user_id_to_check in users and users[user_id_to_check]["password"] == password:
-            permissions = users[user_id_to_check].get("permissions", {})
-            self.login_successful.emit(permissions, user_id_to_check)
-        else:
-             QMessageBox.warning(self, "Error de Autenticación", "Usuario o contraseña incorrectos.")
-
-
-# ... (El resto de las clases de pantallas vienen aquí, antes de MainWindow)
-# ... (Clases InventoryScreen, SalesScreen, etc. sin cambios)
+    def recover_password(self):
+        username, ok = QInputDialog.getText(self, "Recuperar Contraseña", "Ingrese su número de empleado (ej. E002):")
+        
+        if ok and username:
+            username = username.strip().upper()
+            try:
+                user_doc = db.collection('users').document(username).get()
+                if user_doc.exists:
+                    password = user_doc.to_dict().get("password", "No encontrada")
+                    QMessageBox.information(self, "Contraseña Recuperada", f"La contraseña para '{username}' es: {password}")
+                else:
+                    QMessageBox.warning(self, "Usuario no Encontrado", f"El usuario '{username}' no fue encontrado.")
+            except Exception as e:
+                QMessageBox.critical(self, "Error de Conexión", f"No se pudo recuperar la contraseña: {e}")
 
 class InventoryScreen(QWidget):
     inventory_changed = pyqtSignal()
@@ -680,11 +699,13 @@ class InventoryScreen(QWidget):
         add_button = QPushButton("Añadir Producto")
         remove_button = QPushButton("Eliminar Producto")
         pdf_button = QPushButton("Guardar como PDF")
+        barcode_button = QPushButton("Generar Códigos de Barras")
         refresh_button = QPushButton("Refrescar Lista")
         
         button_layout.addWidget(add_button)
         button_layout.addWidget(remove_button)
         button_layout.addWidget(pdf_button)
+        button_layout.addWidget(barcode_button)
         button_layout.addStretch()
         button_layout.addWidget(refresh_button)
         layout.addLayout(button_layout)
@@ -693,70 +714,41 @@ class InventoryScreen(QWidget):
         add_button.clicked.connect(self.add_product)
         remove_button.clicked.connect(self.remove_product)
         pdf_button.clicked.connect(self.save_inventory_pdf)
-        self.table.cellClicked.connect(self.handle_cell_click)
-        self.table.cellDoubleClicked.connect(self.handle_cell_double_click)
+        barcode_button.clicked.connect(self.open_barcode_generator)
+        self.table.cellDoubleClicked.connect(self.edit_product)
 
     def load_inventory(self):
-        inventory_data = read_db("inventory")
-        self.table.setRowCount(0)
-        self.table.setRowCount(len(inventory_data))
-        for row, (sku, data) in enumerate(inventory_data.items()):
-            sku_item = QTableWidgetItem(sku)
-            name_item = QTableWidgetItem(data.get("name", "N/A"))
-            
-            sku_item.setFlags(sku_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            
-            self.table.setItem(row, 0, sku_item)
-            self.table.setItem(row, 1, name_item)
-            self.table.setItem(row, 2, QTableWidgetItem(f"${data.get('price', 0.0):.2f}"))
-            self.table.setItem(row, 3, QTableWidgetItem(f"${data.get('price_5', 0.0):.2f}"))
-            self.table.setItem(row, 4, QTableWidgetItem(str(data.get("quantity", 0))))
+        try:
+            inventory_docs = db.collection('inventory').stream()
+            inventory_data = {doc.id: doc.to_dict() for doc in inventory_docs}
+            self.table.setRowCount(0)
+            self.table.setRowCount(len(inventory_data))
+            for row, (sku, data) in enumerate(inventory_data.items()):
+                self.table.setItem(row, 0, QTableWidgetItem(sku))
+                self.table.setItem(row, 1, QTableWidgetItem(data.get("name", "N/A")))
+                self.table.setItem(row, 2, QTableWidgetItem(f"${data.get('price', 0.0):.2f}"))
+                self.table.setItem(row, 3, QTableWidgetItem(f"${data.get('price_5', 0.0):.2f}"))
+                self.table.setItem(row, 4, QTableWidgetItem(str(data.get("quantity", 0))))
+        except Exception as e:
+            QMessageBox.critical(self, "Error de Carga", f"No se pudo cargar el inventario: {e}")
 
     def add_product(self):
         dialog = ProductDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.save_product_data(dialog.get_data())
 
-    def handle_cell_double_click(self, row, column):
+    def edit_product(self, row, column):
         sku = self.table.item(row, 0).text()
-        inventory = read_db("inventory")
-        product_data = inventory.get(sku, {})
-        product_data["sku"] = sku
-
-        dialog = ProductDialog(self, product_data=product_data)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.save_product_data(dialog.get_data(), is_edit=True)
-
-    def handle_cell_click(self, row, column):
-        if column not in [0, 1]:
-            return
-        
-        old_value = self.table.item(row, column).text()
-        
-        if column == 0:
-            new_sku, ok = QInputDialog.getText(self, "Editar SKU", "Nuevo SKU:", text=old_value)
-            if ok and new_sku and new_sku.upper() != old_value:
-                inventory = read_db("inventory")
-                if new_sku.upper() in inventory:
-                    QMessageBox.warning(self, "SKU Duplicado", "El nuevo SKU ya existe.")
-                    return
-                product_data = inventory.pop(old_value)
-                inventory[new_sku.upper()] = product_data
-                write_db("inventory", inventory)
-                self.load_inventory()
-                self.inventory_changed.emit()
-
-        elif column == 1:
-            sku = self.table.item(row, 0).text()
-            new_name, ok = QInputDialog.getText(self, "Editar Nombre", "Nuevo Nombre:", text=old_value)
-            if ok and new_name and new_name != old_value:
-                inventory = read_db("inventory")
-                if sku in inventory:
-                    inventory[sku]["name"] = new_name
-                    write_db("inventory", inventory)
-                    self.load_inventory()
-                    self.inventory_changed.emit()
+        try:
+            product_doc = db.collection('inventory').document(sku).get()
+            if product_doc.exists:
+                product_data = product_doc.to_dict()
+                product_data["sku"] = sku
+                dialog = ProductDialog(self, product_data=product_data)
+                if dialog.exec() == QDialog.DialogCode.Accepted:
+                    self.save_product_data(dialog.get_data(), is_edit=True)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"No se pudo obtener el producto: {e}")
 
     def save_product_data(self, data, is_edit=False):
         if not data["sku"] or not data["name"]:
@@ -771,16 +763,14 @@ class InventoryScreen(QWidget):
                 "price_50": float(data["price_50"]), "price_100": float(data["price_100"]),
                 "price_300": float(data["price_300"]), "price_500": float(data["price_500"]),
             }
-
-            inventory = read_db("inventory")
             sku = data["sku"]
             
-            if not is_edit and sku in inventory:
+            inventory_ref = db.collection('inventory')
+            if not is_edit and inventory_ref.document(sku).get().exists:
                 QMessageBox.warning(self, "SKU duplicado", "El SKU ya existe.")
                 return
 
-            inventory[sku] = product_record
-            write_db("inventory", inventory)
+            inventory_ref.document(sku).set(product_record)
             self.load_inventory()
             self.inventory_changed.emit()
 
@@ -804,15 +794,25 @@ class InventoryScreen(QWidget):
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
 
         if reply == QMessageBox.StandardButton.Yes:
-            inventory = read_db("inventory")
-            if sku in inventory:
-                del inventory[sku]
-                write_db("inventory", inventory)
+            try:
+                db.collection('inventory').document(sku).delete()
                 self.load_inventory()
                 self.inventory_changed.emit()
+                QMessageBox.information(self, "Éxito", f"Producto '{name}' eliminado.")
+            except Exception as e:
+                QMessageBox.critical(self, "Error de Base de Datos", f"No se pudo eliminar el producto: {e}")
 
     def save_inventory_pdf(self):
-        inventory = read_db("inventory")
+        try:
+            inventory_docs = db.collection('inventory').stream()
+            inventory = {doc.id: doc.to_dict() for doc in inventory_docs}
+            if not inventory:
+                QMessageBox.information(self, "Inventario Vacío", "No hay productos para generar un reporte.")
+                return
+        except Exception as e:
+            QMessageBox.critical(self, "Error de Conexión", f"No se pudo acceder a la base de datos: {e}")
+            return
+            
         folder = resource_path("reportes")
         os.makedirs(folder, exist_ok=True)
         filename = os.path.join(folder, f"inventario_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
@@ -828,7 +828,7 @@ class InventoryScreen(QWidget):
                 pdf.ln(30)
 
             pdf.set_font("Courier", 'B', 16)
-            pdf.cell(0, 10, "Reporte de Inventario", new_x="LMARGIN", new_y="NEXT", align='C')
+            pdf.cell(0, 10, "Reporte de Inventario", border=0, ln=1, align='C')
             pdf.ln(5)
             
             pdf.set_font("Courier", 'B', 8)
@@ -843,19 +843,23 @@ class InventoryScreen(QWidget):
                 pdf.cell(col_widths[0], 6, sku, 1)
                 safe_name = data.get('name', '').encode('latin-1', 'replace').decode('latin-1')
                 pdf.cell(col_widths[1], 6, safe_name, 1)
-                pdf.cell(col_widths[2], 6, f"${data.get('price', 0):.2f}", 1, align='R')
-                pdf.cell(col_widths[3], 6, f"${data.get('price_5', 0):.2f}", 1, align='R')
-                pdf.cell(col_widths[4], 6, f"${data.get('price_12', 0):.2f}", 1, align='R')
-                pdf.cell(col_widths[5], 6, f"${data.get('price_50', 0):.2f}", 1, align='R')
-                pdf.cell(col_widths[6], 6, f"${data.get('price_100', 0):.2f}", 1, align='R')
-                pdf.cell(col_widths[7], 6, f"${data.get('price_300', 0):.2f}/${data.get('price_500', 0):.2f}", 1, align='R')
-                pdf.cell(col_widths[8], 6, str(data.get('quantity', 0)), 1, align='C')
+                pdf.cell(col_widths[2], 6, f"${data.get('price', 0.0):.2f}", 1, align='R')
+                pdf.cell(col_widths[3], 6, f"${data.get('price_5', 0.0):.2f}", 1, align='R')
+                pdf.cell(col_widths[4], 6, f"${data.get('price_12', 0.0):.2f}", 1, align='R')
+                pdf.cell(col_widths[5], 6, f"${data.get('price_50', 0.0):.2f}", 1, align='R')
+                pdf.cell(col_widths[6], 6, f"${data.get('price_100', 0.0):.2f}", 1, align='R')
+                pdf.cell(col_widths[7], 6, f"${data.get('price_300', 0.0):.2f}/${data.get('price_500', 0.0):.2f}", 1, align='R')
+                pdf.cell(col_widths[8], 6, str(data.get("quantity", 0)), 1, align='C')
                 pdf.ln()
 
             pdf.output(filename)
             QMessageBox.information(self, "Éxito", f"Reporte de inventario guardado como:\n{filename}")
         except Exception as e:
             QMessageBox.critical(self, "Error al generar PDF", f"No se pudo crear el archivo PDF.\nError: {e}")
+
+    def open_barcode_generator(self):
+        dialog = BarcodeGeneratorDialog(self)
+        dialog.exec()
 
 class SalesScreen(QWidget):
     sale_finalized = pyqtSignal()
@@ -931,12 +935,15 @@ class SalesScreen(QWidget):
         self.cart_table.cellDoubleClicked.connect(self.modify_quantity_from_cell)
 
     def setup_completer(self):
-        inventory = read_db("inventory")
-        name_list = [f"{data['name']} [{sku}]" for sku, data in inventory.items()]
-        self.completer = QCompleter(name_list, self)
-        self.completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        self.completer.setFilterMode(Qt.MatchFlag.MatchContains)
-        self.product_search_input.setCompleter(self.completer)
+        try:
+            inventory_docs = db.collection('inventory').stream()
+            name_list = [f"{doc.to_dict()['name']} [{doc.id}]" for doc in inventory_docs]
+            self.completer = QCompleter(name_list, self)
+            self.completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            self.completer.setFilterMode(Qt.MatchFlag.MatchContains)
+            self.product_search_input.setCompleter(self.completer)
+        except Exception as e:
+            print(f"No se pudo crear el autocompletado: {e}")
 
     def modify_quantity_from_cell(self, row, column):
         self.modify_quantity()
@@ -946,77 +953,86 @@ class SalesScreen(QWidget):
                  (50, "price_50"), (12, "price_12"), (5, "price_5")]
         
         for threshold, key in tiers:
-            if quantity >= threshold and key in product_info and product_info[key] > 0:
-                return product_info[key]
+            price = product_info.get(key)
+            if price is not None and quantity >= threshold:
+                return float(price)
         
-        return product_info.get("price", 0.0)
+        return float(product_info.get("price", 0.0))
 
     def add_product_to_cart(self):
         search_term = self.product_search_input.text().strip()
-        if not search_term:
-            return
+        if not search_term: return
 
         sku_to_add = None
-        
+        product_info = None
+
         if '[' in search_term and ']' in search_term:
-            try:
-                sku_to_add = search_term.split('[')[-1].split(']')[0].upper()
-            except IndexError:
-                pass
+            try: sku_to_add = search_term.split('[')[-1].split(']')[0].upper()
+            except IndexError: pass
         else:
             sku_to_add = search_term.upper()
 
-        inventory = read_db("inventory")
-        product_info = inventory.get(sku_to_add)
+        try:
+            if sku_to_add:
+                doc = db.collection('inventory').document(sku_to_add).get()
+                if doc.exists: product_info = doc.to_dict()
 
-        if not product_info:
-            search_lower = search_term.lower()
-            for sku, data in inventory.items():
-                if search_lower in data.get('name', '').lower():
-                    product_info = data
-                    sku_to_add = sku
+            if not product_info:
+                inventory_ref = db.collection('inventory')
+                query = inventory_ref.where('name', '==', search_term).limit(1)
+                docs = query.stream()
+                for doc in docs:
+                    product_info = doc.to_dict()
+                    sku_to_add = doc.id
                     break
-        
-        if not product_info:
-            QMessageBox.warning(self, "No encontrado", f"No se encontró un producto con el SKU o nombre '{search_term}'.")
-            return
+            
+            if not product_info:
+                QMessageBox.warning(self, "No encontrado", f"No se encontró un producto con el SKU o nombre '{search_term}'.")
+                return
 
-        stock_available = product_info.get("quantity", 0)
-        existing_item = next((item for item in self.current_sale_items if item["sku"] == sku_to_add), None)
-        
-        current_qty_in_cart = existing_item["quantity"] if existing_item else 0
-        
-        if current_qty_in_cart >= stock_available:
-            QMessageBox.warning(self, "Stock Insuficiente", f"No hay más stock disponible para '{product_info['name']}'.")
-            return
+            stock_available = product_info.get("quantity", 0)
+            existing_item = next((item for item in self.current_sale_items if item["sku"] == sku_to_add), None)
+            
+            current_qty_in_cart = existing_item["quantity"] if existing_item else 0
+            
+            if current_qty_in_cart >= stock_available:
+                QMessageBox.warning(self, "Stock Insuficiente", f"No hay más stock disponible para '{product_info['name']}'.")
+                return
 
-        if existing_item:
-            existing_item["quantity"] += 1
-        else:
-            self.current_sale_items.append({"sku": sku_to_add, "name": product_info["name"], "quantity": 1})
-        
-        self.update_cart_display()
-        self.product_search_input.clear()
+            if existing_item:
+                existing_item["quantity"] += 1
+            else:
+                self.current_sale_items.append({"sku": sku_to_add, "name": product_info["name"], "quantity": 1})
+            
+            self.update_cart_display()
+            self.product_search_input.clear()
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error de Base de Datos", f"No se pudo buscar el producto: {e}")
 
     def update_cart_display(self):
-        inventory = read_db("inventory")
         self.cart_table.setRowCount(len(self.current_sale_items))
         subtotal = 0
-
-        for row, item in enumerate(self.current_sale_items):
-            product_info = inventory.get(item["sku"], {})
-            effective_price = self.get_price_for_quantity(product_info, item["quantity"])
-            item["price"] = effective_price
+        try:
+            for row, item in enumerate(self.current_sale_items):
+                product_doc = db.collection('inventory').document(item["sku"]).get()
+                if not product_doc.exists: continue
+                
+                product_info = product_doc.to_dict()
+                effective_price = self.get_price_for_quantity(product_info, item["quantity"])
+                item["price"] = effective_price
+                
+                total_item_price = effective_price * item["quantity"]
+                subtotal += total_item_price
+                
+                self.cart_table.setItem(row, 0, QTableWidgetItem(item["name"]))
+                self.cart_table.setItem(row, 1, QTableWidgetItem(str(item["quantity"])))
+                self.cart_table.setItem(row, 2, QTableWidgetItem(f"${effective_price:.2f}"))
+                self.cart_table.setItem(row, 3, QTableWidgetItem(f"${total_item_price:.2f}"))
             
-            total_item_price = effective_price * item["quantity"]
-            subtotal += total_item_price
-            
-            self.cart_table.setItem(row, 0, QTableWidgetItem(item["name"]))
-            self.cart_table.setItem(row, 1, QTableWidgetItem(str(item["quantity"])))
-            self.cart_table.setItem(row, 2, QTableWidgetItem(f"${effective_price:.2f}"))
-            self.cart_table.setItem(row, 3, QTableWidgetItem(f"${total_item_price:.2f}"))
-        
-        self.subtotal_label.setText(f"Subtotal: ${subtotal:.2f}")
+            self.subtotal_label.setText(f"Subtotal: ${subtotal:.2f}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error de Base de Datos", f"No se pudo actualizar el carrito: {e}")
     
     def modify_quantity(self):
         selected_rows = self.cart_table.selectionModel().selectedRows()
@@ -1026,19 +1042,22 @@ class SalesScreen(QWidget):
         
         selected_row = selected_rows[0].row()
         item = self.current_sale_items[selected_row]
+        
+        try:
+            product_doc = db.collection('inventory').document(item["sku"]).get()
+            stock_available = product_doc.to_dict().get("quantity", 0)
 
-        inventory = read_db("inventory")
-        stock_available = inventory.get(item["sku"], {}).get("quantity", 0)
+            new_quantity, ok = QInputDialog.getInt(
+                self, "Modificar Cantidad", 
+                f"Ingrese la nueva cantidad para '{item['name']}'\n(Stock disponible: {stock_available})",
+                value=item["quantity"], min=1, max=stock_available
+            )
 
-        new_quantity, ok = QInputDialog.getInt(
-            self, "Modificar Cantidad", 
-            f"Ingrese la nueva cantidad para '{item['name']}'\n(Stock disponible: {stock_available})",
-            value=item["quantity"], min=1, max=stock_available
-        )
-
-        if ok:
-            self.current_sale_items[selected_row]["quantity"] = new_quantity
-            self.update_cart_display()
+            if ok:
+                self.current_sale_items[selected_row]["quantity"] = new_quantity
+                self.update_cart_display()
+        except Exception as e:
+            QMessageBox.critical(self, "Error de Base de Datos", f"No se pudo obtener el stock: {e}")
 
     def remove_item(self):
         selected_rows = self.cart_table.selectionModel().selectedRows()
@@ -1070,45 +1089,45 @@ class SalesScreen(QWidget):
             self.finalize_sale(total, payment_data)
 
     def finalize_sale(self, total, payment_data):
-        config = read_db("config")
-        sales = read_db("sales")
-        inventory = read_db("inventory")
-        
-        new_ticket_number = config.get("last_ticket_number", 0) + 1
-        
-        sale_record = {
-            "ticket_number": new_ticket_number,
-            "timestamp": datetime.datetime.now().isoformat(),
-            "user": self.current_user_id,
-            "customer_name": self.customer_name_input.text(),
-            "items": self.current_sale_items,
-            "total": total,
-            "payment_method": payment_data["method"],
-            "payment_details": payment_data["details"],
-            "status": "COMPLETADA"
-        }
-        sales.append(sale_record)
-        
-        for item in self.current_sale_items:
-            if item["sku"] in inventory:
-                inventory[item["sku"]]["quantity"] -= item["quantity"]
-        
-        config["last_ticket_number"] = new_ticket_number
-        
-        write_db("sales", sales)
-        write_db("inventory", inventory)
-        write_db("config", config)
-        
-        if payment_data["method"] == "Efectivo":
-            open_cash_drawer()
+        try:
+            config_ref = db.collection('config').document('app_config')
+            config = config_ref.get().to_dict()
+            
+            new_ticket_number = config.get("last_ticket_number", 0) + 1
+            
+            sale_record = {
+                "ticket_number": new_ticket_number,
+                "timestamp": datetime.datetime.now().isoformat(),
+                "user": self.current_user_id,
+                "customer_name": self.customer_name_input.text(),
+                "items": self.current_sale_items,
+                "total": total,
+                "payment_method": payment_data["method"],
+                "payment_details": payment_data["details"],
+                "status": "COMPLETADA"
+            }
+            db.collection('sales').add(sale_record)
+            
+            batch = db.batch()
+            for item in self.current_sale_items:
+                item_ref = db.collection('inventory').document(item["sku"])
+                batch.update(item_ref, {'quantity': firestore.Increment(-item['quantity'])})
+            batch.commit()
+            
+            config_ref.update({"last_ticket_number": new_ticket_number})
+            
+            if payment_data["method"] == "Efectivo":
+                open_cash_drawer()
 
-        post_sale_dialog = PostSaleDialog(sale_record, self)
-        post_sale_dialog.exec()
+            post_sale_dialog = PostSaleDialog(sale_record, self)
+            post_sale_dialog.exec()
 
-        self.current_sale_items = []
-        self.update_cart_display()
-        self.customer_name_input.clear()
-        self.sale_finalized.emit()
+            self.current_sale_items = []
+            self.update_cart_display()
+            self.customer_name_input.clear()
+            self.sale_finalized.emit()
+        except Exception as e:
+            QMessageBox.critical(self, "Error al Finalizar Venta", f"No se pudo completar la venta: {e}")
 
 class UserManagementScreen(QWidget):
     def __init__(self, parent=None):
@@ -1126,9 +1145,11 @@ class UserManagementScreen(QWidget):
         
         button_layout = QHBoxLayout()
         add_btn = QPushButton("Añadir Usuario")
+        edit_perms_btn = QPushButton("Editar Permisos")
         del_btn = QPushButton("Eliminar Usuario")
         refresh_btn = QPushButton("Refrescar")
         button_layout.addWidget(add_btn)
+        button_layout.addWidget(edit_perms_btn)
         button_layout.addWidget(del_btn)
         button_layout.addStretch()
         button_layout.addWidget(refresh_btn)
@@ -1139,18 +1160,30 @@ class UserManagementScreen(QWidget):
 
         add_btn.clicked.connect(self.add_user)
         del_btn.clicked.connect(self.remove_user)
+        edit_perms_btn.clicked.connect(self.edit_user_permissions)
         refresh_btn.clicked.connect(self.load_users)
-        self.table.cellDoubleClicked.connect(self.edit_user)
+        self.table.cellDoubleClicked.connect(self.edit_user_permissions_from_cell)
 
     def load_users(self):
-        users = read_db("users")
-        self.table.setRowCount(0)
-        self.table.setRowCount(len(users))
-        for row, (eid, data) in enumerate(users.items()):
-            role = "Administrador" if all(data.get("permissions", {}).values()) else "Vendedor"
-            self.table.setItem(row, 0, QTableWidgetItem(eid))
-            self.table.setItem(row, 1, QTableWidgetItem(data.get("full_name", "")))
-            self.table.setItem(row, 2, QTableWidgetItem(role))
+        try:
+            users_docs = db.collection('users').stream()
+            users = {doc.id: doc.to_dict() for doc in users_docs}
+            self.table.setRowCount(0)
+            self.table.setRowCount(len(users))
+            for row, (eid, data) in enumerate(users.items()):
+                permissions = data.get("permissions", {})
+                is_admin = all(permissions.values())
+                is_seller = permissions.get("can_sell") and not any([permissions.get(k, False) for k in ["can_manage_inventory", "can_manage_users"]])
+                
+                if eid == "E001" or is_admin: role = "Administrador"
+                elif is_seller: role = "Vendedor"
+                else: role = "Personalizado"
+
+                self.table.setItem(row, 0, QTableWidgetItem(eid))
+                self.table.setItem(row, 1, QTableWidgetItem(data.get("full_name", "")))
+                self.table.setItem(row, 2, QTableWidgetItem(role))
+        except Exception as e:
+            QMessageBox.critical(self, "Error de Carga", f"No se pudo cargar la lista de usuarios: {e}")
             
     def add_user(self):
         dialog = UserPermissionsDialog(self, is_new_user=True)
@@ -1159,31 +1192,47 @@ class UserManagementScreen(QWidget):
             if not all([data["full_name"], data["password"]]):
                 QMessageBox.warning(self, "Datos incompletos", "El nombre y la contraseña son obligatorios.")
                 return
+            try:
+                new_eid = get_next_employee_id()
+                new_user_data = {"full_name": data["full_name"], "password": data["password"], "permissions": data["permissions"]}
+                db.collection('users').document(new_eid).set(new_user_data)
+                self.load_users()
+            except Exception as e:
+                QMessageBox.critical(self, "Error de Creación", f"No se pudo añadir el usuario: {e}")
 
-            users = read_db("users")
-            new_eid = get_next_employee_id()
-            users[new_eid] = {"full_name": data["full_name"], "password": data["password"], "permissions": data["permissions"]}
-            write_db("users", users)
-            self.load_users()
+    def edit_user_permissions_from_cell(self, row, column):
+        self.edit_user_permissions()
 
-    def edit_user(self, row, column):
+    def edit_user_permissions(self):
+        row = self.table.currentRow()
+        if row < 0:
+            QMessageBox.warning(self, "Sin selección", "Seleccione un usuario para editar.")
+            return
+        
         eid = self.table.item(row, 0).text()
         if eid == "E001":
             QMessageBox.warning(self, "Acción no Permitida", "No se pueden modificar los permisos del administrador principal.")
             return
-            
-        users = read_db("users")
-        user_data = users.get(eid)
+        
+        try:
+            user_doc = db.collection('users').document(eid).get()
+            if not user_doc.exists:
+                QMessageBox.critical(self, "Error", "El usuario ya no existe.")
+                self.load_users()
+                return
 
-        dialog = UserPermissionsDialog(self, user_data=user_data)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            new_data = dialog.get_data()
-            users[eid]["full_name"] = new_data["full_name"]
-            if new_data["password"]: # Only update password if a new one was entered
-                users[eid]["password"] = new_data["password"]
-            users[eid]["permissions"] = new_data["permissions"]
-            write_db("users", users)
-            self.load_users()
+            user_data = user_doc.to_dict()
+            dialog = UserPermissionsDialog(self, user_data=user_data)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                new_data = dialog.get_data()
+                update_payload = {"full_name": new_data["full_name"], "permissions": new_data["permissions"]}
+                if new_data["password"]:
+                    update_payload["password"] = new_data["password"]
+                
+                db.collection('users').document(eid).update(update_payload)
+                self.load_users()
+        except Exception as e:
+            QMessageBox.critical(self, "Error de Edición", f"No se pudo editar el usuario: {e}")
 
     def remove_user(self):
         row = self.table.currentRow()
@@ -1197,11 +1246,11 @@ class UserManagementScreen(QWidget):
 
         reply = QMessageBox.question(self, "Confirmar", f"¿Seguro que desea eliminar al usuario {eid}?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
-            users = read_db("users")
-            if eid in users:
-                del users[eid]
-                write_db("users", users)
+            try:
+                db.collection('users').document(eid).delete()
                 self.load_users()
+            except Exception as e:
+                QMessageBox.critical(self, "Error de Eliminación", f"No se pudo eliminar el usuario: {e}")
 
 class SalesHistoryScreen(QWidget):
     def __init__(self, parent=None):
@@ -1246,34 +1295,80 @@ class SalesHistoryScreen(QWidget):
         
         self.load_today_sales()
 
-    def load_sales(self, filtered_sales):
-        self.table.setRowCount(0)
-        self.table.setRowCount(len(filtered_sales))
-        for row, sale in enumerate(sorted(filtered_sales, key=lambda s: s['timestamp'], reverse=True)):
-            ts = datetime.datetime.fromisoformat(sale['timestamp']).strftime('%Y-%m-%d %H:%M:%S')
-            self.table.setItem(row, 0, QTableWidgetItem(str(sale.get("ticket_number", ""))))
-            self.table.setItem(row, 1, QTableWidgetItem(ts))
-            self.table.setItem(row, 2, QTableWidgetItem(sale.get("customer_name", "N/A")))
-            self.table.setItem(row, 3, QTableWidgetItem(sale.get("user", "")))
-            self.table.setItem(row, 4, QTableWidgetItem(sale.get("payment_method", "N/A")))
-            self.table.setItem(row, 5, QTableWidgetItem(f"${sale.get('total', 0.0):.2f}"))
-            self.table.setItem(row, 6, QTableWidgetItem(sale.get("status", "")))
+    def load_sales(self, query):
+        try:
+            sales_docs = query.stream()
+            sales_list = [doc.to_dict() for doc in sales_docs]
+            self.table.setRowCount(0)
+            self.table.setRowCount(len(sales_list))
 
+            # --- INICIO DE LA CORRECCIÓN ---
+            # Se mejora la función de normalización para manejar fechas con y sin zona horaria.
+            def get_sortable_timestamp(sale):
+                ts = sale.get('timestamp')
+                sortable_ts = None
+                
+                if isinstance(ts, str):
+                    try:
+                        # Convierte el texto a un objeto de fecha
+                        sortable_ts = datetime.datetime.fromisoformat(ts)
+                    except ValueError:
+                        sortable_ts = datetime.datetime.min
+                elif isinstance(ts, datetime.datetime):
+                    # Si ya es un objeto de fecha, lo usa
+                    sortable_ts = ts
+                else:
+                    # Si no hay fecha o es un tipo no esperado, lo pone al final
+                    sortable_ts = datetime.datetime.min
+
+                # Solución al error: Si el datetime tiene información de zona horaria ("offset-aware"),
+                # se la quitamos para que se pueda comparar con fechas que no la tienen ("offset-naive").
+                if sortable_ts and sortable_ts.tzinfo:
+                    return sortable_ts.replace(tzinfo=None)
+                return sortable_ts
+
+            # Se utiliza la nueva función para ordenar la lista de ventas de forma segura
+            sorted_sales = sorted(sales_list, key=get_sortable_timestamp, reverse=True)
+
+            for row, sale in enumerate(sorted_sales):
+                timestamp_val = sale.get('timestamp')
+                ts_str = "Fecha inválida"
+                if isinstance(timestamp_val, datetime.datetime):
+                    ts_str = timestamp_val.strftime('%Y-%m-%d %H:%M:%S')
+                elif isinstance(timestamp_val, str):
+                    try:
+                        ts_str = datetime.datetime.fromisoformat(timestamp_val).strftime('%Y-%m-%d %H:%M:%S')
+                    except ValueError:
+                        pass
+
+                self.table.setItem(row, 0, QTableWidgetItem(str(sale.get("ticket_number", ""))))
+                self.table.setItem(row, 1, QTableWidgetItem(ts_str))
+                self.table.setItem(row, 2, QTableWidgetItem(sale.get("customer_name", "N/A")))
+                self.table.setItem(row, 3, QTableWidgetItem(sale.get("user", "")))
+                self.table.setItem(row, 4, QTableWidgetItem(sale.get("payment_method", "N/A")))
+                self.table.setItem(row, 5, QTableWidgetItem(f"${sale.get('total', 0.0):.2f}"))
+                self.table.setItem(row, 6, QTableWidgetItem(sale.get("status", "")))
+        except Exception as e:
+            QMessageBox.critical(self, "Error de Carga", f"No se pudo cargar el historial de ventas: {e}")
+            
     def load_all_sales(self):
-        self.load_sales(read_db("sales"))
+        query = db.collection('sales')
+        self.load_sales(query)
         
     def load_today_sales(self):
-        sales = read_db("sales")
         today = datetime.date.today()
-        today_sales = [s for s in sales if datetime.datetime.fromisoformat(s['timestamp']).date() == today]
-        self.load_sales(today_sales)
+        start_of_day = datetime.datetime.combine(today, datetime.time.min).isoformat()
+        end_of_day = datetime.datetime.combine(today, datetime.time.max).isoformat()
+        query = db.collection('sales').where('timestamp', '>=', start_of_day).where('timestamp', '<=', end_of_day)
+        self.load_sales(query)
         
     def load_date_range_sales(self):
-        sales = read_db("sales")
         start_date = self.start_date_edit.date().toPyDate()
         end_date = self.end_date_edit.date().toPyDate()
-        range_sales = [s for s in sales if start_date <= datetime.datetime.fromisoformat(s['timestamp']).date() <= end_date]
-        self.load_sales(range_sales)
+        start_of_day = datetime.datetime.combine(start_date, datetime.time.min).isoformat()
+        end_of_day = datetime.datetime.combine(end_date, datetime.time.max).isoformat()
+        query = db.collection('sales').where('timestamp', '>=', start_of_day).where('timestamp', '<=', end_of_day)
+        self.load_sales(query)
 
 class ReturnScreen(QWidget):
     return_processed = pyqtSignal()
@@ -1281,6 +1376,7 @@ class ReturnScreen(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.found_sale = None
+        self.found_sale_id = None
         self.init_ui()
 
     def init_ui(self):
@@ -1315,6 +1411,7 @@ class ReturnScreen(QWidget):
         self.details_text.clear()
         self.process_button.setEnabled(False)
         self.found_sale = None
+        self.found_sale_id = None
         
         try:
             ticket_number = int(self.ticket_input.text())
@@ -1323,17 +1420,19 @@ class ReturnScreen(QWidget):
             return
 
         try:
-            sales = read_db("sales")
-            sale = next((s for s in sales if s.get("ticket_number") == ticket_number), None)
+            query = db.collection('sales').where('ticket_number', '==', ticket_number).limit(1)
+            docs = query.stream()
+            sale_doc = next(docs, None)
             
-            if not sale:
+            if not sale_doc:
                 self.details_text.setText(f"No se encontró ninguna venta con el ticket N° {ticket_number}.")
                 return
             
-            self.found_sale = sale
-            ticket_text = generate_ticket_text(sale)
+            self.found_sale = sale_doc.to_dict()
+            self.found_sale_id = sale_doc.id
+            ticket_text = generate_ticket_text(self.found_sale)
             
-            sale_status = sale.get('status', 'DESCONOCIDO')
+            sale_status = self.found_sale.get('status', 'DESCONOCIDO')
             status_text = f"\nESTADO ACTUAL: {sale_status}"
             self.details_text.setText(ticket_text + status_text)
             
@@ -1350,24 +1449,23 @@ class ReturnScreen(QWidget):
         reply = QMessageBox.question(self, "Confirmar Devolución", "¿Está seguro de realizar la devolución de este ticket?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.No: return
 
-        inventory = read_db("inventory")
-        for item in self.found_sale.get("items", []):
-            if item.get("sku") in inventory:
-                inventory[item["sku"]]["quantity"] += item.get("quantity", 0)
-        write_db("inventory", inventory)
+        try:
+            batch = db.batch()
+            for item in self.found_sale.get("items", []):
+                item_ref = db.collection('inventory').document(item.get("sku"))
+                batch.update(item_ref, {'quantity': firestore.Increment(item.get("quantity", 0))})
+            
+            sale_ref = db.collection('sales').document(self.found_sale_id)
+            batch.update(sale_ref, {"status": "DEVUELTA"})
+            batch.commit()
 
-        sales = read_db("sales")
-        for sale in sales:
-            if sale.get("ticket_number") == self.found_sale.get("ticket_number"):
-                sale["status"] = "DEVUELTA"
-                break
-        write_db("sales", sales)
-
-        QMessageBox.information(self, "Éxito", "Devolución procesada correctamente.")
-        self.return_processed.emit()
-        self.details_text.clear()
-        self.ticket_input.clear()
-        self.process_button.setEnabled(False)
+            QMessageBox.information(self, "Éxito", "Devolución procesada correctamente.")
+            self.return_processed.emit()
+            self.details_text.clear()
+            self.ticket_input.clear()
+            self.process_button.setEnabled(False)
+        except Exception as e:
+            QMessageBox.critical(self, "Error de Devolución", f"No se pudo procesar la devolución: {e}")
 
 class CashCountScreen(QWidget):
     def __init__(self, parent=None):
@@ -1398,31 +1496,41 @@ class CashCountScreen(QWidget):
         self.process_button.clicked.connect(self.perform_cash_count)
         
     def calculate_summary(self):
-        sales = read_db("sales")
-        today = datetime.date.today()
-        
-        today_sales = [s for s in sales if datetime.datetime.fromisoformat(s['timestamp']).date() == today and s.get('status') == 'COMPLETADA']
-        today_returns = [s for s in sales if datetime.datetime.fromisoformat(s['timestamp']).date() == today and s.get('status') == 'DEVUELTA']
+        try:
+            today = datetime.date.today()
+            start_of_day = datetime.datetime.combine(today, datetime.time.min).isoformat()
+            end_of_day = datetime.datetime.combine(today, datetime.time.max).isoformat()
+            
+            sales_query = db.collection('sales').where('timestamp', '>=', start_of_day).where('timestamp', '<=', end_of_day).stream()
+            
+            today_sales = []
+            today_returns = []
+            for doc in sales_query:
+                sale = doc.to_dict()
+                if sale.get('status') == 'COMPLETADA': today_sales.append(sale)
+                elif sale.get('status') == 'DEVUELTA': today_returns.append(sale)
 
-        total_cash = sum(s['total'] for s in today_sales if s.get('payment_method') == 'Efectivo')
-        total_card = sum(s['total'] for s in today_sales if s.get('payment_method') == 'Tarjeta Bancaria')
-        total_transfer = sum(s['total'] for s in today_sales if s.get('payment_method') == 'Transferencia Bancaria')
-        total_gross = sum(s['total'] for s in today_sales)
-        total_returned = sum(s['total'] for s in today_returns)
-        total_net = total_gross - total_returned
+            total_cash = sum(s['total'] for s in today_sales if s.get('payment_method') == 'Efectivo')
+            total_card = sum(s['total'] for s in today_sales if s.get('payment_method') == 'Tarjeta Bancaria')
+            total_transfer = sum(s['total'] for s in today_sales if s.get('payment_method') == 'Transferencia Bancaria')
+            total_gross = sum(s['total'] for s in today_sales)
+            total_returned = sum(s['total'] for s in today_returns)
+            total_net = total_gross - total_returned
 
-        self.summary_text = (
-            f"--- Desglose de Ventas ---\n\n"
-            f"Ventas en Efectivo: ${total_cash:.2f}\n"
-            f"Ventas con Tarjeta: ${total_card:.2f}\n"
-            f"Ventas con Transferencia: ${total_transfer:.2f}\n"
-            f"----------------------------------------\n"
-            f"Total Ventas Bruto: ${total_gross:.2f}\n\n"
-            f"Devoluciones del Día: -${total_returned:.2f}\n"
-            f"========================================\n"
-            f"Total Neto en Caja: ${total_net:.2f}"
-        )
-        self.summary_label.setText(self.summary_text)
+            self.summary_text = (
+                f"--- Desglose de Ventas ---\n\n"
+                f"Ventas en Efectivo: ${total_cash:.2f}\n"
+                f"Ventas con Tarjeta: ${total_card:.2f}\n"
+                f"Ventas con Transferencia: ${total_transfer:.2f}\n"
+                f"----------------------------------------\n"
+                f"Total Ventas Bruto: ${total_gross:.2f}\n\n"
+                f"Devoluciones del Día: -${total_returned:.2f}\n"
+                f"========================================\n"
+                f"Total Neto en Caja: ${total_net:.2f}"
+            )
+            self.summary_label.setText(self.summary_text)
+        except Exception as e:
+            self.summary_label.setText(f"Error al calcular el resumen:\n{e}")
 
     def perform_cash_count(self):
         reply = QMessageBox.question(self, "Confirmar Corte de Caja", 
@@ -1434,61 +1542,115 @@ class CashCountScreen(QWidget):
             QMessageBox.information(self, "Corte Realizado", f"El corte de caja se ha guardado en:\n{pdf_path}\n\nLa aplicación se cerrará ahora.")
             QApplication.instance().quit()
 
-
+# --- INICIO DE LA MODIFICACIÓN ---
+# La pantalla de Ajustes ahora incluye la configuración de correo.
 class SettingsScreen(QWidget):
     theme_changed = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.init_ui()
+        self.load_settings()
 
     def init_ui(self):
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         
-        title = QLabel("Ajustes", self)
+        title = QLabel("Ajustes Generales", self)
         title.setStyleSheet("font-size: 18px; font-weight: bold;")
         layout.addWidget(title)
         
-        form_layout = QFormLayout()
-        
+        # --- Sección de Apariencia ---
+        appearance_form = QFormLayout()
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(["Oscuro", "Claro"])
-        
         self.color_combo = QComboBox()
         self.color_combo.addItems(["Azul", "Naranja", "Verde"])
         
-        form_layout.addRow("Modo de Apariencia:", self.mode_combo)
-        form_layout.addRow("Color del Tema:", self.color_combo)
-        
-        layout.addLayout(form_layout)
-        
-        update_button = QPushButton("Buscar Actualizaciones")
-        update_button.clicked.connect(self.check_for_updates)
-        layout.addWidget(update_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        appearance_form.addRow("Modo de Apariencia:", self.mode_combo)
+        appearance_form.addRow("Color del Tema:", self.color_combo)
+        layout.addLayout(appearance_form)
 
+        # --- Sección de Configuración de Correo ---
+        email_title = QLabel("Configuración de Correo (para envío de tickets)", self)
+        email_title.setStyleSheet("font-size: 16px; font-weight: bold; margin-top: 20px;")
+        layout.addWidget(email_title)
+
+        email_form = QFormLayout()
+        self.email_input = QLineEdit()
+        self.email_input.setPlaceholderText("ejemplo@gmail.com")
+        self.password_input = QLineEdit()
+        self.password_input.setPlaceholderText("Contraseña de aplicación de 16 letras")
+        self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
+
+        email_form.addRow("Correo de Envío (Gmail):", self.email_input)
+        email_form.addRow("Contraseña de Aplicación:", self.password_input)
+        layout.addLayout(email_form)
+
+        # --- Botones de Acción ---
+        self.save_button = QPushButton("Guardar Cambios")
+        update_button = QPushButton("Buscar Actualizaciones")
+        
+        button_layout = QHBoxLayout()
+        button_layout.addWidget(self.save_button)
+        button_layout.addWidget(update_button)
+        button_layout.addStretch()
+
+        layout.addLayout(button_layout)
         layout.addStretch()
 
-        self.load_settings()
-
-        self.mode_combo.currentTextChanged.connect(self.save_settings)
-        self.color_combo.currentTextChanged.connect(self.save_settings)
+        # Conexiones
+        self.mode_combo.currentTextChanged.connect(self.save_app_config)
+        self.color_combo.currentTextChanged.connect(self.save_app_config)
+        self.save_button.clicked.connect(self.save_all_settings)
+        update_button.clicked.connect(self.check_for_updates)
 
     def load_settings(self):
-        config = read_db("config")
-        self.mode_combo.setCurrentText(config.get("appearance_mode", "Oscuro"))
-        self.color_combo.setCurrentText(config.get("color_theme", "Azul"))
+        try:
+            # Cargar config de apariencia
+            app_config_doc = db.collection('config').document('app_config').get()
+            if app_config_doc.exists:
+                app_config = app_config_doc.to_dict()
+                self.mode_combo.setCurrentText(app_config.get("appearance_mode", "Oscuro"))
+                self.color_combo.setCurrentText(app_config.get("color_theme", "Azul"))
+            
+            # Cargar config de correo
+            email_config_doc = db.collection('config').document('email_config').get()
+            if email_config_doc.exists:
+                email_config = email_config_doc.to_dict()
+                self.email_input.setText(email_config.get("sender_email", ""))
+                self.password_input.setText(email_config.get("sender_password", ""))
+        except Exception as e:
+            QMessageBox.warning(self, "Error de Carga", f"No se pudieron cargar los ajustes: {e}")
 
-    def save_settings(self):
-        config = read_db("config")
-        config["appearance_mode"] = self.mode_combo.currentText()
-        config["color_theme"] = self.color_combo.currentText()
-        write_db("config", config)
-        self.theme_changed.emit()
+    def save_app_config(self):
+        """ Guarda solo la configuración de apariencia al cambiar los combos. """
+        try:
+            config_ref = db.collection('config').document('app_config')
+            config_ref.update({
+                "appearance_mode": self.mode_combo.currentText(),
+                "color_theme": self.color_combo.currentText()
+            })
+            self.theme_changed.emit()
+        except Exception as e:
+            QMessageBox.warning(self, "Error al Guardar", f"No se pudo guardar la configuración de apariencia: {e}")
+
+    def save_all_settings(self):
+        """ Guarda toda la configuración, incluyendo el correo. """
+        self.save_app_config() # Guarda tema y modo
+        try:
+            email_config_ref = db.collection('config').document('email_config')
+            email_config_ref.set({
+                "sender_email": self.email_input.text(),
+                "sender_password": self.password_input.text()
+            })
+            QMessageBox.information(self, "Éxito", "Configuración guardada correctamente.")
+        except Exception as e:
+            QMessageBox.warning(self, "Error al Guardar", f"No se pudo guardar la configuración de correo: {e}")
 
     def check_for_updates(self):
         QMessageBox.information(self, "Actualizaciones", "Su sistema está actualizado a la última versión.")
-
+# --- FIN DE LA MODIFICACIÓN ---
 
 class MainScreen(QWidget):
     logout_requested = pyqtSignal()
@@ -1611,6 +1773,154 @@ class MainScreen(QWidget):
         time_str = now.strftime("%H:%M:%S")
         self.clock_label.setText(f"{date_str}\n{time_str}")
 
+class BarcodeGeneratorDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Generador de Códigos de Barras")
+        self.setMinimumSize(600, 500)
+        
+        self.layout = QVBoxLayout(self)
+        
+        self.table = QTableWidget(self)
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["Producto (SKU)", "Seleccionar", "Cantidad de Etiquetas"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+
+        button_layout = QHBoxLayout()
+        select_all_btn = QPushButton("Seleccionar Todo")
+        deselect_all_btn = QPushButton("Quitar Selección")
+        generate_btn = QPushButton("Generar PDF")
+        
+        button_layout.addWidget(select_all_btn)
+        button_layout.addWidget(deselect_all_btn)
+        button_layout.addStretch()
+        button_layout.addWidget(generate_btn)
+
+        self.layout.addWidget(self.table)
+        self.layout.addLayout(button_layout)
+        
+        select_all_btn.clicked.connect(lambda: self.toggle_all_checkboxes(True))
+        deselect_all_btn.clicked.connect(lambda: self.toggle_all_checkboxes(False))
+        generate_btn.clicked.connect(self.generate_pdf)
+        
+        self.load_products()
+
+    def load_products(self):
+        try:
+            inventory_docs = db.collection('inventory').stream()
+            products = {doc.id: doc.to_dict() for doc in inventory_docs}
+            self.table.setRowCount(len(products))
+
+            for row, (sku, data) in enumerate(products.items()):
+                item_text = f"{data.get('name', 'N/A')} [{sku}]"
+                self.table.setItem(row, 0, QTableWidgetItem(item_text))
+
+                checkbox_widget = QWidget()
+                chk_layout = QHBoxLayout(checkbox_widget)
+                chk = QCheckBox()
+                chk_layout.addWidget(chk)
+                chk_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                chk_layout.setContentsMargins(0,0,0,0)
+                self.table.setCellWidget(row, 1, checkbox_widget)
+
+                qty_input = QLineEdit("1")
+                qty_input.setValidator(QDoubleValidator(1, 1000, 0))
+                self.table.setCellWidget(row, 2, qty_input)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"No se pudo cargar la lista de productos: {e}")
+
+    def toggle_all_checkboxes(self, checked):
+        for row in range(self.table.rowCount()):
+            widget = self.table.cellWidget(row, 1)
+            if widget:
+                checkbox = widget.findChild(QCheckBox)
+                checkbox.setChecked(checked)
+
+    def generate_pdf(self):
+        selected_products = []
+        for row in range(self.table.rowCount()):
+            widget = self.table.cellWidget(row, 1)
+            checkbox = widget.findChild(QCheckBox)
+            if checkbox and checkbox.isChecked():
+                sku = self.table.item(row, 0).text().split('[')[-1].split(']')[0]
+                qty_widget = self.table.cellWidget(row, 2)
+                quantity = int(qty_widget.text())
+                selected_products.append({"sku": sku, "quantity": quantity})
+        
+        if not selected_products:
+            QMessageBox.warning(self, "Sin Selección", "Por favor, seleccione al menos un producto.")
+            return
+
+        folder = resource_path("barcodes")
+        os.makedirs(folder, exist_ok=True)
+        filename = os.path.join(folder, f"barcodes_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
+
+        try:
+            pdf = FPDF(orientation='P', unit='mm', format='A4')
+            pdf.add_page()
+            pdf.set_auto_page_break(True, margin=10)
+            
+            # Dimensiones de la etiqueta y márgenes
+            label_width = 60
+            label_height = 25
+            margin_x = 10
+            margin_y = 10
+            
+            col, row_count = 0, 0
+            
+            temp_barcode_files = []
+
+            for product in selected_products:
+                doc = db.collection('inventory').document(product["sku"]).get()
+                if not doc.exists: continue
+                
+                data = doc.to_dict()
+                
+                for _ in range(product["quantity"]):
+                    x = margin_x + (col * (label_width + 5))
+                    y = margin_y + (row_count * (label_height + 5))
+                    
+                    # Generar código de barras
+                    barcode_path = resource_path(f'temp_barcode_{product["sku"]}.png')
+                    code128 = Code128(product["sku"], writer=ImageWriter())
+                    code128.write(barcode_path, options={"write_text": False, "module_height": 8.0, "font_size": 0, "text_distance": 0})
+                    temp_barcode_files.append(barcode_path)
+
+                    # Dibujar en el PDF
+                    # Nombre del producto
+                    pdf.set_xy(x, y)
+                    pdf.set_font("Helvetica", size=8)
+                    pdf.multi_cell(label_width, 4, data.get("name", ""), align='C', border=0)
+                    
+                    # Código de barras
+                    barcode_y = y + 5
+                    pdf.image(barcode_path, x=x + 5, y=barcode_y, w=label_width - 10, h=10)
+                    
+                    # SKU y Precio
+                    info_y = barcode_y + 11
+                    pdf.set_xy(x, info_y)
+                    pdf.set_font("Helvetica", size=9)
+                    info_text = f"{product['sku']} - ${data.get('price', 0.0):.2f}"
+                    pdf.cell(label_width, 5, info_text, align='C', border=0)
+
+                    col += 1
+                    if col >= 3:
+                        col = 0
+                        row_count += 1
+                        if row_count >= 10:
+                            row_count = 0
+                            pdf.add_page()
+            
+            pdf.output(filename)
+            QMessageBox.information(self, "Éxito", f"PDF con códigos de barras guardado en:\n{filename}")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"No se pudo generar el PDF: {e}")
+        finally:
+            for f in temp_barcode_files:
+                if os.path.exists(f): os.remove(f)
+            self.close()
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -1643,96 +1953,115 @@ class MainWindow(QMainWindow):
         self.main_screen.sales_view.setup_completer()
         self.stacked_widget.setCurrentIndex(1)
         
+    def create_backup(self):
+        backup_folder = resource_path('backups')
+        os.makedirs(backup_folder, exist_ok=True)
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        # Aquí se necesitaría una forma de exportar la colección de Firestore,
+        # lo cual es una operación más compleja y generalmente se hace desde la consola de Google Cloud.
+        # Por ahora, esta función queda como placeholder.
+        print(f"La copia de seguridad de Firestore debe realizarse desde la consola de Google Cloud.")
+        return True
+
+    def closeEvent(self, event):
+        reply = QMessageBox.question(self, 'Confirmar Salida',
+                                     "¿Está seguro de que desea salir?",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                     QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            event.accept()
+        else:
+            event.ignore()
+        
     def apply_stylesheet(self):
-        config = read_db("config")
+        try:
+            config_doc = db.collection('config').document('app_config').get()
+            config = config_doc.to_dict() if config_doc.exists else {}
+        except Exception as e:
+            print(f"No se pudo cargar la configuración de tema: {e}")
+            config = {}
+            
         mode = config.get("appearance_mode", "Oscuro")
         theme = config.get("color_theme", "Azul")
         
-        dark_palette = {
-            "base": "#2b2b2b", "alt_base": "#3c3c3c", "text": "white",
-            "button": "#555", "button_hover": "#666", "button_pressed": "#444",
-            "border": "#777"
+        palettes = {
+            "Oscuro": {"base": "#2e2e2e", "alt_base": "#3c3c3c", "text": "#e0e0e0", "button": "#4a4a4a", "button_hover": "#5a5a5a", "button_pressed": "#404040", "border": "#555555", "header": "#454545"},
+            "Claro": {"base": "#f5f5f5", "alt_base": "#ffffff", "text": "#212121", "button": "#e0e0e0", "button_hover": "#eeeeee", "button_pressed": "#bdbdbd", "border": "#cccccc", "header": "#f0f0f0"}
         }
-        light_palette = {
-            "base": "#f0f0f0", "alt_base": "#ffffff", "text": "black",
-            "button": "#e1e1e1", "button_hover": "#f6f6f6", "button_pressed": "#dcdcdc",
-            "border": "#c0c0c0"
-        }
-        
         accent_colors = {
-            "Azul": ("#4f86a9", "#ffffff"),
-            "Naranja": ("#f59e0b", "#ffffff"),
-            "Verde": ("#16a085", "#ffffff")
+            "Azul": ("#3498db", "#ffffff"),
+            "Naranja": ("#e67e22", "#ffffff"),
+            "Verde": ("#2ecc71", "#ffffff")
         }
         
-        p = dark_palette if mode == "Oscuro" else light_palette
-        accent, accent_text_color_on_accent = accent_colors.get(theme, accent_colors["Azul"])
+        p = palettes.get(mode, palettes["Oscuro"])
+        accent, accent_text = accent_colors.get(theme, accent_colors["Azul"])
 
         style = f"""
-            QWidget {{
-                background-color: {p["base"]};
-                color: {p["text"]};
-                font-size: 14px;
-            }}
-            QPushButton {{
-                background-color: {p["button"]};
-                border: 1px solid {p["border"]};
-                padding: 8px;
-                border-radius: 5px;
-                text-align: left;
-                padding-left: 10px;
-            }}
+            QWidget {{ background-color: {p["base"]}; color: {p["text"]}; font-size: 14px; }}
+            QMainWindow {{ border: 1px solid {p["border"]}; }}
+            QFrame, QDialog {{ background-color: {p["alt_base"]}; }}
+            
+            QPushButton {{ background-color: {p["button"]}; border: 1px solid {p["border"]}; padding: 8px; border-radius: 5px; text-align: left; padding-left: 10px; }}
             QPushButton:hover {{ background-color: {p["button_hover"]}; }}
             QPushButton:pressed {{ background-color: {p["button_pressed"]}; }}
-            QLineEdit, QDateEdit, QComboBox, QTextEdit {{
-                background-color: {p["alt_base"]};
-                border: 1px solid {p["border"]};
-                padding: 6px;
-                border-radius: 5px;
-            }}
-            QTableWidget {{ gridline-color: {p["border"]}; }}
-            QHeaderView::section {{ background-color: {p["alt_base"]}; padding: 4px; border: 1px solid {p["border"]}; }}
-            QDialog {{ background-color: {p["alt_base"]}; }}
-            QScrollBar:vertical {{ border: none; background: {p["alt_base"]}; width: 14px; }}
+            
+            QLineEdit, QDateEdit, QComboBox, QTextEdit {{ background-color: {p["base"]}; border: 1px solid {p["border"]}; padding: 6px; border-radius: 5px; }}
+            QTableWidget {{ gridline-color: {p["border"]}; background-color: {p["base"]}; }}
+            QHeaderView::section {{ background-color: {p["header"]}; padding: 4px; border: 1px solid {p["border"]}; font-weight: bold; }}
+            
+            QScrollBar:vertical {{ border: none; background: {p["base"]}; width: 14px; }}
             QScrollBar::handle:vertical {{ background: {p["button"]}; min-height: 20px; border-radius: 4px; }}
-            QScrollBar:horizontal {{ border: none; background: {p["alt_base"]}; height: 14px; }}
+            QScrollBar:horizontal {{ border: none; background: {p["base"]}; height: 14px; }}
             QScrollBar::handle:horizontal {{ background: {p["button"]}; min-width: 20px; border-radius: 4px; }}
             
-            QFrame#leftPanel {{ background-color: {p["base"]}; border: none; }}
-            
-            QFrame#leftPanel QLabel, QFrame#leftPanel QLineEdit, QFrame#leftPanel QPushButton {{
-                font-size: 16px;
-            }}
+            QCheckBox::indicator {{ width: 18px; height: 18px; border: 1px solid {p["border"]}; border-radius: 4px; }}
+            QCheckBox::indicator:unchecked {{ background-color: {p["base"]}; }}
+            QCheckBox::indicator:checked {{ background-color: {accent}; }}
+
+            QFrame#leftPanel {{ background-color: {p["alt_base"]}; border: none; }}
+            QFrame#leftPanel QLabel, QFrame#leftPanel QLineEdit, QFrame#leftPanel QPushButton {{ font-size: 16px; }}
             QFrame#leftPanel QLineEdit {{ padding: 8px; }}
 
-            QLabel#greetingLabel {{
-                color: {accent_text_color_on_accent};
-                background-color: rgba(0, 0, 0, 0.7);
-                padding: 20px;
-                border-radius: 8px;
-                font-size: 48px;
-                font-weight: bold;
-            }}
-            QLabel#footerLabel {{
-                color: {accent_text_color_on_accent};
-                background-color: rgba(0, 0, 0, 0.7);
-                padding: 8px;
-                border-radius: 5px;
-                font-size: 16px;
-            }}
-            QPushButton#loginButton, QPushButton#recoverButton {{
-                background-color: {accent}; color: {accent_text_color_on_accent};
-                text-align: center; font-weight: bold; height: 44px; font-size: 16px;
-            }}
+            QLabel#greetingLabel {{ color: {accent_text}; background-color: rgba(0, 0, 0, 0.7); padding: 20px; border-radius: 8px; font-size: 48px; font-weight: bold; }}
+            QLabel#footerLabel {{ color: {accent_text}; background-color: rgba(0, 0, 0, 0.7); padding: 8px; border-radius: 5px; font-size: 16px; }}
+            QPushButton#loginButton, QPushButton#recoverButton {{ background-color: {accent}; color: {accent_text}; text-align: center; font-weight: bold; height: 44px; font-size: 16px; }}
             QPushButton#loginButton:hover, QPushButton#recoverButton:hover {{ background-color: {p["button_hover"]}; }}
         """
         self.setStyleSheet(style)
 
 
+def run_pre_flight_checks():
+    global db
+    try:
+        from barcode import Code128
+        from barcode.writer import ImageWriter
+    except ImportError:
+        QMessageBox.critical(None, "Librería Faltante", "La librería 'python-barcode' es necesaria.\n\nInstálela con: pip install python-barcode Pillow")
+        return False
+    try:
+        cred_path = resource_path('serviceAccountKey.json')
+        if not os.path.exists(cred_path):
+            QMessageBox.critical(None, "Archivo no Encontrado", "No se encontró 'serviceAccountKey.json'. Siga las instrucciones para configurar la base de datos.")
+            return False
+        if not firebase_admin._apps:
+            cred = credentials.Certificate(cred_path)
+            firebase_admin.initialize_app(cred)
+        db = firestore.client()
+        print("Conexión exitosa a Firebase.")
+        return True
+    except Exception as e:
+        QMessageBox.critical(None, "Error de Conexión a Firebase", f"No se pudo conectar a Firebase.\n\nError: {e}")
+        return False
+
 # --- Punto de Entrada de la Aplicación ---
 if __name__ == "__main__":
-    setup_database()
     app = QApplication(sys.argv)
+    
+    if not run_pre_flight_checks():
+        sys.exit(1)
+
+    setup_database()
     
     window = MainWindow()
     window.apply_stylesheet()
