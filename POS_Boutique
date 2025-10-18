@@ -27,7 +27,10 @@ from PyQt6.QtCore import (
     pyqtSignal, Qt, QDate, QTimer, QPropertyAnimation, 
     QEasingCurve, QPoint
 )
-from PyQt6.QtGui import QDoubleValidator, QPixmap
+# --- INICIO DE MODIFICACIÓN (Alerta de Stock) ---
+# Se añade QColor
+from PyQt6.QtGui import QDoubleValidator, QPixmap, QColor
+# --- FIN DE MODIFICACIÓN ---
 
 from fpdf import FPDF
 
@@ -135,7 +138,7 @@ def generate_ticket_text(sale_record):
         line = f"{item.get('quantity', 0)}x {item.get('name', 'Producto Desconocido')}"
         total_line = f"${item.get('price', 0.0) * item.get('quantity', 0):.2f}"
         items_text += f"{line:<30}{total_line:>10}\n"
-            
+        
     footer = (
         f"----------------------------------------\n"
         f"Metodo de Pago: {sale_record.get('payment_method', 'N/A')}\n"
@@ -165,8 +168,6 @@ def generate_ticket_pdf(sale_record, filename="ticket.pdf"):
     pdf.multi_cell(0, 5, txt=ticket_text_encoded, align='C')
     pdf.output(filename)
 
-# --- INICIO DE LA MODIFICACIÓN ---
-# La función ahora lee la configuración de correo desde Firebase.
 def send_email_with_attachment(recipient_email, sale_record):
     try:
         # Obtener configuración de correo desde Firebase
@@ -223,7 +224,6 @@ def send_email_with_attachment(recipient_email, sale_record):
         # Limpiar el archivo PDF temporal
         if 'pdf_filename' in locals() and os.path.exists(pdf_filename):
             os.remove(pdf_filename)
-# --- FIN DE LA MODIFICACIÓN ---
 
 
 def print_thermal_ticket(sale_record):
@@ -677,6 +677,10 @@ class LoginScreen(QWidget):
 class InventoryScreen(QWidget):
     inventory_changed = pyqtSignal()
 
+    # --- INICIO DE MODIFICACIÓN (Umbral de Stock) ---
+    LOW_STOCK_THRESHOLD = 5
+    # --- FIN DE MODIFICACIÓN ---
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.init_ui()
@@ -726,12 +730,40 @@ class InventoryScreen(QWidget):
             inventory_data = {doc.id: doc.to_dict() for doc in inventory_docs}
             self.table.setRowCount(0)
             self.table.setRowCount(len(inventory_data))
+            
+            # --- INICIO DE LA MODIFICACIÓN (Aplicar color de alerta) ---
+            
+            # Definir el color de alerta (un rojo que funciona en modo oscuro/claro)
+            alert_color = QColor(255, 102, 102)
+
             for row, (sku, data) in enumerate(inventory_data.items()):
-                self.table.setItem(row, 0, QTableWidgetItem(sku))
-                self.table.setItem(row, 1, QTableWidgetItem(data.get("name", "N/A")))
-                self.table.setItem(row, 2, QTableWidgetItem(f"${data.get('price', 0.0):.2f}"))
-                self.table.setItem(row, 3, QTableWidgetItem(f"${data.get('price_5', 0.0):.2f}"))
-                self.table.setItem(row, 4, QTableWidgetItem(str(data.get("quantity", 0))))
+                quantity = data.get("quantity", 0)
+
+                # Crear los QTableWidgetItem
+                sku_item = QTableWidgetItem(sku)
+                name_item = QTableWidgetItem(data.get("name", "N/A"))
+                price_item = QTableWidgetItem(f"${data.get('price', 0.0):.2f}")
+                price_5_item = QTableWidgetItem(f"${data.get('price_5', 0.0):.2f}")
+                quantity_item = QTableWidgetItem(str(quantity))
+
+                # Añadir los items a la tabla
+                self.table.setItem(row, 0, sku_item)
+                self.table.setItem(row, 1, name_item)
+                self.table.setItem(row, 2, price_item)
+                self.table.setItem(row, 3, price_5_item)
+                self.table.setItem(row, 4, quantity_item)
+
+                # Comprobar si el stock es bajo
+                if quantity <= self.LOW_STOCK_THRESHOLD:
+                    # Aplicar el color de fondo a todas las celdas de esta fila
+                    sku_item.setBackground(alert_color)
+                    name_item.setBackground(alert_color)
+                    price_item.setBackground(alert_color)
+                    price_5_item.setBackground(alert_color)
+                    quantity_item.setBackground(alert_color)
+
+            # --- FIN DE LA MODIFICACIÓN ---
+            
         except Exception as e:
             QMessageBox.critical(self, "Error de Carga", f"No se pudo cargar el inventario: {e}")
 
@@ -866,6 +898,7 @@ class InventoryScreen(QWidget):
 
 class SalesScreen(QWidget):
     sale_finalized = pyqtSignal()
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_sale_items = []
@@ -1259,6 +1292,7 @@ class SalesHistoryScreen(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.init_ui()
+        
     def init_ui(self):
         layout = QVBoxLayout(self)
         title = QLabel("Historial de Ventas", self)
@@ -1287,14 +1321,38 @@ class SalesHistoryScreen(QWidget):
         self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(["Ticket #", "Fecha y Hora", "Cliente", "Usuario", "Método Pago", "Total", "Estado"])
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        # Asegurarse de que se pueda seleccionar una fila
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         
         layout.addWidget(title)
         layout.addLayout(filter_layout)
         layout.addWidget(self.table)
+        
+        # --- INICIO DE MODIFICACIÓN (Botones de Acción) ---
+        action_layout = QHBoxLayout()
+        action_layout.addStretch() # Empuja los botones a la derecha
+
+        self.reprint_button = QPushButton("Reimprimir Ticket Térmico")
+        self.reprint_button.setStyleSheet("font-size: 14px; padding: 6px;")
+        
+        self.resend_button = QPushButton("Reenviar por Correo")
+        self.resend_button.setStyleSheet("font-size: 14px; padding: 6px;")
+
+        action_layout.addWidget(self.reprint_button)
+        action_layout.addWidget(self.resend_button)
+        
+        layout.addLayout(action_layout)
+        # --- FIN DE MODIFICACIÓN ---
 
         today_btn.clicked.connect(self.load_today_sales)
         all_btn.clicked.connect(self.load_all_sales)
         search_btn.clicked.connect(self.load_date_range_sales)
+        
+        # --- INICIO DE MODIFICACIÓN (Conexiones de botones) ---
+        self.reprint_button.clicked.connect(self.reprint_ticket)
+        self.resend_button.clicked.connect(self.resend_email)
+        # --- FIN DE MODIFICACIÓN ---
         
         self.load_today_sales()
 
@@ -1305,32 +1363,24 @@ class SalesHistoryScreen(QWidget):
             self.table.setRowCount(0)
             self.table.setRowCount(len(sales_list))
 
-            # --- INICIO DE LA CORRECCIÓN ---
-            # Se mejora la función de normalización para manejar fechas con y sin zona horaria.
             def get_sortable_timestamp(sale):
                 ts = sale.get('timestamp')
                 sortable_ts = None
                 
                 if isinstance(ts, str):
                     try:
-                        # Convierte el texto a un objeto de fecha
                         sortable_ts = datetime.datetime.fromisoformat(ts)
                     except ValueError:
                         sortable_ts = datetime.datetime.min
                 elif isinstance(ts, datetime.datetime):
-                    # Si ya es un objeto de fecha, lo usa
                     sortable_ts = ts
                 else:
-                    # Si no hay fecha o es un tipo no esperado, lo pone al final
                     sortable_ts = datetime.datetime.min
 
-                # Solución al error: Si el datetime tiene información de zona horaria ("offset-aware"),
-                # se la quitamos para que se pueda comparar con fechas que no la tienen ("offset-naive").
                 if sortable_ts and sortable_ts.tzinfo:
                     return sortable_ts.replace(tzinfo=None)
                 return sortable_ts
 
-            # Se utiliza la nueva función para ordenar la lista de ventas de forma segura
             sorted_sales = sorted(sales_list, key=get_sortable_timestamp, reverse=True)
 
             for row, sale in enumerate(sorted_sales):
@@ -1372,6 +1422,66 @@ class SalesHistoryScreen(QWidget):
         end_of_day = datetime.datetime.combine(end_date, datetime.time.max).isoformat()
         query = db.collection('sales').where('timestamp', '>=', start_of_day).where('timestamp', '<=', end_of_day)
         self.load_sales(query)
+
+    # --- INICIO DE MODIFICACIÓN (Funciones de botones) ---
+    def get_selected_sale_record(self):
+        """
+        Obtiene el registro completo de la venta seleccionada en la tabla 
+        buscándolo en Firestore por su Ticket #.
+        """
+        current_row = self.table.currentRow()
+        if current_row < 0:
+            QMessageBox.warning(self, "Sin Selección", "Por favor, seleccione una venta de la tabla.")
+            return None
+
+        try:
+            # La columna 0 es el "Ticket #"
+            ticket_number_str = self.table.item(current_row, 0).text()
+            ticket_number = int(ticket_number_str)
+        except (ValueError, TypeError, AttributeError):
+            QMessageBox.critical(self, "Error", "No se pudo leer el número de ticket de la fila seleccionada.")
+            return None
+
+        # Buscar el ticket en la base de datos para obtener el registro completo
+        try:
+            query = db.collection('sales').where('ticket_number', '==', ticket_number).limit(1)
+            docs = query.stream()
+            sale_doc = next(docs, None)
+            
+            if sale_doc:
+                return sale_doc.to_dict()
+            else:
+                QMessageBox.warning(self, "No Encontrado", f"No se pudo encontrar el registro completo para el ticket {ticket_number} en la base de datos.")
+                return None
+        except Exception as e:
+            QMessageBox.critical(self, "Error de Base de Datos", f"No se pudo consultar la venta: {e}")
+            return None
+
+    def reprint_ticket(self):
+        """
+        Llama a la función de impresión térmica para la venta seleccionada.
+        """
+        sale_record = self.get_selected_sale_record()
+        if sale_record:
+            # Reutilizamos la función global de impresión
+            print_thermal_ticket(sale_record)
+            QMessageBox.information(self, "Impresión", f"Se ha enviado el ticket #{sale_record['ticket_number']} a la impresora (simulada).")
+
+    def resend_email(self):
+        """
+        Pide un correo y reenvía el ticket de la venta seleccionada.
+        """
+        sale_record = self.get_selected_sale_record()
+        if sale_record:
+            email, ok = QInputDialog.getText(self, "Reenviar Ticket", "Correo electrónico del cliente:")
+            
+            if ok and email and "@" in email:
+                # Reutilizamos la función global de envío de correo
+                send_email_with_attachment(email, sale_record)
+            elif ok:
+                QMessageBox.warning(self, "Correo Inválido", "No se ingresó un correo electrónico válido.")
+    # --- FIN DE MODIFICACIÓN ---
+
 
 class ReturnScreen(QWidget):
     return_processed = pyqtSignal()
@@ -1545,8 +1655,6 @@ class CashCountScreen(QWidget):
             QMessageBox.information(self, "Corte Realizado", f"El corte de caja se ha guardado en:\n{pdf_path}\n\nLa aplicación se cerrará ahora.")
             QApplication.instance().quit()
 
-# --- INICIO DE LA MODIFICACIÓN ---
-# La pantalla de Ajustes ahora incluye la configuración de correo.
 class SettingsScreen(QWidget):
     theme_changed = pyqtSignal()
 
@@ -1653,7 +1761,253 @@ class SettingsScreen(QWidget):
 
     def check_for_updates(self):
         QMessageBox.information(self, "Actualizaciones", "Su sistema está actualizado a la última versión.")
-# --- FIN DE LA MODIFICACIÓN ---
+
+
+# --- INICIO DE NUEVA CLASE: StockReceiptScreen ---
+
+class StockReceiptScreen(QWidget):
+    # Señal para notificar a otras pantallas (Inventario, Ventas) que el stock cambió
+    inventory_changed = pyqtSignal()
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.current_receipt_items = []
+        self.current_user_id = "N/A"
+        self.init_ui()
+
+    def set_current_user(self, user_id):
+        self.current_user_id = user_id
+
+    def init_ui(self):
+        layout = QHBoxLayout(self)
+        
+        # --- Panel Izquierdo (Detalles del Lote) ---
+        left_panel = QFrame(self)
+        left_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        left_panel.setMaximumWidth(400)
+        left_layout = QVBoxLayout(left_panel)
+        
+        title_label = QLabel("Recepción de Mercancía")
+        title_label.setStyleSheet("font-size: 18px; font-weight: bold;")
+        
+        form_layout = QFormLayout()
+        self.folio_input = QLineEdit(self)
+        self.folio_input.setPlaceholderText("Ej: Factura-12345")
+        self.supplier_input = QLineEdit(self)
+        self.supplier_input.setPlaceholderText("Nombre del Proveedor (Opcional)")
+        
+        form_layout.addRow("Folio/Factura (Requerido):", self.folio_input)
+        form_layout.addRow("Proveedor:", self.supplier_input)
+        
+        left_layout.addWidget(title_label)
+        left_layout.addLayout(form_layout)
+        
+        # --- Sección de Añadir Productos ---
+        add_group = QFrame(self)
+        add_group.setFrameShape(QFrame.Shape.StyledPanel)
+        add_layout = QVBoxLayout(add_group)
+        
+        add_label = QLabel("Añadir Productos al Lote")
+        add_label.setStyleSheet("font-weight: bold;")
+        
+        self.product_search_input = QLineEdit(self)
+        self.product_search_input.setPlaceholderText("Buscar SKU o Nombre de producto")
+        
+        qty_layout = QHBoxLayout()
+        self.quantity_input = QLineEdit(self)
+        self.quantity_input.setPlaceholderText("Cantidad Recibida")
+        self.quantity_input.setValidator(QDoubleValidator(1, 9999, 0)) # Solo números positivos
+        
+        self.add_item_button = QPushButton("Añadir")
+        
+        qty_layout.addWidget(self.quantity_input)
+        qty_layout.addWidget(self.add_item_button)
+        
+        add_layout.addWidget(add_label)
+        add_layout.addWidget(self.product_search_input)
+        add_layout.addLayout(qty_layout)
+        
+        left_layout.addWidget(add_group)
+        left_layout.addStretch()
+        
+        layout.addWidget(left_panel)
+        
+        # --- Panel Derecho (Tabla y Confirmación) ---
+        right_panel = QFrame(self)
+        right_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        right_layout = QVBoxLayout(right_panel)
+        
+        table_label = QLabel("Productos en este Lote")
+        table_label.setStyleSheet("font-size: 16px; font-weight: bold;")
+        
+        self.receipt_table = QTableWidget(self)
+        self.receipt_table.setColumnCount(3)
+        self.receipt_table.setHorizontalHeaderLabels(["SKU", "Nombre", "Cantidad Recibida"])
+        self.receipt_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.receipt_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+
+        self.confirm_button = QPushButton("Confirmar Recepción y Añadir a Inventario")
+        self.confirm_button.setStyleSheet("font-size: 16px; padding: 10px; font-weight: bold;")
+        
+        right_layout.addWidget(table_label)
+        right_layout.addWidget(self.receipt_table)
+        right_layout.addWidget(self.confirm_button)
+        
+        layout.addWidget(right_panel, stretch=1)
+        
+        # --- Conexiones ---
+        self.add_item_button.clicked.connect(self.add_item_to_receipt)
+        self.product_search_input.returnPressed.connect(self.add_item_to_receipt)
+        self.quantity_input.returnPressed.connect(self.add_item_to_receipt)
+        self.confirm_button.clicked.connect(self.confirm_reception)
+
+    def setup_completer(self):
+        """ Configura el autocompletado (igual que en SalesScreen). """
+        try:
+            inventory_docs = db.collection('inventory').stream()
+            name_list = [f"{doc.to_dict()['name']} [{doc.id}]" for doc in inventory_docs]
+            self.completer = QCompleter(name_list, self)
+            self.completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            self.completer.setFilterMode(Qt.MatchFlag.MatchContains)
+            self.product_search_input.setCompleter(self.completer)
+        except Exception as e:
+            print(f"No se pudo crear el autocompletado de recepción: {e}")
+
+    def add_item_to_receipt(self):
+        """ Añade un producto a la tabla temporal de recepción. """
+        search_term = self.product_search_input.text().strip()
+        try:
+            quantity = int(self.quantity_input.text())
+            if quantity <= 0:
+                QMessageBox.warning(self, "Cantidad Inválida", "La cantidad debe ser mayor a 0.")
+                return
+        except ValueError:
+            QMessageBox.warning(self, "Cantidad Inválida", "Por favor, ingrese una cantidad numérica.")
+            return
+
+        if not search_term:
+            return
+
+        sku_to_add = None
+        product_info = None
+
+        if '[' in search_term and ']' in search_term:
+            try: sku_to_add = search_term.split('[')[-1].split(']')[0].upper()
+            except IndexError: pass
+        else:
+            sku_to_add = search_term.upper()
+
+        try:
+            if sku_to_add:
+                doc = db.collection('inventory').document(sku_to_add).get()
+                if doc.exists:
+                    product_info = doc.to_dict()
+                else:
+                    QMessageBox.warning(self, "No Encontrado", f"No se encontró producto con SKU '{sku_to_add}'.")
+                    return
+
+            if not product_info:
+                QMessageBox.warning(self, "No Encontrado", f"No se pudo verificar el producto '{search_term}'.")
+                return
+
+            # Verificar si ya está en la lista
+            existing_item = next((item for item in self.current_receipt_items if item["sku"] == sku_to_add), None)
+            if existing_item:
+                existing_item["quantity"] += quantity
+            else:
+                self.current_receipt_items.append({
+                    "sku": sku_to_add,
+                    "name": product_info["name"],
+                    "quantity": quantity
+                })
+            
+            self.update_receipt_table()
+            self.product_search_input.clear()
+            self.quantity_input.clear()
+            self.product_search_input.setFocus()
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error de Base de Datos", f"No se pudo buscar el producto: {e}")
+
+    def update_receipt_table(self):
+        """ Actualiza la tabla QTableWidget con los items del lote. """
+        self.receipt_table.setRowCount(len(self.current_receipt_items))
+        for row, item in enumerate(self.current_receipt_items):
+            self.receipt_table.setItem(row, 0, QTableWidgetItem(item["sku"]))
+            self.receipt_table.setItem(row, 1, QTableWidgetItem(item["name"]))
+            self.receipt_table.setItem(row, 2, QTableWidgetItem(str(item["quantity"])))
+
+    def clear_screen(self):
+        """ Limpia todos los campos después de una recepción exitosa. """
+        self.current_receipt_items = []
+        self.folio_input.clear()
+        self.supplier_input.clear()
+        self.product_search_input.clear()
+        self.quantity_input.clear()
+        self.update_receipt_table()
+
+    def confirm_reception(self):
+        """
+        Confirma la recepción, actualiza el inventario en Firebase usando
+        Increment() y guarda un registro en 'stock_receipts'.
+        """
+        folio = self.folio_input.text().strip()
+        supplier = self.supplier_input.text().strip()
+        
+        if not folio:
+            QMessageBox.warning(self, "Folio Requerido", "Debe ingresar un número de Folio o Factura para continuar.")
+            return
+            
+        if not self.current_receipt_items:
+            QMessageBox.warning(self, "Lote Vacío", "No ha añadido ningún producto para recibir.")
+            return
+        
+        reply = QMessageBox.question(self, "Confirmar Recepción",
+                                     f"¿Está seguro de añadir {len(self.current_receipt_items)} tipo(s) de producto al inventario bajo el folio '{folio}'?",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        
+        if reply == QMessageBox.StandardButton.No:
+            return
+
+        try:
+            # 1. Preparar el registro para 'stock_receipts'
+            receipt_record = {
+                "folio": folio,
+                "supplier": supplier,
+                "timestamp": datetime.datetime.now().isoformat(),
+                "user": self.current_user_id,
+                "items_received": self.current_receipt_items
+            }
+            
+            # 2. Preparar el Batch de actualización de inventario
+            batch = db.batch()
+            
+            for item in self.current_receipt_items:
+                item_ref = db.collection('inventory').document(item["sku"])
+                
+                # ¡La clave! Usar firestore.Increment() para sumar al stock actual
+                batch.update(item_ref, {
+                    'quantity': firestore.Increment(item['quantity'])
+                })
+            
+            # 3. Añadir el registro histórico (usando un ID automático)
+            receipt_ref = db.collection('stock_receipts').document()
+            batch.set(receipt_ref, receipt_record)
+            
+            # 4. Ejecutar la transacción
+            batch.commit()
+            
+            QMessageBox.information(self, "Éxito", f"Mercancía registrada con éxito bajo el folio '{folio}'. El inventario ha sido actualizado.")
+            
+            # 5. Limpiar y notificar
+            self.clear_screen()
+            self.inventory_changed.emit() # Emitir señal para que se actualicen InventoryScreen y SalesScreen
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error de Transacción", f"No se pudo completar la recepción: {e}")
+
+# --- FIN DE NUEVA CLASE ---
+
 
 class MainScreen(QWidget):
     logout_requested = pyqtSignal()
@@ -1671,10 +2025,17 @@ class MainScreen(QWidget):
     def set_user_permissions(self, permissions, user_id):
         self.permissions = permissions
         self.current_user_id = user_id
+        
+        # Pasar el ID de usuario a las pantallas que lo necesitan
         self.sales_view.set_current_user(user_id) 
         self.cash_count_view.set_current_user(user_id)
+        # --- INICIO DE MODIFICACIÓN ---
+        self.reception_view.set_current_user(user_id)
+        # --- FIN DE MODIFICACIÓN ---
+        
         self.welcome_label.setText(f"Usuario: {self.current_user_id}")
         
+        # Aplicar permisos a los botones
         self.sales_button.setVisible(self.permissions.get('can_sell', False))
         self.inventory_button.setVisible(self.permissions.get('can_manage_inventory', False))
         self.history_button.setVisible(self.permissions.get('can_view_history', False))
@@ -1682,6 +2043,11 @@ class MainScreen(QWidget):
         self.admin_button.setVisible(self.permissions.get('can_manage_users', False))
         self.settings_button.setVisible(self.permissions.get('can_view_settings', False))
         self.cash_count_button.setVisible(self.permissions.get('can_do_cash_count', False))
+        
+        # --- INICIO DE MODIFICACIÓN ---
+        # El mismo permiso de inventario controla la recepción
+        self.reception_button.setVisible(self.permissions.get('can_manage_inventory', False))
+        # --- FIN DE MODIFICACIÓN ---
         
     def init_ui(self):
         main_layout = QHBoxLayout(self)
@@ -1709,6 +2075,9 @@ class MainScreen(QWidget):
         self.welcome_label.setStyleSheet("font-weight: bold; font-size: 14px;")
         
         self.sales_button = QPushButton("Punto de Venta", self)
+        # --- INICIO DE MODIFICACIÓN ---
+        self.reception_button = QPushButton("Recepción de Mercancía", self)
+        # --- FIN DE MODIFICACIÓN ---
         self.inventory_button = QPushButton("Inventario", self)
         self.history_button = QPushButton("Historial de Ventas", self)
         self.return_button = QPushButton("Devoluciones", self)
@@ -1722,6 +2091,9 @@ class MainScreen(QWidget):
         nav_layout.addWidget(self.welcome_label)
         nav_layout.addSpacing(20)
         nav_layout.addWidget(self.sales_button)
+        # --- INICIO DE MODIFICACIÓN ---
+        nav_layout.addWidget(self.reception_button)
+        # --- FIN DE MODIFICACIÓN ---
         nav_layout.addWidget(self.inventory_button)
         nav_layout.addWidget(self.history_button)
         nav_layout.addWidget(self.return_button)
@@ -1739,20 +2111,27 @@ class MainScreen(QWidget):
         self.admin_view = UserManagementScreen(self)
         self.settings_view = SettingsScreen(self)
         self.cash_count_view = CashCountScreen(self)
+        # --- INICIO DE MODIFICACIÓN ---
+        self.reception_view = StockReceiptScreen(self) # Index 7
+        # --- FIN DE MODIFICACIÓN ---
 
-        self.content_stack.addWidget(self.sales_view)
-        self.content_stack.addWidget(self.inventory_view)
-        self.content_stack.addWidget(self.history_view)
-        self.content_stack.addWidget(self.return_view)
-        self.content_stack.addWidget(self.admin_view)
-        self.content_stack.addWidget(self.settings_view)
-        self.content_stack.addWidget(self.cash_count_view)
+        self.content_stack.addWidget(self.sales_view)       # 0
+        self.content_stack.addWidget(self.inventory_view)    # 1
+        self.content_stack.addWidget(self.history_view)      # 2
+        self.content_stack.addWidget(self.return_view)       # 3
+        self.content_stack.addWidget(self.admin_view)        # 4
+        self.content_stack.addWidget(self.settings_view)     # 5
+        self.content_stack.addWidget(self.cash_count_view)   # 6
+        # --- INICIO DE MODIFICACIÓN ---
+        self.content_stack.addWidget(self.reception_view)    # 7
+        # --- FIN DE MODIFICACIÓN ---
         
         main_layout.addWidget(nav_bar)
         main_layout.addWidget(self.content_stack, stretch=1)
         
         logout_button.clicked.connect(self.logout_requested.emit)
-        # --- INICIO DE LA MODIFICACIÓN: Conectar botones a la función de animación ---
+        
+        # Conexiones de botones a la función de animación
         self.sales_button.clicked.connect(lambda: self.switch_view(0))
         self.inventory_button.clicked.connect(lambda: self.switch_view(1))
         self.history_button.clicked.connect(lambda: self.switch_view(2))
@@ -1760,15 +2139,24 @@ class MainScreen(QWidget):
         self.admin_button.clicked.connect(lambda: self.switch_view(4))
         self.settings_button.clicked.connect(lambda: self.switch_view(5))
         self.cash_count_button.clicked.connect(self.show_cash_count_animated)
-        # --- FIN DE LA MODIFICACIÓN ---
+        # --- INICIO DE MODIFICACIÓN ---
+        self.reception_button.clicked.connect(lambda: self.switch_view(7))
+        # --- FIN DE MODIFICACIÓN ---
 
+        # Conexiones de señales entre vistas
         self.sales_view.sale_finalized.connect(self.inventory_view.load_inventory)
         self.sales_view.sale_finalized.connect(self.history_view.load_today_sales)
         self.return_view.return_processed.connect(self.inventory_view.load_inventory)
         self.return_view.return_processed.connect(self.history_view.load_today_sales)
         self.inventory_view.inventory_changed.connect(self.sales_view.setup_completer)
         
-    # --- INICIO DE LA MODIFICACIÓN: Nuevas funciones para animaciones ---
+        # --- INICIO DE MODIFICACIÓN ---
+        # Cuando se recibe mercancía, actualizar el inventario y los autocompletados
+        self.reception_view.inventory_changed.connect(self.inventory_view.load_inventory)
+        self.reception_view.inventory_changed.connect(self.sales_view.setup_completer)
+        self.reception_view.inventory_changed.connect(self.reception_view.setup_completer) # Que se actualice a sí misma
+        # --- FIN DE MODIFICACIÓN ---
+        
     def show_cash_count_animated(self):
         """Prepara y luego anima la vista de corte de caja."""
         self.cash_count_view.calculate_summary()
@@ -1780,22 +2168,19 @@ class MainScreen(QWidget):
         """
         current_index = self.content_stack.currentIndex()
         if current_index == index:
-            return  # No hacer nada si ya estamos en la vista correcta
+            return
 
         target_widget = self.content_stack.widget(index)
         width = self.content_stack.width()
 
-        # Crear animación para que la nueva vista se deslice desde la derecha
         self.slide_animation = QPropertyAnimation(target_widget, b"pos")
-        self.slide_animation.setDuration(300)  # Duración en milisegundos
+        self.slide_animation.setDuration(300)
         self.slide_animation.setStartValue(QPoint(width, 0))
         self.slide_animation.setEndValue(QPoint(0, 0))
         self.slide_animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
 
-        # Cambiar a la nueva vista justo antes de que comience la animación
         self.content_stack.setCurrentIndex(index)
         self.slide_animation.start()
-    # --- FIN DE LA MODIFICACIÓN ---
         
     def show_cash_count(self):
         self.cash_count_view.calculate_summary()
@@ -1965,10 +2350,8 @@ class MainWindow(QMainWindow):
         self.login_screen = LoginScreen()
         self.main_screen = MainScreen()
 
-        # --- INICIO DE LA MODIFICACIÓN: Preparar efectos de opacidad para animaciones ---
         self.main_opacity_effect = QGraphicsOpacityEffect(self.main_screen)
         self.main_screen.setGraphicsEffect(self.main_opacity_effect)
-        # --- FIN DE LA MODIFICACIÓN ---
 
         self.stacked_widget = QStackedWidget()
         self.stacked_widget.addWidget(self.login_screen)
@@ -1986,46 +2369,38 @@ class MainWindow(QMainWindow):
         self.main_screen.sales_view.update_cart_display()
         self.main_screen.sales_view.customer_name_input.clear()
 
-        # --- INICIO DE LA MODIFICACIÓN: Animar la salida de la pantalla principal ---
-        # Crear animación de desvanecimiento (fade-out)
         self.fade_out_anim = QPropertyAnimation(self.main_opacity_effect, b"opacity")
         self.fade_out_anim.setDuration(250)
         self.fade_out_anim.setStartValue(1.0)
         self.fade_out_anim.setEndValue(0.0)
         
-        # Cuando la animación termine, cambiar a la pantalla de login
         def on_finished():
             self.stacked_widget.setCurrentIndex(0)
-            self.main_opacity_effect.setOpacity(1.0) # Restaurar opacidad para el próximo inicio de sesión
+            self.main_opacity_effect.setOpacity(1.0) 
 
         self.fade_out_anim.finished.connect(on_finished)
         self.fade_out_anim.start()
-        # --- FIN DE LA MODIFICACIÓN ---
 
     def show_main_screen(self, permissions, user_id):
         self.main_screen.set_user_permissions(permissions, user_id)
         self.main_screen.sales_view.setup_completer()
+        # --- INICIO DE MODIFICACIÓN ---
+        self.main_screen.reception_view.setup_completer()
+        # --- FIN DE MODIFICACIÓN ---
 
-        # --- INICIO DE LA MODIFICACIÓN: Animar la entrada de la pantalla principal ---
-        # Preparar la pantalla para que aparezca (empezará transparente)
         self.main_opacity_effect.setOpacity(0.0)
         self.stacked_widget.setCurrentIndex(1)
 
-        # Crear y empezar la animación de aparición (fade-in)
         self.fade_in_anim = QPropertyAnimation(self.main_opacity_effect, b"opacity")
         self.fade_in_anim.setDuration(400)
         self.fade_in_anim.setStartValue(0.0)
         self.fade_in_anim.setEndValue(1.0)
         self.fade_in_anim.start()
-        # --- FIN DE LA MODIFICACIÓN ---
         
     def create_backup(self):
         backup_folder = resource_path('backups')
         os.makedirs(backup_folder, exist_ok=True)
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        # Aquí se necesitaría una forma de exportar la colección de Firestore,
-        # lo cual es una operación más compleja y generalmente se hace desde la consola de Google Cloud.
-        # Por ahora, esta función queda como placeholder.
         print(f"La copia de seguridad de Firestore debe realizarse desde la consola de Google Cloud.")
         return True
 
@@ -2129,6 +2504,11 @@ if __name__ == "__main__":
 
     setup_database()
     
+    window = MainWindow()
+    window.apply_stylesheet()
+    window.show()
+    sys.exit(app.exec())
+
     window = MainWindow()
     window.apply_stylesheet()
     window.show()
