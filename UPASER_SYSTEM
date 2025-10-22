@@ -1,0 +1,2889 @@
+import sys
+import sqlite3
+import datetime
+import traceback
+import os # Necesario para verificar si existe el logo
+import tempfile # Para crear archivo PDF temporal
+from decimal import Decimal, ROUND_HALF_UP # Para manejo de dinero
+import secrets # Para generar contraseñas seguras
+import json # Para guardar la configuración
+
+# --- Importar bibliotecas de PyQt6 (Fusionadas) ---
+try:
+    from PyQt6.QtWidgets import (
+        QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+        QGridLayout, QLabel, QLineEdit, QPushButton, QComboBox, QTabWidget,
+        QTableWidget, QTableWidgetItem, QMessageBox, QGroupBox, QFormLayout,
+        QDoubleSpinBox, QHeaderView, QFileDialog, QGraphicsDropShadowEffect,
+        QStackedWidget, QFrame, QScrollArea, QCheckBox, QTextEdit, QInputDialog
+    )
+    # --- AÑADIDO QLocale ---
+    from PyQt6.QtCore import Qt, QDate, QTimer, QDateTime, QSize, QUrl, QLocale
+    from PyQt6.QtGui import QFont, QIcon, QPixmap, QColor, QDesktopServices
+except ImportError as e:
+    print(f"Error: Faltan bibliotecas de PyQt6. Ejecuta: pip install PyQt6\nDetalle: {e}")
+    sys.exit(1)
+
+# --- Importar ReportLab para PDF ---
+try:
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.units import inch
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import Paragraph, Image, Spacer, Table, TableStyle, Frame # Añadido Frame
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT # Añadido TA_LEFT
+    from reportlab.lib import colors
+    FONT_NAME = 'Helvetica'
+    FONT_BOLD_NAME = 'Helvetica-Bold'
+
+except ImportError as e:
+    print(f"Error: Falta la biblioteca ReportLab. Ejecuta: pip install reportlab\nDetalle: {e}")
+    sys.exit(1)
+
+
+# ---- Configuración de la Base de Datos y Archivos ----
+DB_NAME = "gestion_escolar.db"
+LOGO_PATH = "logo.png" # Ruta al archivo del logo
+CONFIG_FILE = "config.json" # Archivo para guardar el tema
+
+# --- FUNCIÓN DE CONEXIÓN GLOBAL ---
+def get_db_connection():
+    """Establece conexión a la BD y activa las claves foráneas."""
+    conn = sqlite3.connect(DB_NAME)
+    # --- ASEGURARSE QUE SIEMPRE ESTÉ ACTIVO ---
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.row_factory = sqlite3.Row # Para acceder por nombre de columna fácilmente
+    return conn
+
+def inicializar_db():
+    """Crea las tablas de la base de datos si no existen."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA foreign_keys = ON")
+
+        # --- Tabla de Alumnos ---
+        cursor.execute("PRAGMA table_info(alumnos)")
+        columns = [info[1] for info in cursor.fetchall()]
+
+        if 'apellido_paterno' not in columns:
+             cursor.execute("DROP TABLE IF EXISTS alumnos")
+             cursor.execute("""
+             CREATE TABLE alumnos (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 apellido_paterno TEXT NOT NULL,
+                 apellido_materno TEXT,
+                 nombres TEXT NOT NULL,
+                 escuela_procedencia TEXT,
+                 escuela_ingresar TEXT,
+                 edad INTEGER,
+                 telefono TEXT,
+                 email TEXT UNIQUE,
+                 turno TEXT,
+                 tutor_ap_paterno TEXT,
+                 tutor_ap_materno TEXT,
+                 tutor_nombres TEXT,
+                 dom_calle TEXT,
+                 dom_num_int TEXT,
+                 dom_num_ext TEXT,
+                 dom_colonia TEXT,
+                 dom_municipio TEXT,
+                 dom_estado TEXT,
+                 dom_cp TEXT,
+                 tutor_telefono TEXT,
+                 emerg_1_nombre TEXT,
+                 emerg_1_telefono TEXT,
+                 emerg_1_parentesco TEXT,
+                 emerg_2_nombre TEXT,
+                 emerg_2_telefono TEXT,
+                 emerg_2_parentesco TEXT,
+                 autoriza_salida_solo INTEGER DEFAULT 0
+             )
+             """)
+        elif 'autoriza_salida_solo' not in columns:
+             cursor.execute("ALTER TABLE alumnos ADD COLUMN autoriza_salida_solo INTEGER DEFAULT 0")
+
+        # --- Tabla de Cursos ---
+        cursor.execute("PRAGMA table_info(cursos)")
+        columns_cursos = [info[1] for info in cursor.fetchall()]
+        
+        if 'profesor' in columns_cursos or 'costo' in columns_cursos or 'costo_sem_16' in columns_cursos or 'costo_sem_12' not in columns_cursos:
+            print("Detectando estructura de tabla 'cursos' antigua. Recreando tabla...")
+            cursor.execute("DROP TABLE IF EXISTS cursos")
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS cursos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nombre_curso TEXT NOT NULL UNIQUE,
+                costo_exhibicion REAL DEFAULT 0.0,
+                costo_sem_15 REAL DEFAULT 0.0,
+                costo_sem_12 REAL DEFAULT 0.0,
+                costo_mensual_3 REAL DEFAULT 0.0
+            )
+            """)
+
+        # --- Tabla de Inscripciones ---
+        cursor.execute("PRAGMA table_info(inscripciones)")
+        columns_insc = [info[1] for info in cursor.fetchall()]
+        
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS inscripciones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            alumno_id INTEGER NOT NULL,
+            curso_id INTEGER NOT NULL,
+            fecha_inscripcion TEXT NOT NULL,
+            monto_total REAL NOT NULL,
+            monto_pagado REAL DEFAULT 0.0,
+            estado TEXT DEFAULT 'Pendiente',
+            tipo_pago_seleccionado TEXT,
+            FOREIGN KEY (alumno_id) REFERENCES alumnos(id) ON DELETE CASCADE,
+            FOREIGN KEY (curso_id) REFERENCES cursos(id) ON DELETE RESTRICT
+        )
+        """)
+        
+        if 'tipo_pago_seleccionado' not in columns_insc:
+            try:
+                cursor.execute("ALTER TABLE inscripciones ADD COLUMN tipo_pago_seleccionado TEXT")
+            except sqlite3.OperationalError:
+                pass 
+
+        # --- Tabla de Pagos ---
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS pagos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            inscripcion_id INTEGER NOT NULL,
+            monto REAL NOT NULL,
+            fecha_pago TEXT NOT NULL,
+            metodo_pago TEXT,
+            FOREIGN KEY (inscripcion_id) REFERENCES inscripciones(id) ON DELETE CASCADE
+        )
+        """)
+        
+        # --- NUEVA TABLA: Usuarios ---
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS usuarios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre_completo TEXT NOT NULL,
+            telefono TEXT,
+            email TEXT NOT NULL UNIQUE,
+            rol TEXT NOT NULL,
+            password TEXT NOT NULL
+        )
+        """)
+        
+        # --- Insertar usuario admin por defecto ---
+        # (id=1, email='admin@sistema.com', pass='admin123')
+        try:
+            cursor.execute("""
+            INSERT INTO usuarios (id, nombre_completo, email, rol, password)
+            VALUES (1, 'Administrador', 'admin@sistema.com', 'Administrador', 'admin123')
+            """)
+        except sqlite3.IntegrityError:
+            pass # El usuario admin ya existe
+        
+        conn.commit()
+    except sqlite3.Error as e:
+        print(f"CRITICAL: Error al inicializar la base de datos: {e}")
+    finally:
+        if conn:
+            conn.close() # Asegurarse de cerrar la conexión
+
+# Funciones globales de mensajes (deben estar definidas antes de usarse)
+def mostrar_error(mensaje):
+    """Muestra un diálogo de error crítico."""
+    msg_box = QMessageBox()
+    msg_box.setIcon(QMessageBox.Icon.Critical)
+    msg_box.setWindowTitle("Error")
+    msg_box.setText(str(mensaje))
+    msg_box.exec()
+
+def mostrar_info(mensaje):
+    """Muestra un diálogo de información."""
+    msg_box = QMessageBox()
+    msg_box.setIcon(QMessageBox.Icon.Information)
+    msg_box.setWindowTitle("Información")
+    msg_box.setText(str(mensaje))
+    msg_box.exec()
+
+# ---- Ventana de Login ----
+class LoginScreen(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Sistema de Gestión Escolar - Login")
+        # Define tamaño inicial pero permite redimensionar
+        self.resize(800, 500)
+        self.username = "" # Para guardar el nombre de usuario
+        self.full_username = "" # Para guardar el nombre completo
+        self.user_role = "" # Para guardar el rol
+        self.accept_login = False # Para controlar el cierre
+
+        self.setup_ui()
+        self.apply_styles()
+        self.start_time_update()
+
+    def setup_ui(self):
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0) # Sin márgenes en el layout principal
+        main_layout.setSpacing(0)
+
+        # Panel Izquierdo: Login Form
+        login_panel = QWidget()
+        login_panel.setObjectName("loginPanel")
+        login_layout = QVBoxLayout(login_panel)
+        login_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        login_layout.setSpacing(20)
+        login_layout.setContentsMargins(50, 50, 50, 50)
+
+        # Logo Placeholder
+        self.logo_label = QLabel()
+        # Busca 'logo.png' (el que tienes en tu carpeta)
+        try:
+            pixmap = QPixmap(LOGO_PATH) # Usa la constante global
+            if pixmap.isNull():
+                raise FileNotFoundError # Si no se carga, generamos el error para el texto
+
+            # Se escala a una altura de 150px (mejor para logo vertical/cuadrado)
+            self.logo_label.setPixmap(pixmap.scaledToHeight(150, Qt.TransformationMode.SmoothTransformation))
+            self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        except FileNotFoundError:
+            # Si no encuentra el logo, muestra un texto
+            self.logo_label.setText("LOGO ESCUELA")
+            self.logo_label.setFont(QFont("Arial", 24, QFont.Weight.Bold))
+            self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.logo_label.setStyleSheet("color: #FFFFFF;")
+
+        login_layout.addWidget(self.logo_label)
+
+        # Campos de Usuario
+        user_label = QLabel("Correo Electrónico:") # CAMBIO
+        user_label.setObjectName("inputLabel")
+        self.username_input = QLineEdit()
+        self.username_input.setPlaceholderText("admin@sistema.com") # CAMBIO
+        self.username_input.setObjectName("textInput")
+        login_layout.addWidget(user_label)
+        login_layout.addWidget(self.username_input)
+
+        # Campos de Contraseña
+        password_label = QLabel("Contraseña:")
+        password_label.setObjectName("inputLabel")
+        self.password_input = QLineEdit()
+        self.password_input.setPlaceholderText("Contraseña")
+        self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.password_input.setObjectName("textInput")
+        login_layout.addWidget(password_label)
+        login_layout.addWidget(self.password_input)
+
+        # Botones
+        self.login_button = QPushButton("INICIAR SESIÓN")
+        self.login_button.setObjectName("primaryButton")
+        self.login_button.clicked.connect(self.handle_login)
+        login_layout.addWidget(self.login_button)
+
+        self.forgot_password_button = QPushButton("RECUPERAR CONTRASEÑA")
+        self.forgot_password_button.setObjectName("secondaryButton")
+        self.forgot_password_button.clicked.connect(self.show_forgot_password_message) # CONECTADO
+        login_layout.addWidget(self.forgot_password_button)
+
+        login_layout.addStretch() # Empuja los elementos hacia arriba
+
+        main_layout.addWidget(login_panel, 2) # 2 partes del ancho
+
+        # Panel Derecho: Mensaje de Bienvenida y Fondo
+        self.welcome_panel = QWidget()
+        self.welcome_panel.setObjectName("welcomePanel")
+        welcome_layout = QVBoxLayout(self.welcome_panel)
+        welcome_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.time_of_day_label = QLabel()
+        self.time_of_day_label.setFont(QFont("Arial", 28, QFont.Weight.Bold))
+        self.time_of_day_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.time_of_day_label.setStyleSheet("color: white; background-color: rgba(0,0,0,0.6); padding: 15px; border-radius: 10px;")
+
+        # Efecto de sombra para el label de bienvenida
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(20)
+        shadow.setColor(QColor(0, 0, 0, 150))
+        shadow.setXOffset(0)
+        shadow.setYOffset(0)
+        self.time_of_day_label.setGraphicsEffect(shadow)
+
+        welcome_layout.addWidget(self.time_of_day_label)
+        welcome_layout.addStretch() # Empuja el mensaje de bienvenida hacia arriba
+
+        # Texto inferior
+        bottom_text_label = QLabel("Unidad Profesional de Asesoría y Regularización")
+        bottom_text_label.setObjectName("bottomText")
+        bottom_text_label.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter)
+        bottom_text_label.setStyleSheet("color: white; background-color: rgba(0,0,0,0.5); padding: 5px;")
+        welcome_layout.addWidget(bottom_text_label)
+
+        main_layout.addWidget(self.welcome_panel, 3) # 3 partes del ancho
+
+    def apply_styles(self):
+        # Estilos inspirados en tu imagen de ejemplo
+        self.setStyleSheet("""
+            QWidget {
+                font-family: 'Segoe UI', Arial, sans-serif;
+                font-size: 10pt;
+            }
+            #loginPanel {
+                background-color: #3C3C3C; /* Gris oscuro similar al tuyo */
+                color: #E0E0E0;
+            }
+            #welcomePanel {
+                /* Busca un archivo llamado 'background.jpg' (como en tu captura) */
+                background-image: url(background.jpg);
+                background-repeat: no-repeat;
+                background-position: center;
+                background-size: cover; /* Ajusta la imagen para cubrir el panel */
+                /* Color de fondo si no encuentra la imagen */
+                background-color: #F0F0F0;
+            }
+            #inputLabel {
+                color: #E0E0E0;
+                font-weight: bold;
+                margin-top: 10px;
+            }
+            #textInput {
+                background-color: #4A4A4A;
+                color: #E0E0E0;
+                border: 1px solid #5C5C5C;
+                border-radius: 4px;
+                padding: 8px;
+            }
+            #textInput:focus {
+                border: 1px solid #007ACC;
+            }
+            #primaryButton {
+                background-color: #4CAF50; /* Verde */
+                color: #FFFFFF;
+                border: none;
+                border-radius: 6px;
+                padding: 10px 20px;
+                font-weight: bold;
+                font-size: 11pt;
+                margin-top: 20px;
+            }
+            #primaryButton:hover {
+                background-color: #45A049;
+            }
+            #primaryButton:pressed {
+                background-color: #397D3D;
+            }
+            #secondaryButton {
+                background-color: #607D8B; /* Azul grisáceo */
+                color: #FFFFFF;
+                border: none;
+                border-radius: 6px;
+                padding: 10px 20px;
+                font-weight: bold;
+                font-size: 11pt;
+            }
+            #secondaryButton:hover {
+                background-color: #546E7A;
+            }
+            #secondaryButton:pressed {
+                background-color: #455A64;
+            }
+            #bottomText {
+                font-size: 9pt;
+            }
+        """)
+
+    def start_time_update(self):
+        self.update_time_of_day_message()
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_time_of_day_message)
+        self.timer.start(60000) # Actualizar cada minuto
+
+    def update_time_of_day_message(self):
+        current_hour = QDateTime.currentDateTime().time().hour()
+        if 5 <= current_hour < 12:
+            message = "¡Buenos días!\nBienvenido(a)"
+        elif 12 <= current_hour < 19:
+            message = "¡Buenas tardes!\nBienvenido(a)"
+        else:
+            message = "¡Buenas noches!\nBienvenido(a)"
+        self.time_of_day_label.setText(message)
+
+    def handle_login(self):
+        """Maneja el inicio de sesión consultando la base de datos."""
+        email = self.username_input.text().strip()
+        password = self.password_input.text()
+
+        if not email or not password:
+            QMessageBox.warning(self, "Error de Login", "Email y contraseña no pueden estar vacíos.")
+            return
+
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM usuarios WHERE email = ? AND password = ?", (email, password))
+                usuario = cursor.fetchone()
+                
+            if usuario:
+                self.accept_login = True
+                self.username = usuario['email'] # O puedes usar parte del email
+                self.full_username = usuario['nombre_completo']
+                self.user_role = usuario['rol'] # Guardar el rol
+                self.close() # Cierra la ventana de login
+            else:
+                QMessageBox.warning(self, "Error de Login", "Email o contraseña incorrectos.")
+                self.password_input.clear()
+                self.username_input.setFocus() # Pone el foco de nuevo en el usuario
+
+        except sqlite3.Error as e:
+            mostrar_error(f"Error en la base de datos al iniciar sesión: {e}")
+
+    def show_forgot_password_message(self):
+        """Muestra un diálogo para resetear la contraseña de un usuario."""
+        email, ok = QInputDialog.getText(self, "Recuperar Contraseña",
+                                           "Ingrese su correo electrónico para resetear la contraseña:")
+        
+        if ok and email:
+            try:
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT id, rol FROM usuarios WHERE email = ?", (email,))
+                    usuario = cursor.fetchone()
+                    
+                if usuario:
+                    # Protección para el admin ID 1
+                    if usuario['id'] == 1:
+                        mostrar_error("No se puede resetear la contraseña del Administrador principal. Contacte al soporte.")
+                        return
+
+                    # Generar nueva contraseña
+                    nueva_password = secrets.token_hex(4) # Nueva contraseña aleatoria de 8 caracteres
+                    
+                    with get_db_connection() as conn:
+                        cursor = conn.cursor()
+                        cursor.execute("UPDATE usuarios SET password = ? WHERE email = ?", (nueva_password, email))
+                        conn.commit()
+                    
+                    mostrar_info(f"La contraseña para {email} ha sido reseteada.\n\n"
+                                 f"Su nueva contraseña es: {nueva_password}\n\n"
+                                 "Por favor, úsela para iniciar sesión y cámbiela si es necesario.")
+                else:
+                    mostrar_error("No se encontró ningún usuario con ese correo electrónico.")
+                    
+            except sqlite3.Error as e:
+                mostrar_error(f"Error en la base de datos: {e}")
+            except Exception as e:
+                 mostrar_error(f"Error inesperado: {e}")
+
+    def closeEvent(self, event):
+        # Asegurarse de que si se cierra la ventana de login sin iniciar sesión, la aplicación se cierre
+        if not self.accept_login:
+            sys.exit(0) # Termina la aplicación si el login no fue exitoso
+        event.accept()
+
+# ---- Ventana Principal de la Aplicación (REDISEÑADA AL ESTILO DASHBOARD) ----
+class VentanaPrincipal(QMainWindow):
+    def __init__(self, username, full_username, user_role): # Acepta el rol del usuario
+        super().__init__()
+        self.username = username
+        self.full_username = full_username # Nombre completo para mostrar
+        self.user_role = user_role # Guardar el rol (Administrador o Asesor)
+        self.logout_solicitado = False # Para controlar el cierre de sesión
+        self._temp_pdf_files = [] # Lista para guardar nombres de archivos temporales
+        self.usuario_seleccionado_id = None # Para guardar el ID del usuario a editar
+        self.curso_seleccionado_id = None # Para guardar el ID del curso a editar
+
+        self.setWindowTitle("Sistema de Gestión Escolar - UPASER")
+        self.setGeometry(100, 100, 1200, 700)
+        self.setMinimumSize(1024, 700) # Un tamaño mínimo
+        
+        # --- IDIOMA A ESPAÑOL ---
+        # Establecer el idioma para que QDateTime muestre nombres en español
+        self.locale = QLocale(QLocale.Language.Spanish, QLocale.Country.Mexico)
+        QLocale.setDefault(self.locale)
+
+        # --- Cargar configuración de tema ---
+        self.theme, self.accent = self.cargar_configuracion_tema()
+        self.aplicar_estilo_actual()
+
+        # Configurar UI
+        self.init_ui()
+
+        # Cargar datos iniciales
+        self.cargar_datos_maestros()
+
+        # Iniciar el temporizador para la hora
+        self.iniciar_timer_reloj()
+        
+        # Conectar señal de cierre para limpiar archivos temporales
+        app.aboutToQuit.connect(self.limpiar_archivos_temporales)
+
+    # --- NUEVA FUNCIÓN DE PDF: draw_text_pdf ---
+    # Movida aquí para evitar problemas de 'nonlocal' y reutilizarla
+    def draw_text_pdf(self, c, current_y, texto, x, style):
+        """Dibuja un Paragraph de ReportLab y maneja saltos de página."""
+        width, height = letter
+        
+        p = Paragraph(texto.replace('\n', '<br/>'), style)
+        p_width, p_height = p.wrapOn(c, width - (x + inch), height)
+
+        # Si no cabe
+        if current_y - p_height < inch:
+            self.draw_watermark(c, width, height)
+            c.showPage()
+            self.draw_watermark(c, width, height)
+            current_y = height - inch
+            self.draw_logo(c, width, height)
+
+        p.drawOn(c, x, current_y - p_height)
+        current_y -= (p_height + 4) # Actualizar la posición Y
+        return current_y # Devolver la nueva posición Y
+
+    # --- NUEVA FUNCIÓN DE PDF: draw_logo ---
+    def draw_logo(self, canvas_obj, page_width, page_height):
+         if os.path.exists(LOGO_PATH):
+             try:
+                 logo_img = Image(LOGO_PATH, width=1*inch, height=1*inch)
+                 logo_img.drawOn(canvas_obj, 0.5 * inch, page_height - 1.25 * inch)
+             except Exception as img_err:
+                 print(f"Error al dibujar logo: {img_err}")
+
+
+    # --- NUEVA FUNCIÓN DE PDF: draw_watermark ---
+    def draw_watermark(self, canvas_obj, page_width, page_height):
+         if os.path.exists(LOGO_PATH):
+             try:
+                 canvas_obj.saveState()
+                 canvas_obj.setFillAlpha(0.15)
+                 img = Image(LOGO_PATH)
+                 img_width, img_height = img.wrap(page_width, page_height)
+                 aspect = img_height / float(img_width) if img_width else 1
+                 
+                 display_width = page_width * 0.6
+                 display_height = display_width * aspect
+                 x_centered = (page_width - display_width) / 2.0
+                 y_centered = (page_height - display_height) / 2.0
+                 canvas_obj.drawImage(LOGO_PATH, x_centered, y_centered,
+                                      width=display_width, height=display_height,
+                                      mask='auto')
+                 canvas_obj.restoreState()
+             except Exception as wm_err:
+                 print(f"Error al dibujar marca de agua: {wm_err}")
+    
+    # --- NUEVA FUNCIÓN DE PDF: draw_double_signature ---
+    def draw_double_signature(self, c, y_position):
+        width, height = letter
+        c.line(inch, y_position, inch * 4, y_position)
+        c.setFont(FONT_NAME, 10)
+        c.drawCentredString(inch * 2.5, y_position - 0.2 * inch, "Firma del Padre o Tutor")
+        
+        c.line(width - inch * 4, y_position, width - inch, y_position)
+        c.setFont(FONT_NAME, 10)
+        c.drawCentredString(width - inch * 2.5, y_position - 0.2 * inch, "Firma del Alumno")
+
+
+    def init_ui(self):
+        """Inicializa la interfaz de usuario principal con estilo dashboard."""
+
+        # Widget central y layout principal vertical
+        widget_central = QWidget()
+        self.setCentralWidget(widget_central)
+        layout_principal = QVBoxLayout(widget_central)
+        layout_principal.setContentsMargins(0, 0, 0, 0)
+        layout_principal.setSpacing(0)
+
+        # 1. Barra Superior de Información
+        barra_superior = self.crear_barra_superior()
+        layout_principal.addWidget(barra_superior)
+
+        # 2. Layout de Contenido Principal (Horizontal)
+        layout_contenido = QHBoxLayout()
+        layout_contenido.setSpacing(0)
+
+        # 2.1. Panel de Navegación (Izquierda)
+        panel_navegacion = self.crear_panel_navegacion()
+        layout_contenido.addWidget(panel_navegacion)
+
+        # 2.2. Panel de Contenido (Derecha)
+        self.stacked_widget = QStackedWidget()
+        self.stacked_widget.setObjectName("mainContentArea")
+
+        # Crear las páginas
+        self.pagina_inicio = self.crear_pagina_inicio()
+        self.pagina_inscripcion = self.crear_pagina_nueva_inscripcion() # Formulario detallado
+        self.pagina_pagos = self.crear_pagina_pagos()
+        self.pagina_lista_alumnos = self.crear_pagina_lista_alumnos() 
+        self.pagina_gestion_cursos = self.crear_pagina_gestion_cursos() 
+        self.pagina_gestion_usuarios = self.crear_pagina_gestion_usuarios()
+        self.pagina_configuracion = self.crear_pagina_configuracion() # NUEVA PÁGINA
+
+        # Añadir páginas al StackedWidget (Nuevo orden e índices)
+        self.stacked_widget.addWidget(self.pagina_inicio) # index 0
+        self.stacked_widget.addWidget(self.pagina_inscripcion) # index 1
+        self.stacked_widget.addWidget(self.pagina_pagos) # index 2
+        self.stacked_widget.addWidget(self.pagina_lista_alumnos) # index 3
+        self.stacked_widget.addWidget(self.pagina_gestion_cursos) # index 4
+        self.stacked_widget.addWidget(self.pagina_gestion_usuarios) # index 5
+        self.stacked_widget.addWidget(self.pagina_configuracion) # index 6
+
+        layout_contenido.addWidget(self.stacked_widget, 1) # '1' le da más espacio
+
+        # Añadir el layout de contenido al layout principal
+        layout_principal.addLayout(layout_contenido)
+
+        # Conectar botones de navegación a las páginas (Nuevos índices)
+        self.btn_nav_inicio.clicked.connect(lambda: self.cambiar_pagina(0))
+        self.btn_nav_inscripcion.clicked.connect(lambda: self.cambiar_pagina(1)) # Formulario
+        self.btn_nav_pagos.clicked.connect(lambda: self.cambiar_pagina(2))
+        self.btn_nav_lista_alumnos.clicked.connect(lambda: self.cambiar_pagina(3)) 
+        
+        # Conectar botones de admin si existen
+        if hasattr(self, 'btn_nav_gestion_cursos'):
+            self.btn_nav_gestion_cursos.clicked.connect(lambda: self.cambiar_pagina(4))
+        if hasattr(self, 'btn_nav_gestion_usuarios'):
+            self.btn_nav_gestion_usuarios.clicked.connect(lambda: self.cambiar_pagina(5))
+        if hasattr(self, 'btn_nav_config'):
+            self.btn_nav_config.clicked.connect(lambda: self.cambiar_pagina(6))
+            
+        self.btn_logout.clicked.connect(self.cerrar_sesion)
+
+        # Establecer página inicial
+        self.cambiar_pagina(0)
+
+    def crear_barra_superior(self):
+        """Crea la barra de información superior."""
+        widget = QWidget()
+        widget.setObjectName("topBar")
+        widget.setFixedHeight(50)
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(15, 5, 15, 5)
+
+        icon_usuario = QLabel("👤")
+        icon_usuario.setFont(QFont("Arial", 16))
+        icon_usuario.setObjectName("topBarIcon") # ID para estilo
+
+        info_layout = QVBoxLayout()
+        info_layout.setSpacing(0)
+        self.lbl_usuario_top = QLabel(f"Usuario: {self.full_username} ({self.user_role})") # Añadir rol
+        self.lbl_usuario_top.setObjectName("topBarUser")
+
+        fecha_hora_layout = QHBoxLayout()
+        # Formateo de fecha/hora se hace en actualizar_hora usando self.locale
+        self.lbl_fecha_top = QLabel("Fecha: ...")
+        self.lbl_fecha_top.setObjectName("topBarLabel")
+        self.lbl_hora_top = QLabel("Hora: ...")
+        self.lbl_hora_top.setObjectName("topBarLabel")
+        fecha_hora_layout.addWidget(self.lbl_fecha_top)
+        fecha_hora_layout.addWidget(self.lbl_hora_top)
+
+        info_layout.addWidget(self.lbl_usuario_top)
+        info_layout.addLayout(fecha_hora_layout)
+
+        layout.addWidget(icon_usuario)
+        layout.addLayout(info_layout)
+
+        layout.addStretch()
+
+        # Icono de logout (campana eliminada)
+        self.btn_logout = QPushButton("🚪")
+        self.btn_logout.setObjectName("topBarButton")
+        self.btn_logout.setToolTip("Cerrar Sesión")
+
+        layout.addWidget(self.btn_logout)
+
+        return widget
+
+    def crear_panel_navegacion(self):
+        """Crea el panel de navegación izquierdo naranja."""
+        panel = QWidget()
+        panel.setObjectName("navBar")
+        panel.setFixedWidth(200)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 10, 0, 10)
+        layout.setSpacing(5)
+
+        # Botones de Navegación (Añadidos nuevos, eliminado "Alumnos y Cursos")
+        self.btn_nav_inicio = QPushButton("🏠  Inicio")
+        self.btn_nav_inscripcion = QPushButton("📝  Nueva Inscripción")
+        self.btn_nav_pagos = QPushButton("💵  Registro de Pagos")
+        self.btn_nav_lista_alumnos = QPushButton("👥  Lista de Alumnos") 
+
+        # Lista de botones base para todos los usuarios
+        self.nav_buttons = [
+            self.btn_nav_inicio, self.btn_nav_inscripcion, self.btn_nav_pagos,
+            self.btn_nav_lista_alumnos
+        ]
+
+        # Añadir botones base
+        layout.addWidget(self.btn_nav_inicio)
+        layout.addWidget(self.btn_nav_inscripcion)
+        layout.addWidget(self.btn_nav_pagos)
+        layout.addWidget(self.btn_nav_lista_alumnos)
+
+        # --- SECCIÓN SOLO PARA ADMINISTRADORES ---
+        if self.user_role == "Administrador":
+            self.btn_nav_gestion_cursos = QPushButton("📚  Gestionar Cursos")
+            self.btn_nav_gestion_usuarios = QPushButton("👤  Gestionar Usuarios")
+            self.btn_nav_config = QPushButton("⚙️  Configuración")
+            
+            # Añadir a la lista de botones
+            self.nav_buttons.extend([self.btn_nav_gestion_cursos, self.btn_nav_gestion_usuarios, self.btn_nav_config])
+            
+            # Añadir al layout
+            layout.addWidget(self.btn_nav_gestion_cursos)
+            layout.addWidget(self.btn_nav_gestion_usuarios)
+            
+            layout.addStretch() # Empuja el botón de config hacia abajo
+            layout.addWidget(self.btn_nav_config)
+        else:
+            layout.addStretch() # Empuja hacia abajo
+
+        # Aplicar el mismo ObjectName a todos los botones para el estilo
+        for btn in self.nav_buttons:
+            if btn: # Chequear que el botón exista (por si acaso)
+                btn.setObjectName("navButton")
+
+        return panel
+
+    def crear_pagina_inicio(self):
+        """Crea la página de bienvenida con accesos directos."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(25, 25, 25, 25)
+        layout.setSpacing(20)
+
+        lbl_bienvenida = QLabel(f"¡¡BIENVENIDO(A), {self.full_username}!!")
+        lbl_bienvenida.setObjectName("welcomeTitle")
+        lbl_bienvenida.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(lbl_bienvenida)
+
+        lbl_accesos = QLabel("Accesos directos")
+        lbl_accesos.setObjectName("shortcutsTitle")
+        layout.addWidget(lbl_accesos)
+
+        # Contenedor de accesos directos
+        layout_accesos = QHBoxLayout()
+        layout_accesos.setSpacing(30)
+
+        # "Nueva Inscripción" va a página 1 (formulario)
+        btn_sc_inscribir = self.crear_boton_acceso("📝", "Nueva Inscripción", lambda: self.cambiar_pagina(1))
+        # "Registrar Pago" va a página 2
+        btn_sc_pagar = self.crear_boton_acceso("💵", "Registrar Pago", lambda: self.cambiar_pagina(2))
+        # "Consultar Alumnos" va a página 3 (lista alumnos)
+        btn_sc_gestionar = self.crear_boton_acceso("👥", "Consultar Alumnos", lambda: self.cambiar_pagina(3))
+        
+        layout_accesos.addWidget(btn_sc_inscribir)
+        layout_accesos.addWidget(btn_sc_pagar)
+        layout_accesos.addWidget(btn_sc_gestionar)
+        
+        # --- AÑADIR ACCESOS DE ADMIN ---
+        if self.user_role == "Administrador":
+            btn_sc_cursos = self.crear_boton_acceso("📚", "Gestionar Cursos", lambda: self.cambiar_pagina(4))
+            btn_sc_usuarios = self.crear_boton_acceso("👤", "Gestionar Usuarios", lambda: self.cambiar_pagina(5))
+            layout_accesos.addWidget(btn_sc_cursos)
+            layout_accesos.addWidget(btn_sc_usuarios)
+            
+        layout_accesos.addStretch()
+
+        layout.addLayout(layout_accesos)
+        layout.addStretch()
+        return widget
+
+    def crear_boton_acceso(self, icono, texto, on_click):
+        """Crea un botón de acceso directo (icono + texto)."""
+        widget = QWidget()
+        widget.setObjectName("shortcutButton")
+        layout = QVBoxLayout(widget)
+
+        btn = QPushButton(icono)
+        btn.setObjectName("shortcutIcon")
+        btn.setFixedSize(100, 100)
+        btn.clicked.connect(on_click)
+
+        lbl = QLabel(texto)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl.setObjectName("shortcutLabel")
+
+        layout.addWidget(btn)
+        layout.addWidget(lbl)
+
+        return widget
+
+    def cambiar_pagina(self, index):
+        """Cambia la página visible en el QStackedWidget."""
+
+        # Resetear estilos de todos los botones principales
+        for btn in self.nav_buttons:
+            if btn: # Verificar que el botón existe (para roles no-admin)
+                btn.setProperty("selected", False)
+                self.style().polish(btn)
+
+        # Mapeo del índice de página a botón y carga de datos
+        boton_activo = None
+        if index == 0: # Inicio
+            self.stacked_widget.setCurrentIndex(0)
+            boton_activo = self.btn_nav_inicio
+        elif index == 1: # Nueva Inscripción (Formulario)
+            self.stacked_widget.setCurrentIndex(1)
+            boton_activo = self.btn_nav_inscripcion
+            self.cargar_combo_curso_registro() # Cargar cursos en el form
+        elif index == 2: # Pagos
+            self.stacked_widget.setCurrentIndex(2)
+            boton_activo = self.btn_nav_pagos
+            self.cargar_tabla_inscripciones_pagos() # Cargar datos
+        elif index == 3: # Lista Alumnos
+            self.stacked_widget.setCurrentIndex(3)
+            boton_activo = self.btn_nav_lista_alumnos
+            self.cargar_tabla_alumnos() # Cargar tabla alumnos
+        elif index == 4: # Gestionar Cursos (Admin)
+            if self.user_role == "Administrador":
+                self.stacked_widget.setCurrentIndex(4)
+                boton_activo = self.btn_nav_gestion_cursos
+                self.cargar_tabla_cursos() # Cargar tabla cursos
+        elif index == 5: # Gestionar Usuarios (Admin)
+            if self.user_role == "Administrador":
+                self.stacked_widget.setCurrentIndex(5)
+                boton_activo = self.btn_nav_gestion_usuarios
+                self.cargar_tabla_usuarios() # Cargar tabla usuarios
+        elif index == 6: # Configuración (Admin)
+            if self.user_role == "Administrador":
+                self.stacked_widget.setCurrentIndex(6)
+                boton_activo = self.btn_nav_config
+                
+        # Poner estilo seleccionado al botón activo (si aplica)
+        if boton_activo:
+            boton_activo.setProperty("selected", True)
+            self.style().polish(boton_activo)
+
+
+    def iniciar_timer_reloj(self):
+        """Inicia el QTimer para actualizar la hora cada segundo."""
+        self.timer_reloj = QTimer(self)
+        self.timer_reloj.timeout.connect(self.actualizar_hora)
+        self.timer_reloj.start(1000) # 1000 ms = 1 segundo
+        self.actualizar_hora() # Llamada inicial
+
+    def actualizar_hora(self):
+        """Actualiza el texto de la etiqueta de la hora."""
+        current_time = QDateTime.currentDateTime()
+        if hasattr(self, 'lbl_fecha_top'): # Verificar si existe
+            # Usar el locale de la ventana para traducir los nombres
+            self.lbl_fecha_top.setText("Fecha: " + self.locale.toString(current_time.date(), "dddd, dd MMMM yyyy").capitalize())
+            self.lbl_hora_top.setText("Hora: " + self.locale.toString(current_time.time(), "hh:mm:ss ap"))
+
+    def cerrar_sesion(self):
+        """Cierra la sesión y vuelve al login."""
+        self.logout_solicitado = True
+        self.close()
+
+    # ---- PÁGINA 1: NUEVA INSCRIPCIÓN (Formulario Detallado) ----
+    def crear_pagina_nueva_inscripcion(self):
+        """Crea la interfaz para la página de NUEVA INSCRIPCIÓN (Formulario detallado)."""
+        widget = QWidget()
+        widget.setObjectName("contentPage")
+        layout_principal = QVBoxLayout(widget) # Layout principal para la página
+        layout_principal.setContentsMargins(15, 15, 15, 15)
+
+        scroll_area = QScrollArea() # Área de scroll para el formulario largo
+        scroll_area.setWidgetResizable(True)
+
+        # Widget contenedor para el layout dentro del scroll
+        scroll_content_widget = QWidget()
+        layout_nuevo_alumno = QVBoxLayout(scroll_content_widget) # Layout dentro del scroll
+
+        # -- Grupo Datos del Alumno --
+        group_alumno = QGroupBox("Datos del Alumno")
+        form_alumno = QFormLayout(group_alumno)
+        self.entry_al_ap_paterno = QLineEdit()
+        self.entry_al_ap_materno = QLineEdit()
+        self.entry_al_nombres = QLineEdit()
+        self.entry_al_escuela_procedencia = QLineEdit()
+        self.entry_al_escuela_ingresar = QLineEdit()
+        self.entry_al_edad = QLineEdit() # QLineEdit para validar como número
+        self.entry_al_telefono = QLineEdit()
+        self.entry_al_email = QLineEdit()
+        self.combo_al_turno = QComboBox()
+        self.combo_al_turno.addItems(["Matutino", "Vespertino"])
+
+        self.combo_curso_registro = QComboBox() # Combo para el curso
+        self.combo_tipo_pago_registro = QComboBox() # NUEVO COMBO para plan de pago
+        self.lbl_costo_total_registro = QLabel("$ 0.00") # NUEVO LABEL para costo total
+        self.lbl_costo_total_registro.setStyleSheet("font-weight: bold; color: #4CAF50; font-size: 11pt;")
+
+        self.check_autoriza_salida = QCheckBox("Autoriza que el alumno se retire solo del plantel")
+        self.check_imprimir_poliza = QCheckBox("Imprimir Póliza de Garantía y Términos y Condiciones") # NUEVO CHECKBOX
+
+        form_alumno.addRow("Apellido Paterno:", self.entry_al_ap_paterno)
+        form_alumno.addRow("Apellido Materno:", self.entry_al_ap_materno)
+        form_alumno.addRow("Nombre(s):", self.entry_al_nombres)
+        form_alumno.addRow("Escuela de Procedencia:", self.entry_al_escuela_procedencia)
+        form_alumno.addRow("Escuela a Ingresar:", self.entry_al_escuela_ingresar)
+        form_alumno.addRow("Edad:", self.entry_al_edad)
+        form_alumno.addRow("Teléfono (Alumno):", self.entry_al_telefono)
+        form_alumno.addRow("Correo Electrónico:", self.entry_al_email)
+        form_alumno.addRow("Turno:", self.combo_al_turno)
+        form_alumno.addRow("Curso a Inscribir:", self.combo_curso_registro)
+        form_alumno.addRow("Plan de Pago:", self.combo_tipo_pago_registro)
+        form_alumno.addRow("Costo Total:", self.lbl_costo_total_registro)
+        form_alumno.addRow("", self.check_autoriza_salida) # Sin etiqueta, solo el checkbox
+        form_alumno.addRow("", self.check_imprimir_poliza) # NUEVO
+        layout_nuevo_alumno.addWidget(group_alumno)
+        
+        # Conectar señales
+        self.combo_curso_registro.currentIndexChanged.connect(self.actualizar_opciones_pago)
+        self.combo_tipo_pago_registro.currentIndexChanged.connect(self.actualizar_costo_total_label)
+
+
+        # -- Grupo Datos del Tutor --
+        group_tutor = QGroupBox("Datos del Padre o Tutor")
+        form_tutor = QFormLayout(group_tutor)
+        self.entry_tutor_ap_paterno = QLineEdit()
+        self.entry_tutor_ap_materno = QLineEdit()
+        self.entry_tutor_nombres = QLineEdit()
+        self.entry_tutor_telefono = QLineEdit()
+
+        form_tutor.addRow("Apellido Paterno:", self.entry_tutor_ap_paterno)
+        form_tutor.addRow("Apellido Materno:", self.entry_tutor_ap_materno)
+        form_tutor.addRow("Nombre(s):", self.entry_tutor_nombres)
+        form_tutor.addRow("Teléfono (Tutor):", self.entry_tutor_telefono)
+        layout_nuevo_alumno.addWidget(group_tutor)
+
+        # -- Grupo Domicilio del Tutor --
+        group_domicilio = QGroupBox("Domicilio del Tutor")
+        form_domicilio = QFormLayout(group_domicilio)
+        self.entry_dom_calle = QLineEdit()
+        self.entry_dom_num_ext = QLineEdit()
+        self.entry_dom_num_int = QLineEdit()
+        self.entry_dom_colonia = QLineEdit()
+        self.entry_dom_municipio = QLineEdit()
+        self.entry_dom_estado = QLineEdit()
+        self.entry_dom_cp = QLineEdit()
+
+        form_domicilio.addRow("Calle:", self.entry_dom_calle)
+        form_domicilio.addRow("Número Exterior:", self.entry_dom_num_ext)
+        form_domicilio.addRow("Número Interior:", self.entry_dom_num_int)
+        form_domicilio.addRow("Colonia:", self.entry_dom_colonia)
+        form_domicilio.addRow("Municipio:", self.entry_dom_municipio)
+        form_domicilio.addRow("Estado:", self.entry_dom_estado)
+        form_domicilio.addRow("Código Postal:", self.entry_dom_cp)
+        layout_nuevo_alumno.addWidget(group_domicilio)
+
+        # -- Grupo Contactos de Emergencia --
+        group_emergencia = QGroupBox("Contactos de Emergencia")
+        layout_emergencia = QVBoxLayout(group_emergencia)
+
+        # Contacto 1
+        layout_emerg_1 = QFormLayout()
+        self.entry_emerg_1_nombre = QLineEdit()
+        self.entry_emerg_1_telefono = QLineEdit()
+        self.entry_emerg_1_parentesco = QLineEdit()
+        layout_emerg_1.addRow("Nombre Completo 1:", self.entry_emerg_1_nombre)
+        layout_emerg_1.addRow("Teléfono 1:", self.entry_emerg_1_telefono)
+        layout_emerg_1.addRow("Parentesco 1:", self.entry_emerg_1_parentesco)
+        layout_emergencia.addLayout(layout_emerg_1)
+
+        # Contacto 2
+        layout_emerg_2 = QFormLayout()
+        self.entry_emerg_2_nombre = QLineEdit()
+        self.entry_emerg_2_telefono = QLineEdit()
+        self.entry_emerg_2_parentesco = QLineEdit()
+        layout_emerg_2.addRow("Nombre Completo 2:", self.entry_emerg_2_nombre)
+        layout_emerg_2.addRow("Teléfono 2:", self.entry_emerg_2_telefono)
+        layout_emerg_2.addRow("Parentesco 2:", self.entry_emerg_2_parentesco)
+        layout_emergencia.addLayout(layout_emerg_2)
+
+        layout_nuevo_alumno.addWidget(group_emergencia)
+
+        # Botón de Guardar e Imprimir
+        self.btn_guardar_alumno = QPushButton("Imprimir Ficha de Inscripción")
+        self.btn_guardar_alumno.setObjectName("primaryButton")
+        # Conectar al método que ahora guarda E inscribe
+        self.btn_guardar_alumno.clicked.connect(self.registrar_alumno_e_inscribir)
+        layout_nuevo_alumno.addWidget(self.btn_guardar_alumno)
+
+        layout_nuevo_alumno.addStretch() # Empuja el botón hacia arriba si hay espacio
+
+        # Establecer el widget con el layout en el scroll area
+        scroll_area.setWidget(scroll_content_widget)
+
+        # Añadir el scroll area al layout principal de la página
+        layout_principal.addWidget(scroll_area)
+
+        return widget
+
+    # ---- PÁGINA 2: REGISTRO DE PAGOS ----
+    # ... (código sin cambios) ...
+    def crear_pagina_pagos(self):
+        """Crea la interfaz para la página de registro de pagos."""
+        main_layout = QHBoxLayout()
+        widget = QWidget()
+        widget.setObjectName("contentPage")
+        widget.setContentsMargins(15, 15, 15, 15) # Añadir padding
+
+        # Lado izquierdo: Registrar Pago
+        left_panel = QGroupBox("Registrar Nuevo Pago")
+        left_layout = QFormLayout()
+
+        self.combo_inscripcion_pago = QComboBox()
+        self.lbl_pago_total = QLabel("$ 0.00")
+        self.lbl_pago_pagado = QLabel("$ 0.00")
+        self.lbl_pago_pendiente = QLabel("$ 0.00")
+
+        self.lbl_pago_pendiente.setStyleSheet("font-weight: bold; color: #D32F2F;")
+        self.lbl_pago_pagado.setStyleSheet("color: #4CAF50;")
+
+        self.spin_monto_pago = QDoubleSpinBox()
+        self.spin_monto_pago.setRange(0.01, 100000.0)
+        self.spin_monto_pago.setPrefix("$ ")
+
+        self.combo_metodo_pago = QComboBox()
+        self.combo_metodo_pago.addItems(["Efectivo", "Transferencia", "Tarjeta de Débito", "Tarjeta de Crédito"])
+
+        self.btn_registrar_pago = QPushButton("Registrar Pago")
+        self.btn_registrar_pago.setObjectName("primaryButton") # Estilo primario
+
+        left_layout.addRow(QLabel("Inscripción (Alumno - Curso):"), self.combo_inscripcion_pago)
+        left_layout.addRow(QLabel("Monto Total:"), self.lbl_pago_total)
+        left_layout.addRow(QLabel("Monto Pagado:"), self.lbl_pago_pagado)
+        left_layout.addRow(QLabel("Saldo Pendiente:"), self.lbl_pago_pendiente)
+        left_layout.addRow(QLabel("Monto a Pagar:"), self.spin_monto_pago)
+        left_layout.addRow(QLabel("Método de Pago:"), self.combo_metodo_pago)
+        left_layout.addRow(self.btn_registrar_pago)
+        left_panel.setLayout(left_layout)
+
+        # Lado derecho: Historial de Pagos de la Inscripción
+        right_panel = QGroupBox("Historial de Pagos")
+        right_layout = QVBoxLayout()
+        self.tabla_historial_pagos = QTableWidget(0, 3)
+        self.tabla_historial_pagos.setHorizontalHeaderLabels(["Fecha", "Monto", "Método"])
+        self.tabla_historial_pagos.horizontalHeader().setStretchLastSection(True)
+        self.tabla_historial_pagos.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        right_layout.addWidget(self.tabla_historial_pagos)
+        right_panel.setLayout(right_layout)
+
+        main_layout.addWidget(left_panel, 1)
+        main_layout.addWidget(right_panel, 2)
+        widget.setLayout(main_layout)
+
+        # Conexiones
+        self.combo_inscripcion_pago.currentIndexChanged.connect(self.actualizar_detalles_pago)
+        self.btn_registrar_pago.clicked.connect(self.registrar_pago)
+
+        return widget
+
+    # ---- PÁGINA 3: LISTA DE ALUMNOS ----
+    # ... (código sin cambios) ...
+    def crear_pagina_lista_alumnos(self):
+        """Crea la interfaz para la página que muestra la lista de alumnos."""
+        widget = QWidget()
+        widget.setObjectName("contentPage")
+        # Layout principal horizontal: Tabla | Expediente
+        layout_principal = QHBoxLayout(widget)
+        layout_principal.setContentsMargins(15, 15, 15, 15)
+        layout_principal.setSpacing(15)
+
+        # Panel Izquierdo: Tabla de Alumnos
+        group_tabla = QGroupBox("Lista de Alumnos Registrados")
+        layout_tabla = QVBoxLayout(group_tabla)
+
+        self.tabla_alumnos = QTableWidget(0, 5) # ID, Nombre, Apellido, Email, Teléfono
+        self.tabla_alumnos.setHorizontalHeaderLabels(["ID", "Nombre(s)", "Ap. Paterno", "Ap. Materno", "Email"])
+        self.tabla_alumnos.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.tabla_alumnos.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.tabla_alumnos.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.tabla_alumnos.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        # Conectar la selección al método para mostrar expediente
+        self.tabla_alumnos.itemSelectionChanged.connect(self.mostrar_expediente_alumno)
+
+        layout_tabla.addWidget(self.tabla_alumnos)
+        layout_principal.addWidget(group_tabla, 2) # Darle más espacio a la tabla (2/3)
+
+        # Panel Derecho: Expediente y Botón
+        panel_derecho = QWidget()
+        layout_derecho = QVBoxLayout(panel_derecho)
+        layout_derecho.setContentsMargins(0,0,0,0) # Sin márgenes extra
+
+        group_expediente = QGroupBox("Expediente del Alumno")
+        layout_expediente = QVBoxLayout(group_expediente)
+        self.expediente_texto = QTextEdit()
+        self.expediente_texto.setReadOnly(True)
+        self.expediente_texto.setObjectName("expedienteDisplay") # Para estilo opcional
+        layout_expediente.addWidget(self.expediente_texto)
+
+        self.btn_dar_baja = QPushButton("Dar de Baja Alumno Seleccionado")
+        self.btn_dar_baja.setObjectName("deleteButton") # Estilo específico para borrar
+        self.btn_dar_baja.clicked.connect(self.dar_baja_alumno)
+
+        layout_derecho.addWidget(group_expediente)
+        layout_derecho.addWidget(self.btn_dar_baja)
+
+        layout_principal.addWidget(panel_derecho, 1) # Darle 1/3 del espacio
+
+        return widget
+
+    # ---- PÁGINA 4: GESTIONAR CURSOS ----
+    def crear_pagina_gestion_cursos(self):
+        """Crea la interfaz para la página de gestión de cursos."""
+        widget = QWidget()
+        widget.setObjectName("contentPage")
+        layout_main = QHBoxLayout(widget)
+        layout_main.setContentsMargins(15, 15, 15, 15)
+
+        # Panel Izquierdo: Formulario de Cursos
+        panel_cursos_form = QGroupBox("Gestión de Cursos")
+        layout_form = QVBoxLayout(panel_cursos_form)
+        
+        form_cursos = QFormLayout()
+        self.entry_cur_nombre = QLineEdit()
+        self.spin_costo_exhibicion = QDoubleSpinBox()
+        self.spin_costo_exhibicion.setRange(0.0, 100000.0)
+        self.spin_costo_exhibicion.setPrefix("$ ")
+        self.spin_costo_sem_15 = QDoubleSpinBox()
+        self.spin_costo_sem_15.setRange(0.0, 100000.0)
+        self.spin_costo_sem_15.setPrefix("$ ")
+        self.spin_costo_sem_12 = QDoubleSpinBox() # CAMBIO DE 16 a 12
+        self.spin_costo_sem_12.setRange(0.0, 100000.0)
+        self.spin_costo_sem_12.setPrefix("$ ")
+        self.spin_costo_mensual_3 = QDoubleSpinBox()
+        self.spin_costo_mensual_3.setRange(0.0, 100000.0)
+        self.spin_costo_mensual_3.setPrefix("$ ")
+        
+        form_cursos.addRow(QLabel("Nombre del Curso:"), self.entry_cur_nombre)
+        form_cursos.addRow(QLabel("Costo (Exhibición Única):"), self.spin_costo_exhibicion)
+        form_cursos.addRow(QLabel("Costo Total (15 Semanas):"), self.spin_costo_sem_15)
+        form_cursos.addRow(QLabel("Costo Total (12 Semanas):"), self.spin_costo_sem_12) # CAMBIO DE 16 a 12
+        form_cursos.addRow(QLabel("Costo Total (3 Meses):"), self.spin_costo_mensual_3)
+        
+        self.btn_guardar_curso = QPushButton("Guardar Curso")
+        self.btn_guardar_curso.setObjectName("primaryButton")
+        self.btn_guardar_curso.clicked.connect(self.guardar_curso)
+
+        self.btn_limpiar_form_curso = QPushButton("Limpiar Formulario")
+        self.btn_limpiar_form_curso.setObjectName("secondaryButton")
+        self.btn_limpiar_form_curso.clicked.connect(self.limpiar_campos_curso)
+
+        layout_botones_form = QHBoxLayout()
+        layout_botones_form.addWidget(self.btn_guardar_curso)
+        layout_botones_form.addWidget(self.btn_limpiar_form_curso)
+
+        layout_form.addLayout(form_cursos)
+        layout_form.addLayout(layout_botones_form)
+        layout_form.addStretch()
+
+        # Panel Derecho: Tabla de Cursos
+        panel_cursos_tabla = QGroupBox("Lista de Cursos")
+        layout_cursos_tabla = QVBoxLayout(panel_cursos_tabla)
+        self.tabla_cursos = QTableWidget(0, 6) # Columnas aumentadas
+        self.tabla_cursos.setHorizontalHeaderLabels(["ID", "Curso", "Exhibición", "Sem 15", "Sem 12", "Mensual 3"]) # CAMBIO DE 16 a 12
+        self.tabla_cursos.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.tabla_cursos.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.tabla_cursos.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.tabla_cursos.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.tabla_cursos.itemSelectionChanged.connect(self.seleccionar_curso_para_edicion)
+        
+        self.btn_eliminar_curso = QPushButton("Eliminar Curso Seleccionado")
+        self.btn_eliminar_curso.setObjectName("deleteButton")
+        self.btn_eliminar_curso.clicked.connect(self.dar_baja_curso)
+
+        layout_cursos_tabla.addWidget(self.tabla_cursos)
+        layout_cursos_tabla.addWidget(self.btn_eliminar_curso)
+
+        layout_main.addWidget(panel_cursos_form)
+        layout_main.addWidget(panel_cursos_tabla, 1) # Dar más espacio a la tabla
+        
+        return widget
+        
+    # ---- PÁGINA 5: GESTIONAR USUARIOS (NUEVA CON EDICIÓN) ----
+    def crear_pagina_gestion_usuarios(self):
+        """Crea la interfaz para la página de gestión de usuarios."""
+        widget = QWidget()
+        widget.setObjectName("contentPage")
+        layout_main = QHBoxLayout(widget)
+        layout_main.setContentsMargins(15, 15, 15, 15)
+
+        # Panel Izquierdo: Formulario de Usuario
+        panel_usuario_form = QGroupBox("Registrar / Editar Usuario")
+        layout_form = QVBoxLayout(panel_usuario_form)
+        
+        form_usuario = QFormLayout()
+        self.entry_usr_nombre = QLineEdit()
+        self.entry_usr_telefono = QLineEdit()
+        self.entry_usr_email = QLineEdit()
+        self.combo_usr_rol = QComboBox()
+        self.combo_usr_rol.addItems(["Asesor", "Administrador"])
+        
+        form_usuario.addRow(QLabel("Nombre Completo:"), self.entry_usr_nombre)
+        form_usuario.addRow(QLabel("Teléfono:"), self.entry_usr_telefono)
+        form_usuario.addRow(QLabel("Correo Electrónico:"), self.entry_usr_email)
+        form_usuario.addRow(QLabel("Rol:"), self.combo_usr_rol)
+        
+        # Botones de acción del formulario
+        self.btn_guardar_usuario = QPushButton("Guardar Usuario")
+        self.btn_guardar_usuario.setObjectName("primaryButton")
+        self.btn_guardar_usuario.clicked.connect(self.guardar_usuario) # Conectar a nueva función unificada
+
+        self.btn_limpiar_form_usuario = QPushButton("Limpiar Formulario")
+        self.btn_limpiar_form_usuario.setObjectName("secondaryButton") # Estilo secundario
+        self.btn_limpiar_form_usuario.clicked.connect(self.limpiar_campos_usuario)
+
+        self.btn_cambiar_password = QPushButton("Cambiar Contraseña")
+        self.btn_cambiar_password.setObjectName("secondaryButton") # Estilo secundario
+        self.btn_cambiar_password.clicked.connect(self.cambiar_password_usuario)
+        self.btn_cambiar_password.setVisible(False) # Oculto al inicio
+
+        layout_botones_form = QHBoxLayout()
+        layout_botones_form.addWidget(self.btn_guardar_usuario)
+        layout_botones_form.addWidget(self.btn_limpiar_form_usuario)
+        
+        layout_form.addLayout(form_usuario)
+        layout_form.addLayout(layout_botones_form)
+        layout_form.addWidget(self.btn_cambiar_password)
+        layout_form.addStretch() # Empujar hacia arriba
+        
+        # Panel Derecho: Tabla de Usuarios
+        panel_usuario_tabla = QGroupBox("Lista de Usuarios")
+        layout_usuario_tabla = QVBoxLayout(panel_usuario_tabla)
+        self.tabla_usuarios = QTableWidget(0, 4)
+        self.tabla_usuarios.setHorizontalHeaderLabels(["ID (No. Empleado)", "Nombre", "Email", "Rol"])
+        self.tabla_usuarios.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.tabla_usuarios.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.tabla_usuarios.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.tabla_usuarios.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        # Conectar clic en tabla para editar
+        self.tabla_usuarios.itemSelectionChanged.connect(self.seleccionar_usuario_para_edicion)
+        
+        self.btn_eliminar_usuario = QPushButton("Eliminar Usuario Seleccionado")
+        self.btn_eliminar_usuario.setObjectName("deleteButton") # Estilo de borrado
+        self.btn_eliminar_usuario.clicked.connect(self.dar_baja_usuario)
+
+        layout_usuario_tabla.addWidget(self.tabla_usuarios)
+        layout_usuario_tabla.addWidget(self.btn_eliminar_usuario)
+
+        layout_main.addWidget(panel_usuario_form)
+        layout_main.addWidget(panel_usuario_tabla, 1) # Dar más espacio a la tabla
+        
+        return widget
+
+    # ---- PÁGINA 6: CONFIGURACIÓN (NUEVA) ----
+    def crear_pagina_configuracion(self):
+        """Crea la interfaz para la página de configuración."""
+        widget = QWidget()
+        widget.setObjectName("contentPage")
+        layout_principal = QVBoxLayout(widget)
+        layout_principal.setContentsMargins(15, 15, 15, 15)
+        layout_principal.setSpacing(20)
+        layout_principal.setAlignment(Qt.AlignmentFlag.AlignTop) # Alinear al top
+
+        # --- Grupo Apariencia ---
+        group_apariencia = QGroupBox("Apariencia de la Aplicación")
+        group_apariencia.setMaximumWidth(400) # Limitar ancho
+        form_apariencia = QFormLayout(group_apariencia)
+
+        # Combo para Tema (Claro/Oscuro)
+        self.combo_tema = QComboBox()
+        self.combo_tema.addItems(["Claro", "Oscuro"])
+        self.combo_tema.setCurrentText(self.theme)
+        self.combo_tema.currentTextChanged.connect(self.actualizar_tema)
+        form_apariencia.addRow(QLabel("Tema General:"), self.combo_tema)
+
+        # Combo para Color de Acento
+        self.combo_acento = QComboBox()
+        self.combo_acento.addItems(["Naranja", "Azul", "Verde"])
+        self.combo_acento.setCurrentText(self.accent)
+        self.combo_acento.currentTextChanged.connect(self.actualizar_tema)
+        form_apariencia.addRow(QLabel("Color de Acento:"), self.combo_acento)
+        
+        # Placeholder para colores de logo
+        lbl_colores_logo = QLabel("Próximamente: Extraer colores del logo.")
+        lbl_colores_logo.setObjectName("placeholderText")
+        form_apariencia.addRow(QLabel("Colores del Logo:"), lbl_colores_logo)
+        
+        layout_principal.addWidget(group_apariencia)
+
+        # --- Grupo Reloj ---
+        group_reloj = QGroupBox("Configuración de Hora")
+        group_reloj.setMaximumWidth(400) # Limitar ancho
+        form_reloj = QFormLayout(group_reloj)
+        
+        lbl_zona_horaria = QLabel("Próximamente: Ajuste de Zona Horaria / Formato 12h/24h.")
+        lbl_zona_horaria.setObjectName("placeholderText")
+        form_reloj.addRow(QLabel("Ajustes de Hora:"), lbl_zona_horaria)
+        
+        layout_principal.addWidget(group_reloj)
+
+        # layout_principal.addStretch() # Quitar stretch para que se queden arriba
+        return widget
+
+
+    # --- NUEVAS FUNCIONES ---
+    def mostrar_expediente_alumno(self):
+        """Muestra los detalles completos del alumno seleccionado en la tabla."""
+        # Asegurarse que el widget expediente_texto existe
+        if not hasattr(self, 'expediente_texto'):
+            return
+
+        selected_items = self.tabla_alumnos.selectedItems()
+        if not selected_items:
+            self.expediente_texto.clear()
+            return
+
+        selected_row = self.tabla_alumnos.currentRow()
+        if selected_row < 0: # Asegurarse de que hay una fila seleccionada
+             self.expediente_texto.clear()
+             return
+
+        alumno_id_item = self.tabla_alumnos.item(selected_row, 0) # ID está en la columna 0
+
+        if not alumno_id_item:
+            self.expediente_texto.clear()
+            return
+
+        try:
+            alumno_id = int(alumno_id_item.text())
+            # Usar la nueva función de conexión
+            with get_db_connection() as conn:
+                # conn.row_factory ya está configurado en get_db_connection
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM alumnos WHERE id = ?", (alumno_id,))
+                datos = cursor.fetchone()
+
+            if datos:
+                expediente_str = f"""
+                <b><u>Datos del Alumno</u></b><br>
+                <b>ID:</b> {datos['id']}<br>
+                <b>Nombre:</b> {datos['nombres']} {datos['apellido_paterno']} {datos['apellido_materno']}<br>
+                <b>Edad:</b> {datos['edad']} años<br>
+                <b>Turno:</b> {datos['turno']}<br>
+                <b>Teléfono:</b> {datos['telefono']}<br>
+                <b>Email:</b> {datos['email']}<br>
+                <b>Escuela Procedencia:</b> {datos['escuela_procedencia']}<br>
+                <b>Escuela a Ingresar:</b> {datos['escuela_ingresar']}<br>
+                <b>Autoriza Salida Solo:</b> {'Sí' if datos['autoriza_salida_solo'] == 1 else 'No'}<br>
+                <br>
+                <b><u>Datos del Tutor</u></b><br>
+                <b>Nombre:</b> {datos['tutor_nombres']} {datos['tutor_ap_paterno']} {datos['tutor_ap_materno']}<br>
+                <b>Teléfono:</b> {datos['tutor_telefono']}<br>
+                <br>
+                <b><u>Domicilio</u></b><br>
+                <b>Calle:</b> {datos['dom_calle']} <b>N° Ext:</b> {datos['dom_num_ext']} <b>N° Int:</b> {datos['dom_num_int']}<br>
+                <b>Colonia:</b> {datos['dom_colonia']} <b>C.P.:</b> {datos['dom_cp']}<br>
+                <b>Municipio:</b> {datos['dom_municipio']} <b>Estado:</b> {datos['dom_estado']}<br>
+                <br>
+                <b><u>Contactos de Emergencia</u></b><br>
+                <b>1:</b> {datos['emerg_1_nombre']} ({datos['emerg_1_parentesco']}) - Tel: {datos['emerg_1_telefono']}<br>
+                <b>2:</b> {datos['emerg_2_nombre']} ({datos['emerg_2_parentesco']}) - Tel: {datos['emerg_2_telefono']}<br>
+                """
+                self.expediente_texto.setHtml(expediente_str) # Usar setHtml para formato
+            else:
+                self.expediente_texto.setText("No se encontraron datos para el alumno seleccionado.")
+
+        except ValueError:
+            self.expediente_texto.setText("Error: ID de alumno inválido.")
+        except sqlite3.Error as e:
+            mostrar_error(f"Error al buscar expediente: {e}") # Usar la función global
+            self.expediente_texto.clear()
+        except Exception as e:
+             mostrar_error(f"Error inesperado al mostrar expediente: {e}") # Usar la función global
+             self.expediente_texto.clear()
+
+
+    def dar_baja_alumno(self):
+        """Elimina al alumno seleccionado de la base de datos."""
+        # Asegurarse que los widgets necesarios existen
+        if not hasattr(self, 'tabla_alumnos') or not hasattr(self, 'expediente_texto'):
+            return
+
+        selected_items = self.tabla_alumnos.selectedItems()
+        if not selected_items:
+            mostrar_error("Por favor, seleccione un alumno de la lista para dar de baja.")
+            return
+
+        selected_row = self.tabla_alumnos.currentRow()
+        if selected_row < 0:
+            mostrar_error("Por favor, seleccione un alumno de la lista para dar de baja.")
+            return
+
+        alumno_id_item = self.tabla_alumnos.item(selected_row, 0)
+        nombre_item = self.tabla_alumnos.item(selected_row, 1) # Nombre(s)
+        ap_paterno_item = self.tabla_alumnos.item(selected_row, 2) # Apellido Paterno
+
+        if not alumno_id_item or not nombre_item or not ap_paterno_item:
+            mostrar_error("No se pudo obtener la información completa del alumno seleccionado.")
+            return
+
+        try:
+            alumno_id = int(alumno_id_item.text())
+            nombre_completo = f"{nombre_item.text()} {ap_paterno_item.text()}"
+
+            reply = QMessageBox.question(self, "Confirmar Baja",
+                                         f"¿Está seguro que desea dar de baja al alumno:\n\n{nombre_completo} (ID: {alumno_id})?\n\nEsta acción eliminará también todas sus inscripciones y pagos asociados. Esta acción no se puede deshacer.",
+                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+
+            if reply == QMessageBox.StandardButton.Yes:
+                 # Usar la nueva función de conexión
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    # El PRAGMA ya se ejecutó en get_db_connection
+
+                    # --- BORRADO MANUAL EN CASCADA ---
+                    # 1. Obtener IDs de inscripciones del alumno
+                    cursor.execute("SELECT id FROM inscripciones WHERE alumno_id = ?", (alumno_id,))
+                    inscripciones_ids_tuples = cursor.fetchall() # Obtiene lista de tuplas/rows
+                    # Convertir lista de Rows a lista de IDs
+                    inscripciones_ids = [row['id'] for row in inscripciones_ids_tuples]
+
+
+                    # 2. Borrar pagos asociados a esas inscripciones (si hay alguna)
+                    if inscripciones_ids:
+                        # Crear placeholders (?) para la consulta IN
+                        placeholders = ','.join('?' for _ in inscripciones_ids)
+                        cursor.execute(f"DELETE FROM pagos WHERE inscripcion_id IN ({placeholders})", inscripciones_ids)
+
+                    # 3. Borrar inscripciones del alumno
+                    cursor.execute("DELETE FROM inscripciones WHERE alumno_id = ?", (alumno_id,))
+
+                    # 4. Borrar al alumno
+                    cursor.execute("DELETE FROM alumnos WHERE id = ?", (alumno_id,))
+
+                    conn.commit()
+
+                mostrar_info(f"Alumno {nombre_completo} (ID: {alumno_id}) dado de baja exitosamente.")
+                self.cargar_tabla_alumnos() # Recargar la tabla
+                self.expediente_texto.clear() # Limpiar el expediente
+                # También recargar combos en otras páginas donde aparezcan alumnos
+                self.cargar_tabla_inscripciones_pagos()
+
+        except ValueError:
+            mostrar_error("Error: ID de alumno inválido.")
+        except sqlite3.Error as e:
+            mostrar_error(f"Error al dar de baja al alumno: {e}")
+            print(f"--- SQLITE ERROR DETAILED: {e} ---") # Keep detailed console log
+            traceback.print_exc()
+        except Exception as e:
+             mostrar_error(f"Error inesperado al dar de baja: {e}")
+             print(f"--- UNEXPECTED ERROR DETAILED: {e} ---") # Keep detailed console log
+             traceback.print_exc()
+
+
+    # --- Métodos de carga y registro (MODIFICADOS) ---
+
+    def cargar_tabla_inscripciones_pagos(self):
+        """Carga las inscripciones pendientes en el combo de pagos."""
+        try: # Añadir Try/Except por si self.combo_inscripcion_pago no existe al inicio
+            if hasattr(self, 'combo_inscripcion_pago'):
+                current_user_data = self.combo_inscripcion_pago.currentData() # Guardar selección actual
+                self.combo_inscripcion_pago.clear()
+                 # Usar la nueva función de conexión
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    query = """
+                    SELECT
+                        i.id, i.monto_total, i.monto_pagado,
+                        a.nombres, a.apellido_paterno, a.apellido_materno,
+                        c.nombre_curso
+                    FROM inscripciones i
+                    JOIN alumnos a ON i.alumno_id = a.id
+                    JOIN cursos c ON i.curso_id = c.id
+                    WHERE i.estado != 'Pagado'
+                    ORDER BY a.apellido_paterno, c.nombre_curso
+                    """
+                    cursor.execute(query)
+                    inscripciones = cursor.fetchall()
+
+                    self.combo_inscripcion_pago.addItem("--- Seleccione una inscripción ---", userData=None)
+                    found_index = -1
+                    for index, inscripcion in enumerate(inscripciones): # Usar row factory
+                        insc_id = inscripcion['id']
+                        total = inscripcion['monto_total']
+                        pagado = inscripcion['monto_pagado']
+                        nombres = inscripcion['nombres']
+                        ap_paterno = inscripcion['apellido_paterno']
+                        ap_materno = inscripcion['apellido_materno']
+                        cur_nombre = inscripcion['nombre_curso']
+
+                        texto = f"{ap_paterno} {ap_materno}, {nombres} - {cur_nombre} (Pendiente: ${total-pagado:.2f})"
+                        user_data = (insc_id, total, pagado)
+                        self.combo_inscripcion_pago.addItem(texto, userData=user_data)
+                        if current_user_data and current_user_data[0] == insc_id: # Si coincide el ID de inscripción
+                            found_index = index + 1 # +1 por el item inicial
+
+                    if found_index != -1:
+                        self.combo_inscripcion_pago.setCurrentIndex(found_index) # Restaurar selección
+                    else:
+                         self.actualizar_detalles_pago() # Si no se encontró, actualizar (limpiar)
+
+        except sqlite3.Error as e:
+            mostrar_error(f"Error al cargar inscripciones para pagos: {e}")
+        except AttributeError:
+             pass # El combo aún no existe, no hacer nada
+
+
+    def actualizar_detalles_pago(self):
+        """Actualiza los labels y la tabla de historial cuando se selecciona una inscripción."""
+        try: # Añadir Try/Except
+            if hasattr(self, 'combo_inscripcion_pago'):
+                data = self.combo_inscripcion_pago.currentData()
+
+                if not data:
+                    # Asegurarse que los widgets existen antes de modificarlos
+                    if hasattr(self, 'lbl_pago_total'): self.lbl_pago_total.setText("$ 0.00")
+                    if hasattr(self, 'lbl_pago_pagado'): self.lbl_pago_pagado.setText("$ 0.00")
+                    if hasattr(self, 'lbl_pago_pendiente'): self.lbl_pago_pendiente.setText("$ 0.00")
+                    if hasattr(self, 'spin_monto_pago'): self.spin_monto_pago.setValue(0.0)
+                    if hasattr(self, 'tabla_historial_pagos'): self.tabla_historial_pagos.setRowCount(0)
+                    return
+
+                insc_id, total, pagado = data
+                pendiente = total - pagado
+
+                if hasattr(self, 'lbl_pago_total'): self.lbl_pago_total.setText(f"$ {total:.2f}")
+                if hasattr(self, 'lbl_pago_pagado'): self.lbl_pago_pagado.setText(f"$ {pagado:.2f}")
+                if hasattr(self, 'lbl_pago_pendiente'): self.lbl_pago_pendiente.setText(f"$ {pendiente:.2f}")
+                if hasattr(self, 'spin_monto_pago'): self.spin_monto_pago.setValue(max(0.01, pendiente))
+
+                # Cargar historial de pagos
+                self.cargar_historial_pagos(insc_id)
+        except AttributeError:
+             pass # Widgets aún no existen
+
+    def cargar_historial_pagos(self, inscripcion_id):
+        """Rellena la tabla con el historial de pagos de una inscripción."""
+        try: # Añadir Try/Except
+            if hasattr(self, 'tabla_historial_pagos'):
+                self.tabla_historial_pagos.setRowCount(0)
+                 # Usar la nueva función de conexión
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                    SELECT fecha_pago, monto, metodo_pago
+                    FROM pagos
+                    WHERE inscripcion_id = ?
+                    ORDER BY fecha_pago DESC
+                    """, (inscripcion_id,))
+
+                    pagos = cursor.fetchall()
+
+                    self.tabla_historial_pagos.setRowCount(len(pagos))
+                    for row, pago in enumerate(pagos): # Acceder por nombre
+                        self.tabla_historial_pagos.setItem(row, 0, QTableWidgetItem(pago['fecha_pago']))
+                        item_monto = QTableWidgetItem(f"$ {pago['monto']:.2f}")
+                        item_monto.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                        self.tabla_historial_pagos.setItem(row, 1, item_monto)
+                        self.tabla_historial_pagos.setItem(row, 2, QTableWidgetItem(pago['metodo_pago']))
+
+        except sqlite3.Error as e:
+            mostrar_error(f"Error al cargar historial de pagos: {e}")
+        except AttributeError:
+            pass # Tabla aún no existe
+
+    def registrar_pago(self):
+        """Registra un nuevo pago en la BD."""
+        data = self.combo_inscripcion_pago.currentData()
+        if not data:
+            mostrar_error("Debe seleccionar una inscripción.")
+            return
+
+        insc_id, monto_total, monto_pagado_actual = data
+        monto_a_pagar = self.spin_monto_pago.value()
+
+        if monto_a_pagar <= 0:
+            mostrar_error("El monto a pagar debe ser mayor a cero.")
+            return
+
+        saldo_pendiente = monto_total - monto_pagado_actual
+        if monto_a_pagar > saldo_pendiente + 0.001: # Añadir tolerancia pequeña para floats
+             reply = QMessageBox.question(self, "Confirmar Sobrepago",
+                                             f"El monto a pagar (${monto_a_pagar:.2f}) es mayor al saldo pendiente (${saldo_pendiente:.2f}).\n¿Desea continuar?",
+                                             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+             if reply == QMessageBox.StandardButton.No:
+                 return
+
+
+        fecha_pago = datetime.date.today().isoformat()
+        metodo_pago = self.combo_metodo_pago.currentText()
+
+        nuevo_monto_pagado = monto_pagado_actual + monto_a_pagar
+        # Comparar con una pequeña tolerancia
+        nuevo_estado = 'Pagado' if nuevo_monto_pagado >= monto_total - 0.001 else 'Parcial'
+
+        try:
+             # Usar la nueva función de conexión
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                # El PRAGMA ya se ejecutó
+
+                # 1. Insertar en la tabla de pagos
+                cursor.execute("""
+                INSERT INTO pagos (inscripcion_id, monto, fecha_pago, metodo_pago)
+                VALUES (?, ?, ?, ?)
+                """, (insc_id, monto_a_pagar, fecha_pago, metodo_pago))
+
+                # 2. Actualizar la tabla de inscripciones
+                cursor.execute("""
+                UPDATE inscripciones
+                SET monto_pagado = ?, estado = ?
+                WHERE id = ?
+                """, (nuevo_monto_pagado, nuevo_estado, insc_id))
+
+                conn.commit()
+
+                mostrar_info("Pago registrado exitosamente.")
+
+                # Recargar todo
+                self.cargar_tabla_inscripciones_pagos() # Recarga el combo y actualiza los detalles
+
+        except sqlite3.Error as e:
+            mostrar_error(f"Error al registrar el pago: {e}")
+
+    # --- FUNCIÓN NUEVA ---
+    def actualizar_opciones_pago(self):
+        """Actualiza el combo de planes de pago basado en el curso seleccionado."""
+        try:
+            if not hasattr(self, 'combo_tipo_pago_registro'): return # Salir si el widget no existe
+            
+            self.combo_tipo_pago_registro.clear()
+            self.lbl_costo_total_registro.setText("$ 0.00")
+            
+            curso_id = self.combo_curso_registro.currentData()
+            if not curso_id:
+                self.combo_tipo_pago_registro.addItem("--- Seleccione un curso ---", userData=None)
+                return
+                
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM cursos WHERE id = ?", (curso_id,))
+                curso = cursor.fetchone()
+                
+            if not curso:
+                return
+                
+            self.combo_tipo_pago_registro.addItem("--- Seleccione un plan de pago ---", userData=None)
+            
+            # Usar Decimal para cálculos monetarios precisos
+            quantizer = Decimal('0.01')
+            
+            if curso['costo_exhibicion'] > 0:
+                costo = Decimal(curso['costo_exhibicion']).quantize(quantizer)
+                texto = f"Una Sola Exhibición (${costo})"
+                self.combo_tipo_pago_registro.addItem(texto, userData=("Exhibición Única", float(costo), 1))
+
+            if curso['costo_sem_15'] > 0:
+                costo = Decimal(curso['costo_sem_15']).quantize(quantizer)
+                pago = (costo / 15).quantize(quantizer, rounding=ROUND_HALF_UP)
+                texto = f"Semanal (15 pagos de ${pago})"
+                self.combo_tipo_pago_registro.addItem(texto, userData=("Semanal (15)", float(costo), 15))
+                
+            if curso['costo_sem_12'] > 0: # CAMBIO DE 16 a 12
+                costo = Decimal(curso['costo_sem_12']).quantize(quantizer)
+                pago = (costo / 12).quantize(quantizer, rounding=ROUND_HALF_UP) # CAMBIO DE 16 a 12
+                texto = f"Semanal (12 pagos de ${pago})" # CAMBIO DE 16 a 12
+                self.combo_tipo_pago_registro.addItem(texto, userData=("Semanal (12)", float(costo), 12)) # CAMBIO DE 16 a 12
+
+            if curso['costo_mensual_3'] > 0:
+                costo = Decimal(curso['costo_mensual_3']).quantize(quantizer)
+                pago = (costo / 3).quantize(quantizer, rounding=ROUND_HALF_UP)
+                texto = f"Mensual (3 pagos de ${pago})"
+                self.combo_tipo_pago_registro.addItem(texto, userData=("Mensual (3)", float(costo), 3))
+
+        except sqlite3.Error as e:
+            mostrar_error(f"Error al cargar planes de pago: {e}")
+            
+    # --- FUNCIÓN NUEVA ---
+    def actualizar_costo_total_label(self):
+        """Actualiza el label de costo total al seleccionar un plan de pago."""
+        try:
+            if not hasattr(self, 'combo_tipo_pago_registro'): return
+            
+            data = self.combo_tipo_pago_registro.currentData()
+            if data:
+                plan, costo_total, num_pagos = data
+                self.lbl_costo_total_registro.setText(f"$ {costo_total:.2f}")
+            else:
+                self.lbl_costo_total_registro.setText("$ 0.00")
+        except AttributeError:
+            pass # Widget no existe
+
+    def cargar_combo_curso_registro(self):
+        """Carga los cursos en el combo del formulario de registro."""
+        try:
+             if hasattr(self, 'combo_curso_registro'):
+                # Guardar selección actual si existe
+                current_id = self.combo_curso_registro.currentData()
+
+                self.combo_curso_registro.clear()
+                 # Usar la nueva función de conexión
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT id, nombre_curso FROM cursos ORDER BY nombre_curso")
+                    cursos = cursor.fetchall()
+                    self.combo_curso_registro.addItem("--- Seleccione un Curso ---", userData=None)
+                    found_index = -1
+                    for index, curso in enumerate(cursos): # Acceder por nombre
+                        user_data = curso['id']
+                        self.combo_curso_registro.addItem(curso['nombre_curso'], userData=user_data)
+                        if current_id is not None and curso['id'] == current_id:
+                            found_index = index + 1
+
+                if found_index != -1:
+                    self.combo_curso_registro.setCurrentIndex(found_index)
+                else:
+                    self.actualizar_opciones_pago() # Limpiar el combo de planes
+
+        except sqlite3.Error as e:
+            mostrar_error(f"Error al cargar combo de cursos en registro: {e}")
+        except AttributeError:
+            pass # Combo aún no existe
+
+    def registrar_alumno_e_inscribir(self):
+        """Guarda un nuevo alumno y lo inscribe al curso seleccionado."""
+        try:
+            # Datos Alumno
+            ap_paterno = self.entry_al_ap_paterno.text().strip()
+            ap_materno = self.entry_al_ap_materno.text().strip()
+            nombres = self.entry_al_nombres.text().strip()
+            email = self.entry_al_email.text().strip()
+            
+            # --- VALIDACIÓN ---
+            if not ap_paterno or not nombres:
+                mostrar_error("Apellido Paterno y Nombre(s) del alumno son obligatorios.")
+                return
+                
+            # --- VALIDACIÓN DE PLAN DE PAGO ---
+            plan_data = self.combo_tipo_pago_registro.currentData()
+            if not plan_data:
+                mostrar_error("Debe seleccionar un plan de pago para inscribir al alumno.")
+                return
+
+            plan_nombre, monto_total, num_pagos = plan_data
+            curso_id = self.combo_curso_registro.currentData()
+            if not curso_id: # Doble chequeo por si acaso
+                mostrar_error("Debe seleccionar un curso para inscribir al alumno.")
+                return
+                
+            fecha_insc = datetime.date.today().isoformat()
+
+            # Recolectar el resto de los datos
+            esc_procedencia = self.entry_al_escuela_procedencia.text().strip()
+            esc_ingresar = self.entry_al_escuela_ingresar.text().strip()
+            edad_str = self.entry_al_edad.text().strip()
+            telefono = self.entry_al_telefono.text().strip()
+            turno = self.combo_al_turno.currentText()
+            autoriza_salida = 1 if self.check_autoriza_salida.isChecked() else 0
+            imprimir_poliza = self.check_imprimir_poliza.isChecked() # NUEVO
+            
+            tutor_ap_paterno = self.entry_tutor_ap_paterno.text().strip()
+            tutor_ap_materno = self.entry_tutor_ap_materno.text().strip()
+            tutor_nombres = self.entry_tutor_nombres.text().strip()
+            tutor_telefono = self.entry_tutor_telefono.text().strip()
+            dom_calle = self.entry_dom_calle.text().strip()
+            dom_num_int = self.entry_dom_num_int.text().strip()
+            dom_num_ext = self.entry_dom_num_ext.text().strip()
+            dom_colonia = self.entry_dom_colonia.text().strip()
+            dom_municipio = self.entry_dom_municipio.text().strip()
+            dom_estado = self.entry_dom_estado.text().strip()
+            dom_cp = self.entry_dom_cp.text().strip()
+            emerg_1_nombre = self.entry_emerg_1_nombre.text().strip()
+            emerg_1_telefono = self.entry_emerg_1_telefono.text().strip()
+            emerg_1_parentesco = self.entry_emerg_1_parentesco.text().strip()
+            emerg_2_nombre = self.entry_emerg_2_nombre.text().strip()
+            emerg_2_telefono = self.entry_emerg_2_telefono.text().strip()
+            emerg_2_parentesco = self.entry_emerg_2_parentesco.text().strip()
+            edad = int(edad_str) if edad_str.isdigit() else 0
+
+            # --- Inserción en BD (Transacción) ---
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                # El PRAGMA ya se ejecutó
+
+                # 1. Insertar Alumno
+                cursor.execute("""
+                INSERT INTO alumnos (
+                    apellido_paterno, apellido_materno, nombres, escuela_procedencia,
+                    escuela_ingresar, edad, telefono, email, turno,
+                    tutor_ap_paterno, tutor_ap_materno, tutor_nombres, tutor_telefono,
+                    dom_calle, dom_num_int, dom_num_ext, dom_colonia, dom_municipio,
+                    dom_estado, dom_cp,
+                    emerg_1_nombre, emerg_1_telefono, emerg_1_parentesco,
+                    emerg_2_nombre, emerg_2_telefono, emerg_2_parentesco,
+                    autoriza_salida_solo
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    ap_paterno, ap_materno, nombres, esc_procedencia,
+                    esc_ingresar, edad, telefono, email, turno,
+                    tutor_ap_paterno, tutor_ap_materno, tutor_nombres, tutor_telefono,
+                    dom_calle, dom_num_int, dom_num_ext, dom_colonia, dom_municipio,
+                    dom_estado, dom_cp,
+                    emerg_1_nombre, emerg_1_telefono, emerg_1_parentesco,
+                    emerg_2_nombre, emerg_2_telefono, emerg_2_parentesco,
+                    autoriza_salida
+                ))
+                alumno_id = cursor.lastrowid
+
+                # 2. Insertar Inscripción
+                cursor.execute("""
+                INSERT INTO inscripciones (alumno_id, curso_id, fecha_inscripcion, monto_total, estado, tipo_pago_seleccionado)
+                VALUES (?, ?, ?, ?, 'Pendiente', ?)
+                """, (alumno_id, curso_id, fecha_insc, monto_total, plan_nombre))
+                inscripcion_id = cursor.lastrowid
+
+                conn.commit()
+
+            mostrar_info("Alumno registrado e inscrito al curso exitosamente.")
+
+            # --- Preguntar para generar PDF ---
+            reply = QMessageBox.question(self, "Generar PDF",
+                                         "¿Desea generar la ficha completa de inscripción en PDF ahora?",
+                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+
+            if reply == QMessageBox.StandardButton.Yes:
+                self.generar_ficha_completa_pdf(inscripcion_id, imprimir_poliza) # Pasar el nuevo flag
+
+            self.limpiar_campos_alumno()
+            self.cargar_datos_maestros() # Recarga tablas y combos
+
+        except sqlite3.IntegrityError:
+            mostrar_error("Error: El correo electrónico ya existe o hubo un problema de integridad.")
+        except ValueError:
+            mostrar_error("Error: La edad debe ser un número válido.")
+        except sqlite3.Error as e:
+            mostrar_error(f"Error al guardar e inscribir alumno: {e}")
+        except Exception as e:
+             mostrar_error(f"Error inesperado: {e}")
+
+
+    def generar_ficha_completa_pdf(self, inscripcion_id, imprimir_poliza=False): # Añadido parámetro
+        """Genera un PDF con todos los datos del alumno, curso y CALENDARIO DE PAGOS."""
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT
+                        a.*,
+                        i.id as inscripcion_id, i.fecha_inscripcion, i.monto_total, i.tipo_pago_seleccionado,
+                        c.nombre_curso
+                    FROM alumnos a
+                    JOIN inscripciones i ON a.id = i.alumno_id
+                    JOIN cursos c ON i.curso_id = c.id
+                    WHERE i.id = ?
+                """, (inscripcion_id,))
+                datos = cursor.fetchone()
+
+            if not datos:
+                mostrar_error("No se encontraron datos completos para la ficha.")
+                return
+
+            temp_pdf = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+            filename = temp_pdf.name
+            temp_pdf.close() 
+
+            c = canvas.Canvas(filename, pagesize=letter)
+            width, height = letter
+            
+            # --- Estilos (Arial 12) ---
+            styles = getSampleStyleSheet()
+            styleN = ParagraphStyle(name='Normal_Arial', parent=styles['Normal'], fontName=FONT_NAME, fontSize=12, leading=14)
+            styleH_centered = ParagraphStyle(name='Heading_Arial_Centered', parent=styles['Heading3'], fontName=FONT_BOLD_NAME, fontSize=12, alignment=TA_CENTER, spaceAfter=8)
+            styleCosto = ParagraphStyle(name='Costo_Arial', parent=styles['Normal'], fontName=FONT_BOLD_NAME, fontSize=12, leading=14)
+            styleSmall = ParagraphStyle(name='Small_Arial', parent=styles['Normal'], fontName=FONT_NAME, fontSize=8, leading=10)
+            styleTitle = ParagraphStyle(name='Title_Arial', parent=styles['h1'], fontName=FONT_BOLD_NAME, fontSize=14, alignment=TA_CENTER, spaceAfter=16)
+            
+            # --- Estilos para Póliza (Optimizados) ---
+            styleN_poliza = ParagraphStyle(name='Normal_Poliza', parent=styleN, fontName=FONT_NAME, fontSize=10, leading=12, alignment=TA_LEFT) 
+            styleH_poliza = ParagraphStyle(name='Heading_Poliza', parent=styleN, fontName=FONT_BOLD_NAME, fontSize=11, leading=14, spaceBefore=10, alignment=TA_LEFT)
+            styleN_terminos = ParagraphStyle(name='Normal_Terminos', parent=styleN, fontSize=11, leading=13, alignment=TA_LEFT)
+
+
+            # ==================================================
+            # --- PÁGINA 1: FICHA DE INSCRIPCIÓN ---
+            # ==================================================
+            
+            self.draw_watermark(c, width, height)
+            self.draw_logo(c, width, height)
+
+            # --- Título ---
+            titulo_texto = f"<b>Unidad Profesional de Asesorías y Regularización (UPASER)<br/>Formato de Inscripción para el curso: {datos['nombre_curso']}</b>"
+            title_p = Paragraph(titulo_texto, styleTitle)
+            title_w, title_h = title_p.wrapOn(c, width - 2*inch, height)
+            # Dibujar el título manualmente después de calcular su altura
+            title_p.drawOn(c, inch, height - 0.75 * inch - title_h)
+            current_y = height - 0.75 * inch - title_h - 16
+
+            # --- Datos del Alumno ---
+            current_y = self.draw_text_pdf(c, current_y, "Datos del Alumno", inch, styleH_centered)
+            current_y = self.draw_text_pdf(c, current_y, f"Folio Alumno: {datos['id']}", inch, styleN)
+            nombre_alumno_completo = f"{datos['nombres']} {datos['apellido_paterno']} {datos['apellido_materno']}"
+            current_y = self.draw_text_pdf(c, current_y, f"Nombre: {nombre_alumno_completo}", inch, styleN)
+            current_y = self.draw_text_pdf(c, current_y, f"Edad: {datos['edad']} años | Turno: {datos['turno']}", inch, styleN)
+            current_y = self.draw_text_pdf(c, current_y, f"Teléfono: {datos['telefono']} | Email: {datos['email']}", inch, styleN)
+            current_y = self.draw_text_pdf(c, current_y, f"Escuela de Procedencia: {datos['escuela_procedencia']}", inch, styleN)
+            current_y = self.draw_text_pdf(c, current_y, f"Escuela a Ingresar: {datos['escuela_ingresar']}", inch, styleN)
+
+            # --- Datos del Tutor ---
+            current_y -= 0.15 * inch
+            current_y = self.draw_text_pdf(c, current_y, "Datos del Padre o Tutor", inch, styleH_centered)
+            nombre_tutor_completo = f"{datos['tutor_nombres']} {datos['tutor_ap_paterno']} {datos['tutor_ap_materno']}"
+            current_y = self.draw_text_pdf(c, current_y, f"Nombre: {nombre_tutor_completo}", inch, styleN)
+            current_y = self.draw_text_pdf(c, current_y, f"Teléfono: {datos['tutor_telefono']}", inch, styleN)
+
+            # --- Domicilio ---
+            current_y -= 0.15 * inch
+            current_y = self.draw_text_pdf(c, current_y, "Domicilio", inch, styleH_centered)
+            current_y = self.draw_text_pdf(c, current_y, f"Calle: {datos['dom_calle']} N° Ext: {datos['dom_num_ext']} N° Int: {datos['dom_num_int']}", inch, styleN)
+            current_y = self.draw_text_pdf(c, current_y, f"Colonia: {datos['dom_colonia']}, C.P. {datos['dom_cp']}", inch, styleN)
+            current_y = self.draw_text_pdf(c, current_y, f"Municipio: {datos['dom_municipio']}, Estado: {datos['dom_estado']}", inch, styleN)
+
+            # --- Contactos de Emergencia ---
+            current_y -= 0.15 * inch
+            current_y = self.draw_text_pdf(c, current_y, "Contactos de Emergencia", inch, styleH_centered)
+            current_y = self.draw_text_pdf(c, current_y, f"1. {datos['emerg_1_nombre']} ({datos['emerg_1_parentesco']}) - Tel: {datos['emerg_1_telefono']}", inch, styleN)
+            current_y = self.draw_text_pdf(c, current_y, f"2. {datos['emerg_2_nombre']} ({datos['emerg_2_parentesco']}) - Tel: {datos['emerg_2_telefono']}", inch, styleN)
+
+            # --- Datos del Curso Inscrito ---
+            current_y -= 0.2 * inch
+            current_y = self.draw_text_pdf(c, current_y, "Curso Inscrito", inch, styleH_centered)
+            current_y = self.draw_text_pdf(c, current_y, f"Folio Inscripción a Curso: {datos['inscripcion_id']}", inch, styleN)
+            current_y = self.draw_text_pdf(c, current_y, f"Nombre del Curso: {datos['nombre_curso']}", inch, styleN)
+            current_y = self.draw_text_pdf(c, current_y, f"Plan de Pago: {datos['tipo_pago_seleccionado']}", inch, styleN)
+            current_y = self.draw_text_pdf(c, current_y, f"Fecha de Inscripción: {datos['fecha_inscripcion']}", inch, styleN)
+            current_y = self.draw_text_pdf(c, current_y, f"Costo Total: $ {datos['monto_total']:.2f}", inch, styleCosto)
+            
+            # --- CORRECCIÓN: Separar Leyenda y Firma ---
+            # Dejar espacio al final de la página 1
+            current_y = 2.5 * inch # Mover Y a 2.5 pulgadas del borde inferior
+
+            # --- Autorización de Salida (si aplica) ---
+            if datos['autoriza_salida_solo'] == 1:
+                leyenda = f"Yo, {nombre_tutor_completo}, autorizo que mi hijo(a): {nombre_alumno_completo}, pueda retirarse de la institución sin que acuda alguna persona mayor de edad a recogerlo al plantel, deslindando de toda responsabilidad a UPASER después de la hora de salida."
+                # Usar la función de dibujo de texto para que maneje el espacio
+                current_y = self.draw_text_pdf(c, current_y + 0.2*inch, leyenda, inch, style=styleSmall) # +0.2 para subirlo un poco
+                
+            
+            # --- Firma ---
+            firma_y_base = current_y - 0.5*inch # Posicionar la firma debajo del texto
+            if datos['autoriza_salida_solo'] == 0: # Si no hubo leyenda, posicionar más abajo
+                firma_y_base = 1.5 * inch
+
+            c.line(inch * 1.5, firma_y_base, width - (inch * 1.5), firma_y_base)
+            c.setFont(FONT_NAME, 10)
+            c.drawCentredString(width / 2, firma_y_base - 0.2 * inch, "Firma del Padre o Tutor")
+
+            # ==================================================
+            # --- PÁGINA 2: CALENDARIO DE PAGOS ---
+            # ==================================================
+            c.showPage() # FORZAR SALTO DE PÁGINA
+            self.draw_watermark(c, width, height)
+            self.draw_logo(c, width, height)
+            
+            current_y = height - 1.5 * inch # Reiniciar Y para la nueva página
+
+            current_y = self.draw_text_pdf(c, current_y, "Calendario de Pagos", inch, styleH_centered)
+            
+            plan_nombre = datos['tipo_pago_seleccionado']
+            monto_total = Decimal(str(datos['monto_total']))
+            fecha_inicio = datetime.date.fromisoformat(datos['fecha_inscripcion'])
+            
+            calendario_data = [["No. de Pago", "Fecha Límite de Pago", "Monto"]]
+            
+            num_pagos = 1
+            monto_pago = monto_total
+            
+            if plan_nombre == "Semanal (15)":
+                num_pagos = 15
+                monto_pago = (monto_total / 15).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            elif plan_nombre == "Semanal (12)": # CAMBIO DE 16 a 12
+                num_pagos = 12
+                monto_pago = (monto_total / 12).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            elif plan_nombre == "Mensual (3)":
+                num_pagos = 3
+                monto_pago = (monto_total / 3).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            
+            monto_acumulado = Decimal('0.00')
+            for i in range(num_pagos):
+                fecha_pago = fecha_inicio
+                if plan_nombre.startswith("Semanal"):
+                    fecha_pago = fecha_inicio + datetime.timedelta(weeks=i)
+                elif plan_nombre.startswith("Mensual"):
+                    # Cálculo de mes más preciso
+                    mes = fecha_inicio.month + i
+                    año = fecha_inicio.year + (mes - 1) // 12
+                    mes = (mes - 1) % 12 + 1
+                    dia = min(fecha_inicio.day, [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mes])
+                    if mes == 2 and dia == 28 and ((año % 4 == 0 and año % 100 != 0) or (año % 400 == 0)):
+                        dia = 29
+                    fecha_pago = datetime.date(año, mes, dia)
+
+                
+                monto_actual = monto_pago
+                if i == num_pagos - 1:
+                    monto_actual = monto_total - monto_acumulado
+                    
+                calendario_data.append([
+                    str(i+1), 
+                    fecha_pago.strftime("%Y-%m-%d"), 
+                    f"$ {monto_actual:.2f}"
+                ])
+                monto_acumulado += monto_actual
+            
+            # Dibujar la tabla del calendario
+            tabla_calendario = Table(calendario_data, colWidths=[1*inch, 2.5*inch, 2*inch])
+            tabla_calendario.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), colors.grey),
+                ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+                ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                ('FONTNAME', (0,0), (-1,0), FONT_BOLD_NAME),
+                ('FONTNAME', (0,1), (-1,-1), FONT_NAME),
+                ('FONTSIZE', (0,0), (-1,-1), 10),
+                ('BOTTOMPADDING', (0,0), (-1,0), 6),
+                ('BACKGROUND', (0,1), (-1,-1), colors.whitesmoke),
+                ('GRID', (0,0), (-1,-1), 1, colors.black),
+                ('ALIGN', (2,1), (2,-1), 'RIGHT'), # Alinear montos a la derecha
+            ]))
+
+            w_tabla, h_tabla = tabla_calendario.wrapOn(c, width - 2*inch, height)
+            if current_y - h_tabla < inch:
+                self.draw_watermark(c, width, height)
+                c.showPage()
+                self.draw_watermark(c, width, height)
+                self.draw_logo(c, width, height)
+                current_y = height - inch
+            
+            tabla_calendario.drawOn(c, inch, current_y - h_tabla)
+            current_y -= (h_tabla + 10)
+            
+            # --- FIN PÁGINA 2 ---
+            
+            # ==================================================
+            # --- PÁGINAS 3 y 4: PÓLIZA Y TÉRMINOS (Opcional) ---
+            # ==================================================
+            if imprimir_poliza:
+                
+                # --- PÁGINA 3: PÓLIZA DE GARANTÍA ---
+                c.showPage()
+                self.draw_watermark(c, width, height)
+                self.draw_logo(c, width, height)
+                
+                # Definir un Frame que ocupe la página, dejando márgenes y espacio para firmas
+                frame_poliza = Frame(inch, 2.5*inch, width - 2*inch, height - 4*inch, id='polizaFrame', leftPadding=0, topPadding=0, rightPadding=0, bottomPadding=0)
+                
+                story_poliza = []
+                story_poliza.append(Paragraph("PÓLIZA DE GARANTÍA", styleH_centered))
+                story_poliza.append(Spacer(1, 0.2*inch))
+                
+                story_poliza.append(Paragraph("<b>DERECHOS</b>", styleH_poliza))
+                story_poliza.append(Paragraph("a) Recibir sus clases conforme lo señale su horario y fecha de evaluación.", styleN_poliza))
+                story_poliza.append(Paragraph("b) Conocer anticipadamente temarios, formas de trabajo y criterios de evaluación de cada una de las asignaturas.", styleN_poliza))
+                story_poliza.append(Paragraph("c) Ser tratado por sus docentes y autoridades educativas con cortesía, respeto y amabilidad.", styleN_poliza))
+                story_poliza.append(Spacer(1, 0.15*inch))
+                
+                story_poliza.append(Paragraph("<b>OBLIGACIONES</b>", styleH_poliza))
+                story_poliza.append(Paragraph("a) Asistir a sus clases conforme al horario establecido, teniendo como margen de tiempo 10 min. Después de haber iniciado la clase, dos retardos equivalen a una falta.", styleN_poliza))
+                story_poliza.append(Paragraph("b) Respetar el tiempo de receso otorgado (30 min.).", styleN_poliza))
+                story_poliza.append(Paragraph("c) Ser respetuoso con sus compañeros, docentes y personal en general.", styleN_poliza))
+                story_poliza.append(Paragraph("d) Mantener orden y disciplina.", styleN_poliza))
+                story_poliza.append(Paragraph("e) Cumplir con tareas e investigaciones encomendados.", styleN_poliza))
+                story_poliza.append(Paragraph("f) Conservar y cuidar la institución.", styleN_poliza))
+                story_poliza.append(Paragraph("g) Cumplir en tiempo y forma con los pagos estipulados.", styleN_poliza))
+                story_poliza.append(Paragraph("<i>El incumplimiento de cualquiera de las obligaciones es motivo de la perdida de garantía.</i>", styleN_poliza))
+                story_poliza.append(Spacer(1, 0.15*inch))
+
+                story_poliza.append(Paragraph("<b>ANULACIÓN DE LA GARANTÍA</b>", styleH_poliza))
+                story_poliza.append(Paragraph("• Tener menos del 90% de asistencias, tomando en cuenta que por día se pueden ver una o más clases; lo que equivale a una falta por materia.", styleN_poliza))
+                story_poliza.append(Paragraph("• Tener menos del 90% en entregas de tareas y actividades asignadas por el docente.", styleN_poliza))
+                story_poliza.append(Paragraph("• No a ver liquidado el total del curso antes de que finalice el mismo.", styleN_poliza))
+                story_poliza.append(Paragraph("• Tener menos de 80% en las evaluaciones que se harán por parte de UPASER.", styleN_poliza))
+                story_poliza.append(Spacer(1, 0.15*inch))
+                
+                story_poliza.append(Paragraph("<b>NOTA.</b> El alumno podrá solicitar su garantía siempre y cuando cumpla con los requisitos antes mencionados.", styleN_poliza))
+                story_poliza.append(Spacer(1, 0.15*inch))
+
+                story_poliza.append(Paragraph("<b>CLAUSULA PARA EMPLEAR SU IMAGEN</b>", styleH_poliza))
+                story_poliza.append(Paragraph("El alumno autoriza expresamente a UPASER a captar, reproducir y utilizar su imagen, nombre y/o voz a través de fotografías, grabaciones de video o cualquier otro medio audiovisual, con fines exclusivamente publicitarios, institucionales, informativos y/o académicos relacionados con las actividades de la institución.", styleN_poliza))
+                story_poliza.append(Paragraph("Dicha autorización se concede de manera gratuita, sin limitación territorial ni temporal, y comprende su difusión en medios digitales, electrónicos y redes sociales oficiales de UPASER, así como en cualquier otra plataforma en línea utilizada por la institución.", styleN_poliza))
+
+                # Construir la historia en el Frame
+                frame_poliza.addFromList(story_poliza, c)
+                
+                # Dibujar firmas al final
+                self.draw_double_signature(c, 2 * inch) # Posición fija a 2 pulgadas del fondo
+                
+                # --- PÁGINA 4: TÉRMINOS Y CONDICIONES ---
+                c.showPage()
+                self.draw_watermark(c, width, height)
+                self.draw_logo(c, width, height)
+                current_y = height - 1.5 * inch # Reiniciar Y
+                
+                # Definir un Frame que ocupe la página, dejando márgenes y espacio para firmas
+                frame_terminos = Frame(inch, 2.5*inch, width - 2*inch, height - 4*inch, id='terminosFrame', leftPadding=0, topPadding=0, rightPadding=0, bottomPadding=0)
+                
+                story_terminos = []
+                story_terminos.append(Paragraph("TÉRMINOS Y CONDICIONES", styleH_centered))
+                story_terminos.append(Spacer(1, 0.2*inch))
+                
+                story_terminos.append(Paragraph("Es de suma importancia leer cuidadosamente este apartado antes de iniciar tu curso, para que conozcas tus derechos y obligaciones como alumno UPASER.", styleN_terminos))
+                story_terminos.append(Spacer(1, 0.2*inch))
+                story_terminos.append(Paragraph("La Unidad Profesional de Asesoría y Regularización (UPASER) tiene como garantía que el alumno se quede en sus primeras 5 opciones que seleccione en el concurso COMIPEMS/103 Municipios, asegurando que nuestro curso es competente bajo nuestro método de enseñanza.", styleN_terminos))
+                story_terminos.append(Spacer(1, 0.2*inch))
+                story_terminos.append(Paragraph("Antes de efectuar el pago, el usuario deberá aceptar la Política de Privacidad, una vez confirmado el pago del curso seleccionado por el aspirante este no podrá solicitar reembolso.", styleN_terminos))
+                story_terminos.append(Spacer(1, 0.2*inch))
+                story_terminos.append(Paragraph("<b>I. Clases:</b> Están sujetas a modificaciones, UPASER se reserva el derecho de cancelar o cambiar cualquier clase, se les notificara a los alumnos o participantes cualquier cambio a través de los grupos de WhatsApp oficiales. UPASER esta obligado a reponer la clase cancelada, si este fuera el caso.", styleN_terminos))
+                story_terminos.append(Spacer(1, 0.2*inch))
+                story_terminos.append(Paragraph("<b>II. Comportamiento:</b> UPASER se reserva el derecho de retirar a cualquier persona registrada en el curso, cuyo comportamiento sea considerado inapropiado, por parte de UPASER o sus docentes. En estas circunstancias UPASER no reembolsara ninguna tarifa.", styleN_terminos))
+                story_terminos.append(Spacer(1, 0.2*inch))
+                story_terminos.append(Paragraph("<b>III. Plazo para registrarse:</b> Estamos contentos de apoyar a nuestros alumnos con el proceso de registro en las plataformas oficiales COMIPENS/103 MUNICIPIOS, sin embargo, es responsabilidad total del aspirante. En caso de que el aspirante no se registre en las fechas que la convocatoria este abierta no habrá ningún tipo de reembolso por el pago efectuado al curso de capacitación.", styleN_terminos))
+                story_terminos.append(Spacer(1, 0.2*inch))
+                story_terminos.append(Paragraph("<b>IV. Talleres opcionales:</b> UPASER programara talleres a lo largo del curso de capacitación, estos talleres son considerados un plus CON COSTO para cualquier alumno UPASER.", styleN_terminos))
+
+                # Construir la historia en el Frame
+                frame_terminos.addFromList(story_terminos, c)
+                
+                # Dibujar firmas al final
+                self.draw_double_signature(c, 2 * inch) # Posición fija a 2 pulgadas del fondo
+            
+            # --- FIN DEL BLOQUE 'if imprimir_poliza' ---
+
+            c.save()
+
+            # --- ABRIR EL PDF ---
+            self._temp_pdf_files.append(filename)
+            url = QUrl.fromLocalFile(filename)
+            QDesktopServices.openUrl(url)
+
+            mostrar_info(f"Ficha PDF generada y abierta.")
+
+        except Exception as e:
+            mostrar_error(f"Error al generar o abrir PDF completo: {e}\n{traceback.format_exc()}")
+
+
+    def limpiar_archivos_temporales(self):
+        """Elimina los archivos PDF temporales creados."""
+        print("Limpiando archivos PDF temporales...")
+        for filepath in self._temp_pdf_files:
+            try:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                    print(f"Eliminado: {filepath}")
+            except Exception as e:
+                print(f"Error al eliminar archivo temporal {filepath}: {e}")
+
+
+    def limpiar_campos_alumno(self):
+        """Limpia todos los campos del formulario de registro de alumno."""
+        # Alumno
+        self.entry_al_ap_paterno.clear()
+        self.entry_al_ap_materno.clear()
+        self.entry_al_nombres.clear()
+        self.entry_al_escuela_procedencia.clear()
+        self.entry_al_escuela_ingresar.clear()
+        self.entry_al_edad.clear()
+        self.entry_al_telefono.clear()
+        self.entry_al_email.clear()
+        self.combo_al_turno.setCurrentIndex(0)
+        self.combo_curso_registro.setCurrentIndex(0) 
+        self.check_autoriza_salida.setChecked(False)
+        self.check_imprimir_poliza.setChecked(False) # NUEVO
+        # Tutor
+        self.entry_tutor_ap_paterno.clear()
+        self.entry_tutor_ap_materno.clear()
+        self.entry_tutor_nombres.clear()
+        self.entry_tutor_telefono.clear()
+        # Domicilio
+        self.entry_dom_calle.clear()
+        self.entry_dom_num_int.clear()
+        self.entry_dom_num_ext.clear()
+        self.entry_dom_colonia.clear()
+        self.entry_dom_municipio.clear()
+        self.entry_dom_estado.clear()
+        self.entry_dom_cp.clear()
+        # Emergencia
+        self.entry_emerg_1_nombre.clear()
+        self.entry_emerg_1_telefono.clear()
+        self.entry_emerg_1_parentesco.clear()
+        self.entry_emerg_2_nombre.clear()
+        self.entry_emerg_2_telefono.clear()
+        self.entry_emerg_2_parentesco.clear()
+
+    def cargar_tabla_alumnos(self):
+        """Carga la lista de alumnos en la QTableWidget."""
+        try: 
+            if hasattr(self, 'tabla_alumnos'):
+                self.tabla_alumnos.setRowCount(0)
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT id, nombres, apellido_paterno, apellido_materno, email FROM alumnos ORDER BY apellido_paterno")
+                    alumnos = cursor.fetchall()
+
+                    self.tabla_alumnos.setRowCount(len(alumnos))
+                    for row, alumno in enumerate(alumnos):
+                        self.tabla_alumnos.setItem(row, 0, QTableWidgetItem(str(alumno['id'])))
+                        self.tabla_alumnos.setItem(row, 1, QTableWidgetItem(alumno['nombres']))
+                        self.tabla_alumnos.setItem(row, 2, QTableWidgetItem(alumno['apellido_paterno']))
+                        self.tabla_alumnos.setItem(row, 3, QTableWidgetItem(alumno['apellido_materno']))
+                        self.tabla_alumnos.setItem(row, 4, QTableWidgetItem(alumno['email']))
+        except sqlite3.Error as e:
+            mostrar_error(f"Error al cargar tabla de alumnos: {e}")
+        except AttributeError:
+            pass # Tabla aún no existe
+
+    def registrar_curso(self):
+        """DEPRECADO: Usar guardar_curso."""
+        self.guardar_curso()
+
+    def guardar_curso(self):
+        """Guarda un nuevo curso o actualiza uno existente."""
+        if not all(hasattr(self, w) for w in ['entry_cur_nombre', 'spin_costo_exhibicion', 'spin_costo_sem_15', 'spin_costo_sem_12', 'spin_costo_mensual_3']):
+            return 
+
+        nombre = self.entry_cur_nombre.text().strip()
+        costo_exhibicion = self.spin_costo_exhibicion.value()
+        costo_sem_15 = self.spin_costo_sem_15.value()
+        costo_sem_12 = self.spin_costo_sem_12.value() # CAMBIO DE 16 a 12
+        costo_mensual_3 = self.spin_costo_mensual_3.value()
+
+        if not nombre:
+            mostrar_error("El nombre del curso es obligatorio.")
+            return
+        if costo_exhibicion == 0 and costo_sem_15 == 0 and costo_sem_12 == 0 and costo_mensual_3 == 0: # CAMBIO DE 16 a 12
+            mostrar_error("Debe definir al menos un plan de costo para el curso.")
+            return
+
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                if self.curso_seleccionado_id is None:
+                    # --- CREAR NUEVO CURSO ---
+                    cursor.execute("""
+                    INSERT INTO cursos (nombre_curso, costo_exhibicion, costo_sem_15, costo_sem_12, costo_mensual_3)
+                    VALUES (?, ?, ?, ?, ?)
+                    """, (nombre, costo_exhibicion, costo_sem_15, costo_sem_12, costo_mensual_3)) # CAMBIO DE 16 a 12
+                    mostrar_info("Curso guardado exitosamente.")
+                else:
+                    # --- ACTUALIZAR CURSO EXISTENTE ---
+                    cursor.execute("""
+                    UPDATE cursos SET nombre_curso = ?, costo_exhibicion = ?, costo_sem_15 = ?, costo_sem_12 = ?, costo_mensual_3 = ?
+                    WHERE id = ?
+                    """, (nombre, costo_exhibicion, costo_sem_15, costo_sem_12, costo_mensual_3, self.curso_seleccionado_id))
+                    mostrar_info(f"Curso (ID: {self.curso_seleccionado_id}) actualizado exitosamente.")
+                
+                conn.commit()
+
+            self.limpiar_campos_curso()
+            self.cargar_datos_maestros() # Recarga tablas y combos
+
+        except sqlite3.IntegrityError:
+            mostrar_error("Error: El nombre del curso ya existe.")
+        except sqlite3.Error as e:
+            mostrar_error(f"Error al guardar curso: {e}")
+
+    def limpiar_campos_curso(self):
+        """Limpia el formulario de cursos y resetea el modo a 'Guardar'."""
+        try: 
+            if hasattr(self, 'entry_cur_nombre'):
+                self.entry_cur_nombre.clear()
+                self.spin_costo_exhibicion.setValue(0.0)
+                self.spin_costo_sem_15.setValue(0.0)
+                self.spin_costo_sem_12.setValue(0.0) # CAMBIO DE 16 a 12
+                self.spin_costo_mensual_3.setValue(0.0)
+                
+                self.curso_seleccionado_id = None
+                self.btn_guardar_curso.setText("Guardar Curso")
+                self.tabla_cursos.clearSelection()
+        except AttributeError:
+            pass # Widgets no existen aún
+
+    def seleccionar_curso_para_edicion(self):
+        """Carga los datos del curso seleccionado en el formulario de edición."""
+        selected_items = self.tabla_cursos.selectedItems()
+        if not selected_items:
+            self.limpiar_campos_curso()
+            return
+
+        selected_row = self.tabla_cursos.currentRow()
+        if selected_row < 0:
+             self.limpiar_campos_curso()
+             return
+             
+        curso_id_item = self.tabla_cursos.item(selected_row, 0)
+        if not curso_id_item: return
+
+        try:
+            curso_id = int(curso_id_item.text())
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM cursos WHERE id = ?", (curso_id,))
+                datos = cursor.fetchone()
+
+            if datos:
+                self.curso_seleccionado_id = curso_id
+                self.entry_cur_nombre.setText(datos['nombre_curso'])
+                self.spin_costo_exhibicion.setValue(datos['costo_exhibicion'])
+                self.spin_costo_sem_15.setValue(datos['costo_sem_15'])
+                self.spin_costo_sem_12.setValue(datos['costo_sem_12'])
+                self.spin_costo_mensual_3.setValue(datos['costo_mensual_3'])
+                
+                self.btn_guardar_curso.setText("Actualizar Curso")
+
+        except Exception as e:
+            mostrar_error(f"Error al cargar datos de curso: {e}")
+            self.limpiar_campos_curso()
+            
+    def dar_baja_curso(self):
+        """Elimina un curso seleccionado de la BD."""
+        selected_items = self.tabla_cursos.selectedItems()
+        if not selected_items:
+            mostrar_error("Por favor, seleccione un curso de la lista para eliminar.")
+            return
+        
+        selected_row = self.tabla_cursos.currentRow()
+        if selected_row < 0: return
+        
+        curso_id_item = self.tabla_cursos.item(selected_row, 0)
+        nombre_curso_item = self.tabla_cursos.item(selected_row, 1)
+        if not curso_id_item: return
+        
+        curso_id = int(curso_id_item.text())
+        nombre_curso = nombre_curso_item.text()
+        
+        # --- VERIFICACIÓN DE ALUMNOS INSCRITOS ---
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(id) as count FROM inscripciones WHERE curso_id = ?", (curso_id,))
+                conteo = cursor.fetchone()
+            
+            if conteo['count'] > 0:
+                mostrar_error(f"No se puede eliminar el curso '{nombre_curso}' porque tiene {conteo['count']} alumno(s) inscrito(s).")
+                return
+
+            # Si no hay alumnos, proceder a eliminar
+            reply = QMessageBox.question(self, "Confirmar Eliminación",
+                                         f"¿Está seguro que desea eliminar el curso:\n\n{nombre_curso} (ID: {curso_id})?\n\nEsta acción no se puede deshacer.",
+                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+
+            if reply == QMessageBox.StandardButton.Yes:
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("DELETE FROM cursos WHERE id = ?", (curso_id,))
+                    conn.commit()
+                
+                mostrar_info(f"Curso '{nombre_curso}' eliminado exitosamente.")
+                self.limpiar_campos_curso()
+                self.cargar_datos_maestros()
+
+        except sqlite3.Error as e:
+            mostrar_error(f"Error al eliminar curso: {e}")
+        except Exception as e:
+             mostrar_error(f"Error inesperado: {e}")
+
+
+    def cargar_tabla_cursos(self):
+        """Carga la lista de cursos en la QTableWidget."""
+        try: 
+            if hasattr(self, 'tabla_cursos'):
+                self.tabla_cursos.setRowCount(0)
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT * FROM cursos ORDER BY nombre_curso")
+                    cursos = cursor.fetchall()
+
+                    self.tabla_cursos.setRowCount(len(cursos))
+                    for row, curso in enumerate(cursos):
+                        self.tabla_cursos.setItem(row, 0, QTableWidgetItem(str(curso['id'])))
+                        self.tabla_cursos.setItem(row, 1, QTableWidgetItem(curso['nombre_curso']))
+                        self.tabla_cursos.setItem(row, 2, QTableWidgetItem(f"$ {curso['costo_exhibicion']:.2f}"))
+                        self.tabla_cursos.setItem(row, 3, QTableWidgetItem(f"$ {curso['costo_sem_15']:.2f}"))
+                        self.tabla_cursos.setItem(row, 4, QTableWidgetItem(f"$ {curso['costo_sem_12']:.2f}")) # CAMBIO DE 16 a 12
+                        self.tabla_cursos.setItem(row, 5, QTableWidgetItem(f"$ {curso['costo_mensual_3']:.2f}"))
+                        
+                        # Alinear costos a la derecha
+                        for col in range(2, 6):
+                            item = self.tabla_cursos.item(row, col)
+                            if item:
+                                item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                                
+        except sqlite3.Error as e:
+            mostrar_error(f"Error al cargar tabla de cursos: {e}")
+        except AttributeError:
+             pass # Tabla aún no existe
+
+    def registrar_nuevo_usuario(self):
+        """DEPRECADO: Usar guardar_usuario en su lugar."""
+        self.guardar_usuario() # Redirigir a la nueva función
+            
+    def guardar_usuario(self):
+        """Guarda un usuario nuevo o actualiza uno existente."""
+        if not all(hasattr(self, w) for w in ['entry_usr_nombre', 'entry_usr_telefono', 'entry_usr_email', 'combo_usr_rol']):
+            return 
+            
+        nombre = self.entry_usr_nombre.text().strip()
+        telefono = self.entry_usr_telefono.text().strip()
+        email = self.entry_usr_email.text().strip()
+        rol = self.combo_usr_rol.currentText()
+        
+        if not nombre or not email:
+            mostrar_error("Nombre Completo y Correo Electrónico son obligatorios.")
+            return
+            
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                
+                if self.usuario_seleccionado_id is None:
+                    # --- CREAR NUEVO USUARIO ---
+                    password = secrets.token_hex(4) # 8 caracteres
+                    cursor.execute("""
+                    INSERT INTO usuarios (nombre_completo, telefono, email, rol, password)
+                    VALUES (?, ?, ?, ?, ?)
+                    """, (nombre, telefono, email, rol, password))
+                    user_id = cursor.lastrowid # Este es el "No. de Empleado"
+                    conn.commit()
+                    
+                    # Mostrar credenciales al admin
+                    mostrar_info(f"Usuario creado exitosamente:\n\n"
+                                 f"No. de Empleado (ID): {user_id}\n"
+                                 f"Usuario (Email): {email}\n"
+                                 f"Contraseña: {password}\n\n"
+                                 f"Por favor, guarde esta contraseña. No se puede recuperar.")
+                
+                else:
+                    # --- ACTUALIZAR USUARIO EXISTENTE ---
+                    cursor.execute("""
+                    UPDATE usuarios SET nombre_completo = ?, telefono = ?, email = ?, rol = ?
+                    WHERE id = ?
+                    """, (nombre, telefono, email, rol, self.usuario_seleccionado_id))
+                    conn.commit()
+                    mostrar_info(f"Usuario (ID: {self.usuario_seleccionado_id}) actualizado exitosamente.")
+                         
+            self.limpiar_campos_usuario()
+            self.cargar_tabla_usuarios()
+            
+        except sqlite3.IntegrityError:
+            mostrar_error("Error: Ese correo electrónico ya está registrado.")
+        except sqlite3.Error as e:
+            mostrar_error(f"Error al registrar usuario: {e}")
+
+    def cambiar_password_usuario(self):
+        """Cambia la contraseña del usuario seleccionado."""
+        if self.usuario_seleccionado_id is None:
+            mostrar_error("No hay ningún usuario seleccionado.")
+            return
+
+        nueva_pass, ok = QInputDialog.getText(self, "Cambiar Contraseña",
+                                              "Ingrese la nueva contraseña:", QLineEdit.EchoMode.Password)
+        
+        if ok and nueva_pass:
+            try:
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("UPDATE usuarios SET password = ? WHERE id = ?", (nueva_pass, self.usuario_seleccionado_id))
+                    conn.commit()
+                mostrar_info("Contraseña actualizada exitosamente.")
+            except sqlite3.Error as e:
+                mostrar_error(f"Error al cambiar la contraseña: {e}")
+        elif ok and not nueva_pass:
+            mostrar_error("La contraseña no puede estar vacía.")
+
+    def seleccionar_usuario_para_edicion(self):
+        """Carga los datos del usuario seleccionado en el formulario de edición."""
+        selected_items = self.tabla_usuarios.selectedItems()
+        if not selected_items:
+            self.limpiar_campos_usuario() # Limpiar si la selección se quita
+            return
+
+        selected_row = self.tabla_usuarios.currentRow()
+        if selected_row < 0:
+             self.limpiar_campos_usuario()
+             return
+             
+        user_id_item = self.tabla_usuarios.item(selected_row, 0)
+        if not user_id_item: return
+
+        try:
+            user_id = int(user_id_item.text())
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM usuarios WHERE id = ?", (user_id,))
+                datos = cursor.fetchone()
+
+            if datos:
+                self.usuario_seleccionado_id = user_id
+                self.entry_usr_nombre.setText(datos['nombre_completo'])
+                self.entry_usr_telefono.setText(datos['telefono'])
+                self.entry_usr_email.setText(datos['email'])
+                self.combo_usr_rol.setCurrentText(datos['rol'])
+                
+                self.btn_guardar_usuario.setText("Actualizar Usuario")
+                self.btn_cambiar_password.setVisible(True)
+
+        except Exception as e:
+            mostrar_error(f"Error al cargar datos de usuario: {e}")
+            self.limpiar_campos_usuario()
+
+    def dar_baja_usuario(self):
+        """Elimina un usuario seleccionado de la BD."""
+        if self.usuario_seleccionado_id is None:
+            # Si no hay ID, intentar obtenerlo de la tabla
+            selected_items = self.tabla_usuarios.selectedItems()
+            if not selected_items:
+                mostrar_error("Por favor, seleccione un usuario de la lista para eliminar.")
+                return
+            selected_row = self.tabla_usuarios.currentRow()
+            if selected_row < 0: return
+            user_id_item = self.tabla_usuarios.item(selected_row, 0)
+            nombre_item = self.tabla_usuarios.item(selected_row, 1)
+            email_item = self.tabla_usuarios.item(selected_row, 2)
+            if not user_id_item: return
+            
+            self.usuario_seleccionado_id = int(user_id_item.text())
+            nombre_seleccionado = nombre_item.text()
+            email_seleccionado = email_item.text()
+        else:
+            nombre_seleccionado = self.entry_usr_nombre.text()
+            email_seleccionado = self.entry_usr_email.text()
+
+            
+        # Protección para el admin ID 1 y para no borrarse a sí mismo
+        if self.usuario_seleccionado_id == 1:
+            mostrar_error("No se puede eliminar al administrador principal (ID 1).")
+            return
+            
+        if email_seleccionado == self.username:
+            mostrar_error("No puede eliminarse a sí mismo.")
+            return
+
+        reply = QMessageBox.question(self, "Confirmar Eliminación",
+                                     f"¿Está seguro que desea eliminar al usuario:\n\n{nombre_seleccionado} (ID: {self.usuario_seleccionado_id})?\n\nEsta acción no se puede deshacer.",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("DELETE FROM usuarios WHERE id = ?", (self.usuario_seleccionado_id,))
+                    conn.commit()
+                
+                mostrar_info(f"Usuario {nombre_seleccionado} eliminado exitosamente.")
+                self.limpiar_campos_usuario()
+                self.cargar_tabla_usuarios()
+
+            except sqlite3.Error as e:
+                mostrar_error(f"Error al eliminar usuario: {e}")
+
+            
+    def limpiar_campos_usuario(self):
+        """Limpia el formulario de gestión de usuarios y resetea el modo a 'Guardar'."""
+        try:
+            if hasattr(self, 'entry_usr_nombre'):
+                self.entry_usr_nombre.clear()
+                self.entry_usr_telefono.clear()
+                self.entry_usr_email.clear()
+                self.combo_usr_rol.setCurrentIndex(0)
+                
+                self.usuario_seleccionado_id = None
+                self.btn_guardar_usuario.setText("Guardar Usuario")
+                self.btn_cambiar_password.setVisible(False)
+                self.tabla_usuarios.clearSelection()
+        except AttributeError:
+            pass # Widgets no existen aún
+
+    def cargar_tabla_usuarios(self):
+        """Carga la lista de usuarios (empleados) en la QTableWidget."""
+        try: 
+            if hasattr(self, 'tabla_usuarios'):
+                self.tabla_usuarios.setRowCount(0)
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT id, nombre_completo, email, rol FROM usuarios ORDER BY nombre_completo")
+                    usuarios = cursor.fetchall()
+
+                    self.tabla_usuarios.setRowCount(len(usuarios))
+                    for row, usuario in enumerate(usuarios):
+                        self.tabla_usuarios.setItem(row, 0, QTableWidgetItem(str(usuario['id'])))
+                        self.tabla_usuarios.setItem(row, 1, QTableWidgetItem(usuario['nombre_completo']))
+                        self.tabla_usuarios.setItem(row, 2, QTableWidgetItem(usuario['email']))
+                        self.tabla_usuarios.setItem(row, 3, QTableWidgetItem(usuario['rol']))
+        except sqlite3.Error as e:
+            mostrar_error(f"Error al cargar tabla de usuarios: {e}")
+        except AttributeError:
+             pass 
+
+    def cargar_datos_maestros(self):
+        """Función central para recargar todos los datos."""
+        if hasattr(self, 'cargar_tabla_alumnos'):
+            self.cargar_tabla_alumnos()
+        if hasattr(self, 'cargar_tabla_cursos'):
+            self.cargar_tabla_cursos()
+        if hasattr(self, 'cargar_combo_curso_registro'):
+            self.cargar_combo_curso_registro()
+        if hasattr(self, 'cargar_tabla_inscripciones_pagos'):
+            self.cargar_tabla_inscripciones_pagos()
+        if hasattr(self, 'cargar_tabla_usuarios') and self.user_role == "Administrador":
+            self.cargar_tabla_usuarios()
+
+    # --- NUEVAS FUNCIONES DE TEMA ---
+    def cargar_configuracion_tema(self):
+        """Carga la configuración de tema desde CONFIG_FILE."""
+        try:
+            if os.path.exists(CONFIG_FILE):
+                with open(CONFIG_FILE, 'r') as f:
+                    config = json.load(f)
+                    theme = config.get("theme", "Claro")
+                    accent = config.get("accent", "Naranja")
+                    return theme, accent
+        except Exception as e:
+            print(f"Error al cargar configuración: {e}")
+        return "Claro", "Naranja" # Defaults
+
+    def guardar_configuracion_tema(self):
+        """Guarda la configuración actual en CONFIG_FILE."""
+        try:
+            config = {
+                "theme": self.theme,
+                "accent": self.accent
+            }
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(config, f, indent=4)
+        except Exception as e:
+            print(f"Error al guardar configuración: {e}")
+
+    def actualizar_tema(self):
+        """Se llama cuando un combo de configuración cambia."""
+        self.theme = self.combo_tema.currentText()
+        self.accent = self.combo_acento.currentText()
+        self.aplicar_estilo_actual()
+        self.guardar_configuracion_tema()
+
+    def aplicar_estilo_actual(self):
+        """Aplica el stylesheet combinado a la aplicación."""
+        stylesheet = get_full_stylesheet(self.theme, self.accent)
+        app.setStyleSheet(stylesheet)
+
+
+# ---- HOJAS DE ESTILO (QSS) ----
+
+def get_accent_stylesheet(accent_name):
+    """Retorna el QSS para un color de acento específico."""
+    if accent_name == "Azul":
+        return """
+            #navBar { background-color: #0d6efd; }
+            #navButton:hover { background-color: #0b5ed7; }
+            #navButton[selected="true"] { background-color: #0a58ca; }
+            #topBar { background-color: #0a58ca; }
+            #shortcutsTitle { border-bottom: 2px solid #0d6efd; }
+            #shortcutIcon { color: #0d6efd; }
+            QGroupBox::title { color: #0a58ca; }
+            QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus { border: 1px solid #0d6efd; }
+            QComboBox QAbstractItemView { selection-background-color: #0d6efd; }
+            QCheckBox::indicator:checked { background-color: #0d6efd; border: 1px solid #0a58ca; }
+            QPushButton#primaryButton { background-color: #0d6efd; }
+            QPushButton#primaryButton:hover { background-color: #0b5ed7; }
+            QPushButton#primaryButton:pressed { background-color: #0a58ca; }
+            QHeaderView::section { background-color: #0d6efd; border: 1px solid #0a58ca; }
+        """
+    elif accent_name == "Verde":
+        return """
+            #navBar { background-color: #198754; }
+            #navButton:hover { background-color: #157347; }
+            #navButton[selected="true"] { background-color: #146c43; }
+            #topBar { background-color: #146c43; }
+            #shortcutsTitle { border-bottom: 2px solid #198754; }
+            #shortcutIcon { color: #198754; }
+            QGroupBox::title { color: #146c43; }
+            QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus { border: 1px solid #198754; }
+            QComboBox QAbstractItemView { selection-background-color: #198754; }
+            QCheckBox::indicator:checked { background-color: #198754; border: 1px solid #146c43; }
+            QPushButton#primaryButton { background-color: #198754; }
+            QPushButton#primaryButton:hover { background-color: #157347; }
+            QPushButton#primaryButton:pressed { background-color: #146c43; }
+            QHeaderView::section { background-color: #198754; border: 1px solid #146c43; }
+        """
+    # Default (Naranja)
+    return """
+        #navBar { background-color: #FFA726; }
+        #navButton:hover { background-color: #FB8C00; }
+        #navButton[selected="true"] { background-color: #E65100; }
+        #topBar { background-color: #4A148C; } /* Color Morado Fijo para Acento Naranja */
+        #shortcutsTitle { border-bottom: 2px solid #FFA726; }
+        #shortcutIcon { color: #FFA726; }
+        QGroupBox::title { color: #E65100; }
+        QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus { border: 1px solid #FFA726; }
+        QComboBox QAbstractItemView { selection-background-color: #FFA726; }
+        QCheckBox::indicator:checked { background-color: #FFA726; border: 1px solid #E65100; }
+        QPushButton#primaryButton { background-color: #007ACC; } /* Botón primario se mantiene azul */
+        QPushButton#primaryButton:hover { background-color: #0099E6; }
+        QPushButton#primaryButton:pressed { background-color: #005F99; }
+        QHeaderView::section { background-color: #FFA726; border: 1px solid #E65100; }
+    """
+
+style_sheet_light = """
+    /* --- Tema Claro --- */
+    QWidget {
+        background-color: #FFFFFF;
+        color: #333333;
+        font-family: 'Segoe UI', Arial, sans-serif;
+        font-size: 10pt;
+    }
+    QMainWindow { background-color: #FFFFFF; }
+    /* --- CORRECCIÓN: Texto de barra superior siempre blanco --- */
+    #topBar QLabel, #topBarUser, #topBarLabel, #topBarIcon { 
+        color: #FFFFFF; 
+        font-size: 9pt; 
+    }
+    #topBarUser { font-weight: bold; font-size: 10pt; }
+    #topBarButton { background-color: transparent; color: #FFFFFF; border: none; font-size: 16pt; padding: 5px; }
+    #topBarButton:hover { background-color: rgba(255, 255, 255, 0.1); }
+    
+    #navBar { color: #FFFFFF; }
+    #navButton { background-color: transparent; color: #FFFFFF; border: none; border-radius: 4px; padding: 15px; font-weight: bold; font-size: 11pt; text-align: left; padding-left: 20px; }
+    #mainContentArea, #contentPage { background-color: #FFFFFF; }
+    QScrollArea { border: none; background-color: #FFFFFF; }
+    #welcomeTitle { font-size: 24pt; font-weight: bold; color: #333333; }
+    #shortcutsTitle { font-size: 16pt; font-weight: bold; color: #555555; padding-bottom: 5px; }
+    #shortcutButton { border: none; }
+    #shortcutIcon { background-color: #F5F5F5; border: 1px solid #E0E0E0; border-radius: 10px; font-size: 48pt; }
+    #shortcutIcon:hover { background-color: #E0E0E0; }
+    #shortcutLabel { font-size: 11pt; font-weight: bold; color: #333333; }
+    QGroupBox { background-color: #F9F9F9; border: 1px solid #E0E0E0; border-radius: 6px; margin-top: 10px; padding: 10px; }
+    QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 0 10px 0 10px; font-size: 12pt; font-weight: bold; }
+    QLabel { color: #333333; }
+    QLineEdit, QComboBox, QDoubleSpinBox { background-color: #FFFFFF; color: #333333; border: 1px solid #C0C0C0; border-radius: 4px; padding: 5px; min-height: 20px; }
+    QComboBox QAbstractItemView { background-color: #FFFFFF; color: #333333; }
+    QCheckBox { color: #333333; font-size: 9pt; }
+    QCheckBox::indicator { width: 16px; height: 16px; }
+    QCheckBox::indicator:unchecked { border: 1px solid #C0C0C0; background-color: #FFFFFF; border-radius: 3px; }
+    #expedienteDisplay { background-color: #FDFDFD; border: 1px solid #E0E0E0; font-family: Consolas, monospace; font-size: 9pt; }
+    #deleteButton { background-color: #D32F2F; color: #FFFFFF; border: none; border-radius: 4px; padding: 10px 20px; font-weight: bold; font-size: 10pt; margin-top: 10px; }
+    #deleteButton:hover { background-color: #E53935; }
+    #deleteButton:pressed { background-color: #B71C1C; }
+    #secondaryButton { background-color: #607D8B; color: #FFFFFF; border: none; border-radius: 4px; padding: 10px 20px; font-weight: bold; font-size: 10pt; }
+    #secondaryButton:hover { background-color: #546E7A; }
+    QPushButton#primaryButton { background-color: #007ACC; color: #FFFFFF; border: none; border-radius: 4px; padding: 10px 20px; font-weight: bold; font-size: 11pt; min-height: 25px; }
+    QPushButton#primaryButton:hover { background-color: #0099E6; }
+    QPushButton#primaryButton:pressed { background-color: #005F99; }
+    QTableWidget { background-color: #FFFFFF; color: #333333; gridline-color: #E0E0E0; border: 1px solid #C0C0C0; selection-color: #333333; }
+    QHeaderView::section { color: #FFFFFF; padding: 6px; font-weight: bold; }
+    QMessageBox { background-color: #FFFFFF; }
+    #placeholderText { font-style: italic; color: #888888; }
+"""
+
+style_sheet_dark = """
+    /* --- Tema Oscuro --- */
+    QWidget {
+        background-color: #2E2E2E;
+        color: #E0E0E0;
+        font-family: 'Segoe UI', Arial, sans-serif;
+        font-size: 10pt;
+    }
+    QMainWindow { background-color: #2E2E2E; }
+    /* --- CORRECCIÓN: Texto de barra superior siempre blanco --- */
+    #topBar QLabel, #topBarUser, #topBarLabel, #topBarIcon { 
+        color: #FFFFFF; 
+        font-size: 9pt; 
+    }
+    #topBarUser { font-weight: bold; font-size: 10pt; }
+    #topBarButton { background-color: transparent; color: #FFFFFF; border: none; font-size: 16pt; padding: 5px; }
+    #topBarButton:hover { background-color: #3A3A3A; }
+    #navButton { background-color: #4A4A4A; color: #E0E0E0; border: 1px solid #5C5C5C; border-radius: 4px; padding: 15px; font-weight: bold; font-size: 11pt; text-align: left; padding-left: 20px; }
+    #navButton:hover { background-color: #5A5A5A; }
+    #mainContentArea, #contentPage { background-color: #2E2E2E; }
+    QScrollArea { border: none; background-color: #2E2E2E; }
+    #welcomeTitle { font-size: 24pt; font-weight: bold; color: #E0E0E0; }
+    #shortcutsTitle { font-size: 16pt; font-weight: bold; color: #C0C0C0; padding-bottom: 5px; }
+    #shortcutButton { border: none; }
+    #shortcutIcon { background-color: #3C3C3C; border: 1px solid #5C5C5C; border-radius: 10px; font-size: 48pt; }
+    #shortcutIcon:hover { background-color: #4A4A4A; }
+    #shortcutLabel { font-size: 11pt; font-weight: bold; color: #E0E0E0; }
+    QGroupBox { background-color: #3C3C3C; border: 1px solid #5C5C5C; border-radius: 6px; margin-top: 10px; padding: 10px; }
+    QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 0 10px 0 10px; font-size: 12pt; font-weight: bold; }
+    QLabel { color: #E0E0E0; }
+    QLineEdit, QComboBox, QDoubleSpinBox { background-color: #4A4A4A; color: #E0E0E0; border: 1px solid #5C5C5C; border-radius: 4px; padding: 5px; min-height: 20px; }
+    QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus { border: 1px solid #E0E0E0; }
+    QComboBox QAbstractItemView { background-color: #4A4A4A; color: #E0E0E0; selection-background-color: #5A5A5A; }
+    QCheckBox { color: #E0E0E0; font-size: 9pt; }
+    QCheckBox::indicator { width: 16px; height: 16px; }
+    QCheckBox::indicator:unchecked { border: 1px solid #5C5C5C; background-color: #4A4A4A; border-radius: 3px; }
+    QCheckBox::indicator:checked { border: 1px solid #909090; }
+    #expedienteDisplay { background-color: #353535; border: 1px solid #5C5C5C; font-family: Consolas, monospace; font-size: 9pt; color: #E0E0E0; }
+    #deleteButton { background-color: #D32F2F; color: #FFFFFF; border: none; border-radius: 4px; padding: 10px 20px; font-weight: bold; font-size: 10pt; margin-top: 10px; }
+    #deleteButton:hover { background-color: #E53935; }
+    #deleteButton:pressed { background-color: #B71C1C; }
+    #secondaryButton { background-color: #607D8B; color: #FFFFFF; border: none; border-radius: 4px; padding: 10px 20px; font-weight: bold; font-size: 10pt; }
+    #secondaryButton:hover { background-color: #546E7A; }
+    QPushButton#primaryButton { background-color: #007ACC; color: #FFFFFF; border: none; border-radius: 4px; padding: 10px 20px; font-weight: bold; font-size: 11pt; min-height: 25px; }
+    QPushButton#primaryButton:hover { background-color: #0099E6; }
+    QPushButton#primaryButton:pressed { background-color: #005F99; }
+    QTableWidget { background-color: #3C3C3C; color: #E0E0E0; gridline-color: #5C5C5C; border: 1px solid #5C5C5C; selection-background-color: #5A5A5A; selection-color: #E0E0E0; }
+    QHeaderView::section { color: #FFFFFF; padding: 6px; font-weight: bold; border: 1px solid #5C5C5C; }
+    QMessageBox { background-color: #3C3C3C; color: #E0E0E0; }
+    #placeholderText { font-style: italic; color: #888888; }
+"""
+
+def get_full_stylesheet(theme, accent):
+    """Combina el tema base (claro/oscuro) con el color de acento."""
+    base_style = style_sheet_light if theme == "Claro" else style_sheet_dark
+    accent_style = get_accent_stylesheet(accent)
+    return base_style + accent_style
+
+
+# ---- Punto de Entrada de la Aplicación (CON BUCLE DE SESIÓN) ----
+if __name__ == '__main__':
+
+    try:
+        # --- CORRECCIÓN DE ERROR LOGIN: Llamar a inicializar_db() PRIMERO ---
+        inicializar_db()
+        
+        app = QApplication(sys.argv)
+        
+        login_exitoso = True
+        window = None # Definir window fuera del bucle
+
+        while login_exitoso:
+            # 1. Iniciar la pantalla de Login
+            login_window = LoginScreen()
+            login_window.show()
+            app.exec() # Ejecutar el loop del login
+
+            # Si el usuario cerró el login sin autenticarse, salimos del bucle
+            if not login_window.accept_login:
+                login_exitoso = False
+                continue # Salta al final del bucle
+
+            # 2. Si el login fue exitoso, obtener usuario y mostrar ventana principal
+            username = login_window.username
+            full_username = login_window.full_username
+            user_role = login_window.user_role # Obtener el ROL
+            
+            # La configuración de estilo se carga y aplica DENTRO de VentanaPrincipal
+            
+            window = VentanaPrincipal(username, full_username, user_role) # Pasar el ROL
+            window.showMaximized() # Mostrar maximizado por defecto
+
+            app.exec() # Ejecutar el loop de la aplicación principal
+
+            # 3. Cuando la app principal se cierra, revisamos si fue por "Cerrar Sesión"
+            if not window.logout_solicitado:
+                login_exitoso = False # El usuario cerró la ventana, salimos del bucle
+
+        # --- Limpiar archivos temporales al salir del bucle principal ---
+        if window and hasattr(window, '_temp_pdf_files'): # Verificar si window se creó
+            window.limpiar_archivos_temporales()
+
+        sys.exit(0) # Salida limpia
+
+    except Exception as e:
+        # Captura de error final por si algo falla en la inicialización
+        print(f"--- ERROR FATAL: {e} ---")
+        error_info = traceback.format_exc()
+
+        with open("error_log.txt", "w", encoding="utf-8") as f:
+            f.write("Ha ocurrido un error fatal al iniciar la aplicación:\n\n")
+            f.write(error_info)
+
+        # Mostrar el error en una ventana emergente simple si es posible
+        try:
+            error_dialog = QMessageBox()
+            error_dialog.setIcon(QMessageBox.Icon.Critical)
+            error_dialog.setWindowTitle("Error Fatal")
+            error_dialog.setText(f"Error fatal al iniciar:\n{e}\n\nConsulte 'error_log.txt' para detalles.")
+            error_dialog.exec()
+        except:
+            pass
+
+        sys.exit(1)
