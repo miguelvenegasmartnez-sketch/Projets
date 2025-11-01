@@ -2,11 +2,11 @@ import sys
 import sqlite3
 import datetime
 import traceback
-import os # Necesario para verificar si existe el logo
-import tempfile # Para crear archivo PDF temporal
-from decimal import Decimal, ROUND_HALF_UP # Para manejo de dinero
-import secrets # Para generar contraseñas seguras
-import json # Para guardar la configuración
+import os 
+import tempfile 
+from decimal import Decimal, ROUND_HALF_UP 
+import secrets 
+import json 
 
 # --- Importar bibliotecas de PyQt6 (Fusionadas) ---
 try:
@@ -15,10 +15,11 @@ try:
         QGridLayout, QLabel, QLineEdit, QPushButton, QComboBox, QTabWidget,
         QTableWidget, QTableWidgetItem, QMessageBox, QGroupBox, QFormLayout,
         QDoubleSpinBox, QHeaderView, QFileDialog, QGraphicsDropShadowEffect,
-        QStackedWidget, QFrame, QScrollArea, QCheckBox, QTextEdit, QInputDialog
+        QStackedWidget, QFrame, QScrollArea, QCheckBox, QTextEdit, QInputDialog,
+        QMenu, QSizePolicy, QSpacerItem # Necesario para el nuevo menú
     )
     # --- AÑADIDO QLocale ---
-    from PyQt6.QtCore import Qt, QDate, QTimer, QDateTime, QSize, QUrl, QLocale
+    from PyQt6.QtCore import Qt, QDate, QTimer, QDateTime, QSize, QUrl, QLocale, QPoint # Necesario para QPoint
     from PyQt6.QtGui import QFont, QIcon, QPixmap, QColor, QDesktopServices
 except ImportError as e:
     print(f"Error: Faltan bibliotecas de PyQt6. Ejecuta: pip install PyQt6\nDetalle: {e}")
@@ -30,8 +31,8 @@ try:
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.units import inch
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.platypus import Paragraph, Image, Spacer, Table, TableStyle, Frame # Añadido Frame
-    from reportlab.lib.enums import TA_CENTER, TA_LEFT # Añadido TA_LEFT
+    from reportlab.platypus import Paragraph, Image, Spacer, Table, TableStyle, Frame 
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT 
     from reportlab.lib import colors
     FONT_NAME = 'Helvetica'
     FONT_BOLD_NAME = 'Helvetica-Bold'
@@ -43,8 +44,8 @@ except ImportError as e:
 
 # ---- Configuración de la Base de Datos y Archivos ----
 DB_NAME = "gestion_escolar.db"
-LOGO_PATH = "logo.png" # Ruta al archivo del logo
-CONFIG_FILE = "config.json" # Archivo para guardar el tema
+LOGO_PATH = "logo.png" 
+CONFIG_FILE = "config.json" 
 
 # --- FUNCIÓN DE CONEXIÓN GLOBAL ---
 def get_db_connection():
@@ -52,7 +53,7 @@ def get_db_connection():
     conn = sqlite3.connect(DB_NAME)
     # --- ASEGURARSE QUE SIEMPRE ESTÉ ACTIVO ---
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.row_factory = sqlite3.Row # Para acceder por nombre de columna fácilmente
+    conn.row_factory = sqlite3.Row 
     return conn
 
 def inicializar_db():
@@ -109,7 +110,7 @@ def inicializar_db():
         columns_cursos = [info[1] for info in cursor.fetchall()]
         
         if 'profesor' in columns_cursos or 'costo' in columns_cursos or 'costo_sem_16' in columns_cursos or 'costo_sem_12' not in columns_cursos:
-            print("Detectando estructura de tabla 'cursos' antigua. Recreando tabla...")
+            print("Detectando estructura de tabla 'cursos' antigua o faltante. Recreando tabla...")
             cursor.execute("DROP TABLE IF EXISTS cursos")
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS cursos (
@@ -172,21 +173,20 @@ def inicializar_db():
         """)
         
         # --- Insertar usuario admin por defecto ---
-        # (id=1, email='admin@sistema.com', pass='admin123')
         try:
             cursor.execute("""
             INSERT INTO usuarios (id, nombre_completo, email, rol, password)
             VALUES (1, 'Administrador', 'admin@sistema.com', 'Administrador', 'admin123')
             """)
         except sqlite3.IntegrityError:
-            pass # El usuario admin ya existe
+            pass 
         
         conn.commit()
     except sqlite3.Error as e:
         print(f"CRITICAL: Error al inicializar la base de datos: {e}")
     finally:
         if conn:
-            conn.close() # Asegurarse de cerrar la conexión
+            conn.close() 
 
 # Funciones globales de mensajes (deben estar definidas antes de usarse)
 def mostrar_error(mensaje):
@@ -210,12 +210,11 @@ class LoginScreen(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Sistema de Gestión Escolar - Login")
-        # Define tamaño inicial pero permite redimensionar
         self.resize(800, 500)
-        self.username = "" # Para guardar el nombre de usuario
-        self.full_username = "" # Para guardar el nombre completo
-        self.user_role = "" # Para guardar el rol
-        self.accept_login = False # Para controlar el cierre
+        self.username = "" 
+        self.full_username = "" 
+        self.user_role = "" 
+        self.accept_login = False 
 
         self.setup_ui()
         self.apply_styles()
@@ -223,7 +222,7 @@ class LoginScreen(QWidget):
 
     def setup_ui(self):
         main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0) # Sin márgenes en el layout principal
+        main_layout.setContentsMargins(0, 0, 0, 0) 
         main_layout.setSpacing(0)
 
         # Panel Izquierdo: Login Form
@@ -236,18 +235,15 @@ class LoginScreen(QWidget):
 
         # Logo Placeholder
         self.logo_label = QLabel()
-        # Busca 'logo.png' (el que tienes en tu carpeta)
         try:
-            pixmap = QPixmap(LOGO_PATH) # Usa la constante global
+            pixmap = QPixmap(LOGO_PATH) 
             if pixmap.isNull():
-                raise FileNotFoundError # Si no se carga, generamos el error para el texto
+                raise FileNotFoundError 
 
-            # Se escala a una altura de 150px (mejor para logo vertical/cuadrado)
             self.logo_label.setPixmap(pixmap.scaledToHeight(150, Qt.TransformationMode.SmoothTransformation))
             self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         except FileNotFoundError:
-            # Si no encuentra el logo, muestra un texto
             self.logo_label.setText("LOGO ESCUELA")
             self.logo_label.setFont(QFont("Arial", 24, QFont.Weight.Bold))
             self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -256,10 +252,10 @@ class LoginScreen(QWidget):
         login_layout.addWidget(self.logo_label)
 
         # Campos de Usuario
-        user_label = QLabel("Correo Electrónico:") # CAMBIO
+        user_label = QLabel("Correo Electrónico:") 
         user_label.setObjectName("inputLabel")
         self.username_input = QLineEdit()
-        self.username_input.setPlaceholderText("admin@sistema.com") # CAMBIO
+        self.username_input.setPlaceholderText("admin@sistema.com") 
         self.username_input.setObjectName("textInput")
         login_layout.addWidget(user_label)
         login_layout.addWidget(self.username_input)
@@ -282,12 +278,12 @@ class LoginScreen(QWidget):
 
         self.forgot_password_button = QPushButton("RECUPERAR CONTRASEÑA")
         self.forgot_password_button.setObjectName("secondaryButton")
-        self.forgot_password_button.clicked.connect(self.show_forgot_password_message) # CONECTADO
+        self.forgot_password_button.clicked.connect(self.show_forgot_password_message) 
         login_layout.addWidget(self.forgot_password_button)
 
-        login_layout.addStretch() # Empuja los elementos hacia arriba
+        login_layout.addStretch() 
 
-        main_layout.addWidget(login_panel, 2) # 2 partes del ancho
+        main_layout.addWidget(login_panel, 2) 
 
         # Panel Derecho: Mensaje de Bienvenida y Fondo
         self.welcome_panel = QWidget()
@@ -309,7 +305,7 @@ class LoginScreen(QWidget):
         self.time_of_day_label.setGraphicsEffect(shadow)
 
         welcome_layout.addWidget(self.time_of_day_label)
-        welcome_layout.addStretch() # Empuja el mensaje de bienvenida hacia arriba
+        welcome_layout.addStretch() 
 
         # Texto inferior
         bottom_text_label = QLabel("Unidad Profesional de Asesoría y Regularización")
@@ -318,7 +314,7 @@ class LoginScreen(QWidget):
         bottom_text_label.setStyleSheet("color: white; background-color: rgba(0,0,0,0.5); padding: 5px;")
         welcome_layout.addWidget(bottom_text_label)
 
-        main_layout.addWidget(self.welcome_panel, 3) # 3 partes del ancho
+        main_layout.addWidget(self.welcome_panel, 3) 
 
     def apply_styles(self):
         # Estilos inspirados en tu imagen de ejemplo
@@ -328,16 +324,14 @@ class LoginScreen(QWidget):
                 font-size: 10pt;
             }
             #loginPanel {
-                background-color: #3C3C3C; /* Gris oscuro similar al tuyo */
+                background-color: #3C3C3C; 
                 color: #E0E0E0;
             }
             #welcomePanel {
-                /* Busca un archivo llamado 'background.jpg' (como en tu captura) */
                 background-image: url(background.jpg);
                 background-repeat: no-repeat;
                 background-position: center;
-                background-size: cover; /* Ajusta la imagen para cubrir el panel */
-                /* Color de fondo si no encuentra la imagen */
+                background-size: cover; 
                 background-color: #F0F0F0;
             }
             #inputLabel {
@@ -356,7 +350,7 @@ class LoginScreen(QWidget):
                 border: 1px solid #007ACC;
             }
             #primaryButton {
-                background-color: #4CAF50; /* Verde */
+                background-color: #4CAF50; 
                 color: #FFFFFF;
                 border: none;
                 border-radius: 6px;
@@ -372,7 +366,7 @@ class LoginScreen(QWidget):
                 background-color: #397D3D;
             }
             #secondaryButton {
-                background-color: #607D8B; /* Azul grisáceo */
+                background-color: #607D8B; 
                 color: #FFFFFF;
                 border: none;
                 border-radius: 6px;
@@ -395,7 +389,7 @@ class LoginScreen(QWidget):
         self.update_time_of_day_message()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_time_of_day_message)
-        self.timer.start(60000) # Actualizar cada minuto
+        self.timer.start(60000) 
 
     def update_time_of_day_message(self):
         current_hour = QDateTime.currentDateTime().time().hour()
@@ -424,14 +418,14 @@ class LoginScreen(QWidget):
                 
             if usuario:
                 self.accept_login = True
-                self.username = usuario['email'] # O puedes usar parte del email
+                self.username = usuario['email'] 
                 self.full_username = usuario['nombre_completo']
-                self.user_role = usuario['rol'] # Guardar el rol
-                self.close() # Cierra la ventana de login
+                self.user_role = usuario['rol'] 
+                self.close() 
             else:
                 QMessageBox.warning(self, "Error de Login", "Email o contraseña incorrectos.")
                 self.password_input.clear()
-                self.username_input.setFocus() # Pone el foco de nuevo en el usuario
+                self.username_input.setFocus() 
 
         except sqlite3.Error as e:
             mostrar_error(f"Error en la base de datos al iniciar sesión: {e}")
@@ -455,7 +449,7 @@ class LoginScreen(QWidget):
                         return
 
                     # Generar nueva contraseña
-                    nueva_password = secrets.token_hex(4) # Nueva contraseña aleatoria de 8 caracteres
+                    nueva_password = secrets.token_hex(4) 
                     
                     with get_db_connection() as conn:
                         cursor = conn.cursor()
@@ -469,34 +463,35 @@ class LoginScreen(QWidget):
                     mostrar_error("No se encontró ningún usuario con ese correo electrónico.")
                     
             except sqlite3.Error as e:
-                mostrar_error(f"Error en la base de datos: {e}")
+                mostrar_error(f"Error en la base de datos al iniciar sesión: {e}")
             except Exception as e:
                  mostrar_error(f"Error inesperado: {e}")
 
     def closeEvent(self, event):
-        # Asegurarse de que si se cierra la ventana de login sin iniciar sesión, la aplicación se cierre
         if not self.accept_login:
-            sys.exit(0) # Termina la aplicación si el login no fue exitoso
+            sys.exit(0) 
         event.accept()
 
 # ---- Ventana Principal de la Aplicación (REDISEÑADA AL ESTILO DASHBOARD) ----
 class VentanaPrincipal(QMainWindow):
-    def __init__(self, username, full_username, user_role): # Acepta el rol del usuario
+    def __init__(self, username, full_username, user_role): 
         super().__init__()
         self.username = username
-        self.full_username = full_username # Nombre completo para mostrar
-        self.user_role = user_role # Guardar el rol (Administrador o Asesor)
-        self.logout_solicitado = False # Para controlar el cierre de sesión
-        self._temp_pdf_files = [] # Lista para guardar nombres de archivos temporales
-        self.usuario_seleccionado_id = None # Para guardar el ID del usuario a editar
-        self.curso_seleccionado_id = None # Para guardar el ID del curso a editar
+        self.full_username = full_username 
+        self.user_role = user_role 
+        self.logout_solicitado = False 
+        self._temp_pdf_files = [] 
+        self.usuario_seleccionado_id = None 
+        self.curso_seleccionado_id = None 
+        
+        # Almacenamiento local de inscripciones para el filtro de pagos
+        self._inscripciones_cache = [] 
 
         self.setWindowTitle("Sistema de Gestión Escolar - UPASER")
         self.setGeometry(100, 100, 1200, 700)
-        self.setMinimumSize(1024, 700) # Un tamaño mínimo
+        self.setMinimumSize(1024, 700) 
         
         # --- IDIOMA A ESPAÑOL ---
-        # Establecer el idioma para que QDateTime muestre nombres en español
         self.locale = QLocale(QLocale.Language.Spanish, QLocale.Country.Mexico)
         QLocale.setDefault(self.locale)
 
@@ -510,14 +505,12 @@ class VentanaPrincipal(QMainWindow):
         # Cargar datos iniciales
         self.cargar_datos_maestros()
 
-        # Iniciar el temporizador para la hora
-        self.iniciar_timer_reloj()
+        # REMOVIDO: self.iniciar_timer_reloj()
         
         # Conectar señal de cierre para limpiar archivos temporales
         app.aboutToQuit.connect(self.limpiar_archivos_temporales)
 
     # --- NUEVA FUNCIÓN DE PDF: draw_text_pdf ---
-    # Movida aquí para evitar problemas de 'nonlocal' y reutilizarla
     def draw_text_pdf(self, c, current_y, texto, x, style):
         """Dibuja un Paragraph de ReportLab y maneja saltos de página."""
         width, height = letter
@@ -534,15 +527,15 @@ class VentanaPrincipal(QMainWindow):
             self.draw_logo(c, width, height)
 
         p.drawOn(c, x, current_y - p_height)
-        current_y -= (p_height + 4) # Actualizar la posición Y
-        return current_y # Devolver la nueva posición Y
+        current_y -= (p_height + 4) 
+        return current_y 
 
     # --- NUEVA FUNCIÓN DE PDF: draw_logo ---
     def draw_logo(self, canvas_obj, page_width, page_height):
          if os.path.exists(LOGO_PATH):
              try:
-                 logo_img = Image(LOGO_PATH, width=1*inch, height=1*inch)
-                 logo_img.drawOn(canvas_obj, 0.5 * inch, page_height - 1.25 * inch)
+                logo_img = Image(LOGO_PATH, width=1*inch, height=1*inch)
+                logo_img.drawOn(canvas_obj, 0.5 * inch, page_height - 1.25 * inch)
              except Exception as img_err:
                  print(f"Error al dibujar logo: {img_err}")
 
@@ -550,11 +543,12 @@ class VentanaPrincipal(QMainWindow):
     # --- NUEVA FUNCIÓN DE PDF: draw_watermark ---
     def draw_watermark(self, canvas_obj, page_width, page_height):
          if os.path.exists(LOGO_PATH):
-             try:
+           try:
                  canvas_obj.saveState()
                  canvas_obj.setFillAlpha(0.15)
                  img = Image(LOGO_PATH)
                  img_width, img_height = img.wrap(page_width, page_height)
+                
                  aspect = img_height / float(img_width) if img_width else 1
                  
                  display_width = page_width * 0.6
@@ -565,7 +559,7 @@ class VentanaPrincipal(QMainWindow):
                                       width=display_width, height=display_height,
                                       mask='auto')
                  canvas_obj.restoreState()
-             except Exception as wm_err:
+           except Exception as wm_err:
                  print(f"Error al dibujar marca de agua: {wm_err}")
     
     # --- NUEVA FUNCIÓN DE PDF: draw_double_signature ---
@@ -608,30 +602,30 @@ class VentanaPrincipal(QMainWindow):
 
         # Crear las páginas
         self.pagina_inicio = self.crear_pagina_inicio()
-        self.pagina_inscripcion = self.crear_pagina_nueva_inscripcion() # Formulario detallado
+        self.pagina_inscripcion = self.crear_pagina_nueva_inscripcion() 
         self.pagina_pagos = self.crear_pagina_pagos()
         self.pagina_lista_alumnos = self.crear_pagina_lista_alumnos() 
         self.pagina_gestion_cursos = self.crear_pagina_gestion_cursos() 
         self.pagina_gestion_usuarios = self.crear_pagina_gestion_usuarios()
-        self.pagina_configuracion = self.crear_pagina_configuracion() # NUEVA PÁGINA
+        self.pagina_configuracion = self.crear_pagina_configuracion() 
 
-        # Añadir páginas al StackedWidget (Nuevo orden e índices)
-        self.stacked_widget.addWidget(self.pagina_inicio) # index 0
-        self.stacked_widget.addWidget(self.pagina_inscripcion) # index 1
-        self.stacked_widget.addWidget(self.pagina_pagos) # index 2
-        self.stacked_widget.addWidget(self.pagina_lista_alumnos) # index 3
-        self.stacked_widget.addWidget(self.pagina_gestion_cursos) # index 4
-        self.stacked_widget.addWidget(self.pagina_gestion_usuarios) # index 5
-        self.stacked_widget.addWidget(self.pagina_configuracion) # index 6
+        # Añadir páginas al StackedWidget 
+        self.stacked_widget.addWidget(self.pagina_inicio) 
+        self.stacked_widget.addWidget(self.pagina_inscripcion) 
+        self.stacked_widget.addWidget(self.pagina_pagos) 
+        self.stacked_widget.addWidget(self.pagina_lista_alumnos) 
+        self.stacked_widget.addWidget(self.pagina_gestion_cursos) 
+        self.stacked_widget.addWidget(self.pagina_gestion_usuarios) 
+        self.stacked_widget.addWidget(self.pagina_configuracion) 
 
-        layout_contenido.addWidget(self.stacked_widget, 1) # '1' le da más espacio
+        layout_contenido.addWidget(self.stacked_widget, 1) 
 
         # Añadir el layout de contenido al layout principal
         layout_principal.addLayout(layout_contenido)
 
-        # Conectar botones de navegación a las páginas (Nuevos índices)
+        # Conectar botones de navegación a las páginas 
         self.btn_nav_inicio.clicked.connect(lambda: self.cambiar_pagina(0))
-        self.btn_nav_inscripcion.clicked.connect(lambda: self.cambiar_pagina(1)) # Formulario
+        self.btn_nav_inscripcion.clicked.connect(lambda: self.cambiar_pagina(1)) 
         self.btn_nav_pagos.clicked.connect(lambda: self.cambiar_pagina(2))
         self.btn_nav_lista_alumnos.clicked.connect(lambda: self.cambiar_pagina(3)) 
         
@@ -642,7 +636,8 @@ class VentanaPrincipal(QMainWindow):
             self.btn_nav_gestion_usuarios.clicked.connect(lambda: self.cambiar_pagina(5))
         if hasattr(self, 'btn_nav_config'):
             self.btn_nav_config.clicked.connect(lambda: self.cambiar_pagina(6))
-            
+           
+        
         self.btn_logout.clicked.connect(self.cerrar_sesion)
 
         # Establecer página inicial
@@ -658,31 +653,23 @@ class VentanaPrincipal(QMainWindow):
 
         icon_usuario = QLabel("👤")
         icon_usuario.setFont(QFont("Arial", 16))
-        icon_usuario.setObjectName("topBarIcon") # ID para estilo
+        icon_usuario.setObjectName("topBarIcon") 
 
         info_layout = QVBoxLayout()
         info_layout.setSpacing(0)
-        self.lbl_usuario_top = QLabel(f"Usuario: {self.full_username} ({self.user_role})") # Añadir rol
+        self.lbl_usuario_top = QLabel(f"Usuario: {self.full_username} ({self.user_role})") 
         self.lbl_usuario_top.setObjectName("topBarUser")
 
-        fecha_hora_layout = QHBoxLayout()
-        # Formateo de fecha/hora se hace en actualizar_hora usando self.locale
-        self.lbl_fecha_top = QLabel("Fecha: ...")
-        self.lbl_fecha_top.setObjectName("topBarLabel")
-        self.lbl_hora_top = QLabel("Hora: ...")
-        self.lbl_hora_top.setObjectName("topBarLabel")
-        fecha_hora_layout.addWidget(self.lbl_fecha_top)
-        fecha_hora_layout.addWidget(self.lbl_hora_top)
-
+        # ELIMINADAS LAS ETIQUETAS DE FECHA Y HORA
+        
         info_layout.addWidget(self.lbl_usuario_top)
-        info_layout.addLayout(fecha_hora_layout)
 
         layout.addWidget(icon_usuario)
         layout.addLayout(info_layout)
 
         layout.addStretch()
 
-        # Icono de logout (campana eliminada)
+        # Icono de logout 
         self.btn_logout = QPushButton("🚪")
         self.btn_logout.setObjectName("topBarButton")
         self.btn_logout.setToolTip("Cerrar Sesión")
@@ -691,8 +678,9 @@ class VentanaPrincipal(QMainWindow):
 
         return widget
 
+
     def crear_panel_navegacion(self):
-        """Crea el panel de navegación izquierdo naranja."""
+        """Crea el panel de navegación izquierdo."""
         panel = QWidget()
         panel.setObjectName("navBar")
         panel.setFixedWidth(200)
@@ -700,52 +688,93 @@ class VentanaPrincipal(QMainWindow):
         layout.setContentsMargins(0, 10, 0, 10)
         layout.setSpacing(5)
 
-        # Botones de Navegación (Añadidos nuevos, eliminado "Alumnos y Cursos")
+        # Contenedor para el botón de Menú
+        menu_frame = QFrame()
+        menu_layout = QVBoxLayout(menu_frame)
+        menu_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Botón de Inicio (siempre visible)
         self.btn_nav_inicio = QPushButton("🏠  Inicio")
+        self.btn_nav_inicio.setObjectName("navButton")
+        menu_layout.addWidget(self.btn_nav_inicio)
+        
+        # Botón Menú que abrirá el QMenu
+        self.btn_menu = QPushButton("☰ Menú")
+        self.btn_menu.setObjectName("navButton")
+        self.btn_menu.clicked.connect(self.show_navigation_menu)
+        menu_layout.addWidget(self.btn_menu)
+        
+        layout.addWidget(menu_frame)
+        
+        # Spacer para empujar el menú hacia arriba y el de Configuración hacia abajo
+        spacer = QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+        layout.addItem(spacer)
+
+        # Lista completa de botones (solo se usan para el QMenu y el QStackedWidget)
         self.btn_nav_inscripcion = QPushButton("📝  Nueva Inscripción")
         self.btn_nav_pagos = QPushButton("💵  Registro de Pagos")
         self.btn_nav_lista_alumnos = QPushButton("👥  Lista de Alumnos") 
-
-        # Lista de botones base para todos los usuarios
+        self.btn_nav_gestion_cursos = QPushButton("📚  Gestionar Cursos")
+        self.btn_nav_gestion_usuarios = QPushButton("👤  Gestionar Usuarios")
+        self.btn_nav_config = QPushButton("⚙️  Configuración")
+        
         self.nav_buttons = [
-            self.btn_nav_inicio, self.btn_nav_inscripcion, self.btn_nav_pagos,
-            self.btn_nav_lista_alumnos
+            self.btn_nav_inicio, 
+            self.btn_nav_inscripcion, 
+            self.btn_nav_pagos,
+            self.btn_nav_lista_alumnos,
+            self.btn_nav_gestion_cursos,
+            self.btn_nav_gestion_usuarios,
+            self.btn_nav_config
         ]
-
-        # Añadir botones base
-        layout.addWidget(self.btn_nav_inicio)
-        layout.addWidget(self.btn_nav_inscripcion)
-        layout.addWidget(self.btn_nav_pagos)
-        layout.addWidget(self.btn_nav_lista_alumnos)
-
-        # --- SECCIÓN SOLO PARA ADMINISTRADORES ---
-        if self.user_role == "Administrador":
-            self.btn_nav_gestion_cursos = QPushButton("📚  Gestionar Cursos")
-            self.btn_nav_gestion_usuarios = QPushButton("👤  Gestionar Usuarios")
-            self.btn_nav_config = QPushButton("⚙️  Configuración")
-            
-            # Añadir a la lista de botones
-            self.nav_buttons.extend([self.btn_nav_gestion_cursos, self.btn_nav_gestion_usuarios, self.btn_nav_config])
-            
-            # Añadir al layout
-            layout.addWidget(self.btn_nav_gestion_cursos)
-            layout.addWidget(self.btn_nav_gestion_usuarios)
-            
-            layout.addStretch() # Empuja el botón de config hacia abajo
-            layout.addWidget(self.btn_nav_config)
-        else:
-            layout.addStretch() # Empuja hacia abajo
-
+        
+        # Asegurarse de que solo se muestren Inicio y Menú
+        self.btn_nav_inscripcion.setVisible(False)
+        self.btn_nav_pagos.setVisible(False)
+        self.btn_nav_lista_alumnos.setVisible(False)
+        self.btn_nav_gestion_cursos.setVisible(False)
+        self.btn_nav_gestion_usuarios.setVisible(False)
+        self.btn_nav_config.setVisible(False)
+        
         # Aplicar el mismo ObjectName a todos los botones para el estilo
         for btn in self.nav_buttons:
-            if btn: # Chequear que el botón exista (por si acaso)
+            if btn: 
                 btn.setObjectName("navButton")
 
         return panel
 
+    def show_navigation_menu(self):
+        """Muestra el menú contextual con las opciones de navegación."""
+        menu = QMenu(self)
+        
+        # Acciones principales
+        menu.addAction("📝 Nueva Inscripción", lambda: self.cambiar_pagina(1))
+        menu.addAction("💵 Registro de Pagos", lambda: self.cambiar_pagina(2))
+        menu.addAction("👥 Lista de Alumnos", lambda: self.cambiar_pagina(3))
+        
+        # Sección de Administración (solo si es Admin)
+        if self.user_role == "Administrador":
+            menu.addSeparator()
+            menu.addAction("📚 Gestionar Cursos", lambda: self.cambiar_pagina(4))
+            menu.addAction("👤 Gestionar Usuarios", lambda: self.cambiar_pagina(5))
+            menu.addSeparator()
+            menu.addAction("⚙️ Configuración", lambda: self.cambiar_pagina(6))
+            
+        # Mostrar el menú justo debajo del botón "Menú"
+        # Usamos mapToGlobal para obtener la posición global del botón
+        # Nota: Necesitas importar QPoint
+        try:
+            point = self.btn_menu.mapToGlobal(QPoint(0, self.btn_menu.height()))
+            menu.exec(point)
+        except AttributeError:
+             # Fallback si QPoint no está definido o hay error de widget
+             menu.exec(self.mapToGlobal(QPoint(0, self.height() / 2)))
+
+
     def crear_pagina_inicio(self):
         """Crea la página de bienvenida con accesos directos."""
         widget = QWidget()
+        widget.setObjectName("contentPage")
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(25, 25, 25, 25)
         layout.setSpacing(20)
@@ -812,38 +841,39 @@ class VentanaPrincipal(QMainWindow):
 
         # Resetear estilos de todos los botones principales
         for btn in self.nav_buttons:
-            if btn: # Verificar que el botón existe (para roles no-admin)
+            if btn: 
                 btn.setProperty("selected", False)
                 self.style().polish(btn)
 
         # Mapeo del índice de página a botón y carga de datos
         boton_activo = None
-        if index == 0: # Inicio
+        if index == 0: 
             self.stacked_widget.setCurrentIndex(0)
             boton_activo = self.btn_nav_inicio
-        elif index == 1: # Nueva Inscripción (Formulario)
+        elif index == 1: 
             self.stacked_widget.setCurrentIndex(1)
             boton_activo = self.btn_nav_inscripcion
-            self.cargar_combo_curso_registro() # Cargar cursos en el form
-        elif index == 2: # Pagos
+            self.cargar_combo_curso_registro() 
+        elif index == 2: 
             self.stacked_widget.setCurrentIndex(2)
             boton_activo = self.btn_nav_pagos
-            self.cargar_tabla_inscripciones_pagos() # Cargar datos
-        elif index == 3: # Lista Alumnos
+            self.cargar_tabla_inscripciones_pagos() 
+        elif index == 3: 
             self.stacked_widget.setCurrentIndex(3)
             boton_activo = self.btn_nav_lista_alumnos
-            self.cargar_tabla_alumnos() # Cargar tabla alumnos
-        elif index == 4: # Gestionar Cursos (Admin)
+            self.cargar_tabla_alumnos() 
+            self.cargar_cursos_para_filtro() 
+        elif index == 4: 
             if self.user_role == "Administrador":
                 self.stacked_widget.setCurrentIndex(4)
                 boton_activo = self.btn_nav_gestion_cursos
-                self.cargar_tabla_cursos() # Cargar tabla cursos
-        elif index == 5: # Gestionar Usuarios (Admin)
+                self.cargar_tabla_cursos() 
+        elif index == 5: 
             if self.user_role == "Administrador":
                 self.stacked_widget.setCurrentIndex(5)
                 boton_activo = self.btn_nav_gestion_usuarios
-                self.cargar_tabla_usuarios() # Cargar tabla usuarios
-        elif index == 6: # Configuración (Admin)
+                self.cargar_tabla_usuarios() 
+        elif index == 6: 
             if self.user_role == "Administrador":
                 self.stacked_widget.setCurrentIndex(6)
                 boton_activo = self.btn_nav_config
@@ -853,21 +883,6 @@ class VentanaPrincipal(QMainWindow):
             boton_activo.setProperty("selected", True)
             self.style().polish(boton_activo)
 
-
-    def iniciar_timer_reloj(self):
-        """Inicia el QTimer para actualizar la hora cada segundo."""
-        self.timer_reloj = QTimer(self)
-        self.timer_reloj.timeout.connect(self.actualizar_hora)
-        self.timer_reloj.start(1000) # 1000 ms = 1 segundo
-        self.actualizar_hora() # Llamada inicial
-
-    def actualizar_hora(self):
-        """Actualiza el texto de la etiqueta de la hora."""
-        current_time = QDateTime.currentDateTime()
-        if hasattr(self, 'lbl_fecha_top'): # Verificar si existe
-            # Usar el locale de la ventana para traducir los nombres
-            self.lbl_fecha_top.setText("Fecha: " + self.locale.toString(current_time.date(), "dddd, dd MMMM yyyy").capitalize())
-            self.lbl_hora_top.setText("Hora: " + self.locale.toString(current_time.time(), "hh:mm:ss ap"))
 
     def cerrar_sesion(self):
         """Cierra la sesión y vuelve al login."""
@@ -879,15 +894,15 @@ class VentanaPrincipal(QMainWindow):
         """Crea la interfaz para la página de NUEVA INSCRIPCIÓN (Formulario detallado)."""
         widget = QWidget()
         widget.setObjectName("contentPage")
-        layout_principal = QVBoxLayout(widget) # Layout principal para la página
+        layout_principal = QVBoxLayout(widget) 
         layout_principal.setContentsMargins(15, 15, 15, 15)
 
-        scroll_area = QScrollArea() # Área de scroll para el formulario largo
+        scroll_area = QScrollArea() 
         scroll_area.setWidgetResizable(True)
 
         # Widget contenedor para el layout dentro del scroll
         scroll_content_widget = QWidget()
-        layout_nuevo_alumno = QVBoxLayout(scroll_content_widget) # Layout dentro del scroll
+        layout_nuevo_alumno = QVBoxLayout(scroll_content_widget) 
 
         # -- Grupo Datos del Alumno --
         group_alumno = QGroupBox("Datos del Alumno")
@@ -897,19 +912,19 @@ class VentanaPrincipal(QMainWindow):
         self.entry_al_nombres = QLineEdit()
         self.entry_al_escuela_procedencia = QLineEdit()
         self.entry_al_escuela_ingresar = QLineEdit()
-        self.entry_al_edad = QLineEdit() # QLineEdit para validar como número
+        self.entry_al_edad = QLineEdit() 
         self.entry_al_telefono = QLineEdit()
         self.entry_al_email = QLineEdit()
         self.combo_al_turno = QComboBox()
         self.combo_al_turno.addItems(["Matutino", "Vespertino"])
 
-        self.combo_curso_registro = QComboBox() # Combo para el curso
-        self.combo_tipo_pago_registro = QComboBox() # NUEVO COMBO para plan de pago
-        self.lbl_costo_total_registro = QLabel("$ 0.00") # NUEVO LABEL para costo total
+        self.combo_curso_registro = QComboBox() 
+        self.combo_tipo_pago_registro = QComboBox() 
+        self.lbl_costo_total_registro = QLabel("$ 0.00") 
         self.lbl_costo_total_registro.setStyleSheet("font-weight: bold; color: #4CAF50; font-size: 11pt;")
 
         self.check_autoriza_salida = QCheckBox("Autoriza que el alumno se retire solo del plantel")
-        self.check_imprimir_poliza = QCheckBox("Imprimir Póliza de Garantía y Términos y Condiciones") # NUEVO CHECKBOX
+        self.check_imprimir_poliza = QCheckBox("Imprimir Póliza de Garantía y Términos y Condiciones") 
 
         form_alumno.addRow("Apellido Paterno:", self.entry_al_ap_paterno)
         form_alumno.addRow("Apellido Materno:", self.entry_al_ap_materno)
@@ -923,10 +938,10 @@ class VentanaPrincipal(QMainWindow):
         form_alumno.addRow("Curso a Inscribir:", self.combo_curso_registro)
         form_alumno.addRow("Plan de Pago:", self.combo_tipo_pago_registro)
         form_alumno.addRow("Costo Total:", self.lbl_costo_total_registro)
-        form_alumno.addRow("", self.check_autoriza_salida) # Sin etiqueta, solo el checkbox
-        form_alumno.addRow("", self.check_imprimir_poliza) # NUEVO
+        form_alumno.addRow("", self.check_autoriza_salida) 
+        form_alumno.addRow("", self.check_imprimir_poliza) 
         layout_nuevo_alumno.addWidget(group_alumno)
-        
+    
         # Conectar señales
         self.combo_curso_registro.currentIndexChanged.connect(self.actualizar_opciones_pago)
         self.combo_tipo_pago_registro.currentIndexChanged.connect(self.actualizar_costo_total_label)
@@ -995,11 +1010,10 @@ class VentanaPrincipal(QMainWindow):
         # Botón de Guardar e Imprimir
         self.btn_guardar_alumno = QPushButton("Imprimir Ficha de Inscripción")
         self.btn_guardar_alumno.setObjectName("primaryButton")
-        # Conectar al método que ahora guarda E inscribe
         self.btn_guardar_alumno.clicked.connect(self.registrar_alumno_e_inscribir)
         layout_nuevo_alumno.addWidget(self.btn_guardar_alumno)
 
-        layout_nuevo_alumno.addStretch() # Empuja el botón hacia arriba si hay espacio
+        layout_nuevo_alumno.addStretch() 
 
         # Establecer el widget con el layout en el scroll area
         scroll_area.setWidget(scroll_content_widget)
@@ -1007,22 +1021,27 @@ class VentanaPrincipal(QMainWindow):
         # Añadir el scroll area al layout principal de la página
         layout_principal.addWidget(scroll_area)
 
+        
         return widget
 
     # ---- PÁGINA 2: REGISTRO DE PAGOS ----
-    # ... (código sin cambios) ...
     def crear_pagina_pagos(self):
         """Crea la interfaz para la página de registro de pagos."""
         main_layout = QHBoxLayout()
         widget = QWidget()
         widget.setObjectName("contentPage")
-        widget.setContentsMargins(15, 15, 15, 15) # Añadir padding
+        widget.setContentsMargins(15, 15, 15, 15) 
 
         # Lado izquierdo: Registrar Pago
         left_panel = QGroupBox("Registrar Nuevo Pago")
         left_layout = QFormLayout()
-
+        
+        # --- ELIMINADO EL CAMPO DE BÚSQUEDA ---
+        
+        # El combo box ahora es la lista filtrada por la entrada de búsqueda
         self.combo_inscripcion_pago = QComboBox()
+        self.combo_inscripcion_pago.setPlaceholderText("--- Seleccione una inscripción ---")
+        
         self.lbl_pago_total = QLabel("$ 0.00")
         self.lbl_pago_pagado = QLabel("$ 0.00")
         self.lbl_pago_pendiente = QLabel("$ 0.00")
@@ -1038,8 +1057,9 @@ class VentanaPrincipal(QMainWindow):
         self.combo_metodo_pago.addItems(["Efectivo", "Transferencia", "Tarjeta de Débito", "Tarjeta de Crédito"])
 
         self.btn_registrar_pago = QPushButton("Registrar Pago")
-        self.btn_registrar_pago.setObjectName("primaryButton") # Estilo primario
+        self.btn_registrar_pago.setObjectName("primaryButton") 
 
+        # Se usa el QComboBox estándar como única forma de selección
         left_layout.addRow(QLabel("Inscripción (Alumno - Curso):"), self.combo_inscripcion_pago)
         left_layout.addRow(QLabel("Monto Total:"), self.lbl_pago_total)
         left_layout.addRow(QLabel("Monto Pagado:"), self.lbl_pago_pagado)
@@ -1066,11 +1086,12 @@ class VentanaPrincipal(QMainWindow):
         # Conexiones
         self.combo_inscripcion_pago.currentIndexChanged.connect(self.actualizar_detalles_pago)
         self.btn_registrar_pago.clicked.connect(self.registrar_pago)
+        
+        self.cargar_cache_inscripciones() 
 
         return widget
 
     # ---- PÁGINA 3: LISTA DE ALUMNOS ----
-    # ... (código sin cambios) ...
     def crear_pagina_lista_alumnos(self):
         """Crea la interfaz para la página que muestra la lista de alumnos."""
         widget = QWidget()
@@ -1084,38 +1105,52 @@ class VentanaPrincipal(QMainWindow):
         group_tabla = QGroupBox("Lista de Alumnos Registrados")
         layout_tabla = QVBoxLayout(group_tabla)
 
-        self.tabla_alumnos = QTableWidget(0, 5) # ID, Nombre, Apellido, Email, Teléfono
-        self.tabla_alumnos.setHorizontalHeaderLabels(["ID", "Nombre(s)", "Ap. Paterno", "Ap. Materno", "Email"])
+        # --- NUEVO: FILTRO DE CURSO ---
+        filter_layout = QHBoxLayout()
+        filter_label = QLabel("Filtrar por Curso:")
+        self.combo_filtro_curso = QComboBox()
+        self.combo_filtro_curso.setMinimumWidth(250)
+        
+        filter_layout.addWidget(filter_label)
+        filter_layout.addWidget(self.combo_filtro_curso)
+        filter_layout.addStretch()
+        layout_tabla.addLayout(filter_layout)
+        # --- FIN NUEVO: FILTRO DE CURSO ---
+        
+        self.tabla_alumnos = QTableWidget(0, 6) # Modificado a 6 columnas: ID, Nombre, ApellidoP, ApellidoM, Email, Curso
+        self.tabla_alumnos.setHorizontalHeaderLabels(["ID", "Nombre(s)", "Ap. Paterno", "Ap. Materno", "Email", "Curso Inscrito"])
         self.tabla_alumnos.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.tabla_alumnos.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.tabla_alumnos.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.tabla_alumnos.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        # Conectar la selección al método para mostrar expediente
         self.tabla_alumnos.itemSelectionChanged.connect(self.mostrar_expediente_alumno)
 
         layout_tabla.addWidget(self.tabla_alumnos)
-        layout_principal.addWidget(group_tabla, 2) # Darle más espacio a la tabla (2/3)
+        layout_principal.addWidget(group_tabla, 2) 
 
         # Panel Derecho: Expediente y Botón
         panel_derecho = QWidget()
         layout_derecho = QVBoxLayout(panel_derecho)
-        layout_derecho.setContentsMargins(0,0,0,0) # Sin márgenes extra
+        layout_derecho.setContentsMargins(0,0,0,0) 
 
         group_expediente = QGroupBox("Expediente del Alumno")
         layout_expediente = QVBoxLayout(group_expediente)
         self.expediente_texto = QTextEdit()
         self.expediente_texto.setReadOnly(True)
-        self.expediente_texto.setObjectName("expedienteDisplay") # Para estilo opcional
+        self.expediente_texto.setObjectName("expedienteDisplay") 
         layout_expediente.addWidget(self.expediente_texto)
 
         self.btn_dar_baja = QPushButton("Dar de Baja Alumno Seleccionado")
-        self.btn_dar_baja.setObjectName("deleteButton") # Estilo específico para borrar
+        self.btn_dar_baja.setObjectName("deleteButton") 
         self.btn_dar_baja.clicked.connect(self.dar_baja_alumno)
 
         layout_derecho.addWidget(group_expediente)
         layout_derecho.addWidget(self.btn_dar_baja)
 
-        layout_principal.addWidget(panel_derecho, 1) # Darle 1/3 del espacio
+        layout_principal.addWidget(panel_derecho, 1) 
+
+        # Conectar el filtro
+        self.combo_filtro_curso.currentIndexChanged.connect(self.filtrar_alumnos_por_curso)
 
         return widget
 
@@ -1139,7 +1174,7 @@ class VentanaPrincipal(QMainWindow):
         self.spin_costo_sem_15 = QDoubleSpinBox()
         self.spin_costo_sem_15.setRange(0.0, 100000.0)
         self.spin_costo_sem_15.setPrefix("$ ")
-        self.spin_costo_sem_12 = QDoubleSpinBox() # CAMBIO DE 16 a 12
+        self.spin_costo_sem_12 = QDoubleSpinBox() 
         self.spin_costo_sem_12.setRange(0.0, 100000.0)
         self.spin_costo_sem_12.setPrefix("$ ")
         self.spin_costo_mensual_3 = QDoubleSpinBox()
@@ -1149,7 +1184,7 @@ class VentanaPrincipal(QMainWindow):
         form_cursos.addRow(QLabel("Nombre del Curso:"), self.entry_cur_nombre)
         form_cursos.addRow(QLabel("Costo (Exhibición Única):"), self.spin_costo_exhibicion)
         form_cursos.addRow(QLabel("Costo Total (15 Semanas):"), self.spin_costo_sem_15)
-        form_cursos.addRow(QLabel("Costo Total (12 Semanas):"), self.spin_costo_sem_12) # CAMBIO DE 16 a 12
+        form_cursos.addRow(QLabel("Costo Total (12 Semanas):"), self.spin_costo_sem_12) 
         form_cursos.addRow(QLabel("Costo Total (3 Meses):"), self.spin_costo_mensual_3)
         
         self.btn_guardar_curso = QPushButton("Guardar Curso")
@@ -1168,11 +1203,12 @@ class VentanaPrincipal(QMainWindow):
         layout_form.addLayout(layout_botones_form)
         layout_form.addStretch()
 
+        
         # Panel Derecho: Tabla de Cursos
         panel_cursos_tabla = QGroupBox("Lista de Cursos")
         layout_cursos_tabla = QVBoxLayout(panel_cursos_tabla)
-        self.tabla_cursos = QTableWidget(0, 6) # Columnas aumentadas
-        self.tabla_cursos.setHorizontalHeaderLabels(["ID", "Curso", "Exhibición", "Sem 15", "Sem 12", "Mensual 3"]) # CAMBIO DE 16 a 12
+        self.tabla_cursos = QTableWidget(0, 6) 
+        self.tabla_cursos.setHorizontalHeaderLabels(["ID", "Curso", "Exhibición", "Sem 15", "Sem 12", "Mensual 3"]) 
         self.tabla_cursos.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.tabla_cursos.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.tabla_cursos.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -1180,16 +1216,17 @@ class VentanaPrincipal(QMainWindow):
         self.tabla_cursos.itemSelectionChanged.connect(self.seleccionar_curso_para_edicion)
         
         self.btn_eliminar_curso = QPushButton("Eliminar Curso Seleccionado")
-        self.btn_eliminar_curso.setObjectName("deleteButton")
+        self.btn_eliminar_curso.setObjectName("deleteButton") 
         self.btn_eliminar_curso.clicked.connect(self.dar_baja_curso)
 
         layout_cursos_tabla.addWidget(self.tabla_cursos)
         layout_cursos_tabla.addWidget(self.btn_eliminar_curso)
 
         layout_main.addWidget(panel_cursos_form)
-        layout_main.addWidget(panel_cursos_tabla, 1) # Dar más espacio a la tabla
+        layout_main.addWidget(panel_cursos_tabla, 1) 
         
         return widget
+    
         
     # ---- PÁGINA 5: GESTIONAR USUARIOS (NUEVA CON EDICIÓN) ----
     def crear_pagina_gestion_usuarios(self):
@@ -1218,16 +1255,16 @@ class VentanaPrincipal(QMainWindow):
         # Botones de acción del formulario
         self.btn_guardar_usuario = QPushButton("Guardar Usuario")
         self.btn_guardar_usuario.setObjectName("primaryButton")
-        self.btn_guardar_usuario.clicked.connect(self.guardar_usuario) # Conectar a nueva función unificada
+        self.btn_guardar_usuario.clicked.connect(self.guardar_usuario) 
 
         self.btn_limpiar_form_usuario = QPushButton("Limpiar Formulario")
-        self.btn_limpiar_form_usuario.setObjectName("secondaryButton") # Estilo secundario
+        self.btn_limpiar_form_usuario.setObjectName("secondaryButton") 
         self.btn_limpiar_form_usuario.clicked.connect(self.limpiar_campos_usuario)
 
         self.btn_cambiar_password = QPushButton("Cambiar Contraseña")
-        self.btn_cambiar_password.setObjectName("secondaryButton") # Estilo secundario
+        self.btn_cambiar_password.setObjectName("secondaryButton") 
         self.btn_cambiar_password.clicked.connect(self.cambiar_password_usuario)
-        self.btn_cambiar_password.setVisible(False) # Oculto al inicio
+        self.btn_cambiar_password.setVisible(False) 
 
         layout_botones_form = QHBoxLayout()
         layout_botones_form.addWidget(self.btn_guardar_usuario)
@@ -1236,7 +1273,7 @@ class VentanaPrincipal(QMainWindow):
         layout_form.addLayout(form_usuario)
         layout_form.addLayout(layout_botones_form)
         layout_form.addWidget(self.btn_cambiar_password)
-        layout_form.addStretch() # Empujar hacia arriba
+        layout_form.addStretch() 
         
         # Panel Derecho: Tabla de Usuarios
         panel_usuario_tabla = QGroupBox("Lista de Usuarios")
@@ -1247,18 +1284,17 @@ class VentanaPrincipal(QMainWindow):
         self.tabla_usuarios.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.tabla_usuarios.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.tabla_usuarios.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        # Conectar clic en tabla para editar
         self.tabla_usuarios.itemSelectionChanged.connect(self.seleccionar_usuario_para_edicion)
         
         self.btn_eliminar_usuario = QPushButton("Eliminar Usuario Seleccionado")
-        self.btn_eliminar_usuario.setObjectName("deleteButton") # Estilo de borrado
+        self.btn_eliminar_usuario.setObjectName("deleteButton") 
         self.btn_eliminar_usuario.clicked.connect(self.dar_baja_usuario)
 
         layout_usuario_tabla.addWidget(self.tabla_usuarios)
         layout_usuario_tabla.addWidget(self.btn_eliminar_usuario)
 
         layout_main.addWidget(panel_usuario_form)
-        layout_main.addWidget(panel_usuario_tabla, 1) # Dar más espacio a la tabla
+        layout_main.addWidget(panel_usuario_tabla, 1) 
         
         return widget
 
@@ -1270,11 +1306,11 @@ class VentanaPrincipal(QMainWindow):
         layout_principal = QVBoxLayout(widget)
         layout_principal.setContentsMargins(15, 15, 15, 15)
         layout_principal.setSpacing(20)
-        layout_principal.setAlignment(Qt.AlignmentFlag.AlignTop) # Alinear al top
+        layout_principal.setAlignment(Qt.AlignmentFlag.AlignTop) 
 
         # --- Grupo Apariencia ---
         group_apariencia = QGroupBox("Apariencia de la Aplicación")
-        group_apariencia.setMaximumWidth(400) # Limitar ancho
+        group_apariencia.setMaximumWidth(400) 
         form_apariencia = QFormLayout(group_apariencia)
 
         # Combo para Tema (Claro/Oscuro)
@@ -1300,7 +1336,7 @@ class VentanaPrincipal(QMainWindow):
 
         # --- Grupo Reloj ---
         group_reloj = QGroupBox("Configuración de Hora")
-        group_reloj.setMaximumWidth(400) # Limitar ancho
+        group_reloj.setMaximumWidth(400) 
         form_reloj = QFormLayout(group_reloj)
         
         lbl_zona_horaria = QLabel("Próximamente: Ajuste de Zona Horaria / Formato 12h/24h.")
@@ -1309,28 +1345,53 @@ class VentanaPrincipal(QMainWindow):
         
         layout_principal.addWidget(group_reloj)
 
-        # layout_principal.addStretch() # Quitar stretch para que se queden arriba
         return widget
 
 
     # --- NUEVAS FUNCIONES ---
+    def cargar_cursos_para_filtro(self):
+        """Carga los cursos en el combo de filtro de la página de alumnos."""
+        if not hasattr(self, 'combo_filtro_curso'): return
+        
+        self.combo_filtro_curso.clear()
+        
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT id, nombre_curso FROM cursos ORDER BY nombre_curso")
+                cursos = cursor.fetchall()
+                
+            self.combo_filtro_curso.addItem("--- Todos los Alumnos ---", userData=None)
+            
+            for curso in cursos:
+                # Almacenar el ID del curso como UserData
+                self.combo_filtro_curso.addItem(curso['nombre_curso'], userData=curso['id'])
+
+        except sqlite3.Error as e:
+            mostrar_error(f"Error al cargar cursos para filtro: {e}")
+        except AttributeError:
+            pass # Ignorar si el widget aún no está listo
+
+    def filtrar_alumnos_por_curso(self, index):
+        """Maneja el cambio en el combo de filtro y recarga la tabla de alumnos."""
+        # El UserData es el ID del curso o None para "Todos"
+        curso_id = self.combo_filtro_curso.itemData(index)
+        self.cargar_tabla_alumnos(curso_id=curso_id)
+
     def mostrar_expediente_alumno(self):
         """Muestra los detalles completos del alumno seleccionado en la tabla."""
-        # Asegurarse que el widget expediente_texto existe
         if not hasattr(self, 'expediente_texto'):
             return
 
         selected_items = self.tabla_alumnos.selectedItems()
-        if not selected_items:
+        
+        # Corrección: Limpiar el expediente si no hay elementos seleccionados
+        if not selected_items or self.tabla_alumnos.currentRow() < 0:
             self.expediente_texto.clear()
             return
 
-        selected_row = self.tabla_alumnos.currentRow()
-        if selected_row < 0: # Asegurarse de que hay una fila seleccionada
-             self.expediente_texto.clear()
-             return
-
-        alumno_id_item = self.tabla_alumnos.item(selected_row, 0) # ID está en la columna 0
+        # El ID se encuentra en la columna 0
+        alumno_id_item = self.tabla_alumnos.item(self.tabla_alumnos.currentRow(), 0) 
 
         if not alumno_id_item:
             self.expediente_texto.clear()
@@ -1338,9 +1399,7 @@ class VentanaPrincipal(QMainWindow):
 
         try:
             alumno_id = int(alumno_id_item.text())
-            # Usar la nueva función de conexión
             with get_db_connection() as conn:
-                # conn.row_factory ya está configurado en get_db_connection
                 cursor = conn.cursor()
                 cursor.execute("SELECT * FROM alumnos WHERE id = ?", (alumno_id,))
                 datos = cursor.fetchone()
@@ -1371,23 +1430,21 @@ class VentanaPrincipal(QMainWindow):
                 <b>1:</b> {datos['emerg_1_nombre']} ({datos['emerg_1_parentesco']}) - Tel: {datos['emerg_1_telefono']}<br>
                 <b>2:</b> {datos['emerg_2_nombre']} ({datos['emerg_2_parentesco']}) - Tel: {datos['emerg_2_telefono']}<br>
                 """
-                self.expediente_texto.setHtml(expediente_str) # Usar setHtml para formato
+                self.expediente_texto.setHtml(expediente_str) 
             else:
                 self.expediente_texto.setText("No se encontraron datos para el alumno seleccionado.")
 
         except ValueError:
             self.expediente_texto.setText("Error: ID de alumno inválido.")
         except sqlite3.Error as e:
-            mostrar_error(f"Error al buscar expediente: {e}") # Usar la función global
+            mostrar_error(f"Error al buscar expediente: {e}") 
             self.expediente_texto.clear()
         except Exception as e:
-             mostrar_error(f"Error inesperado al mostrar expediente: {e}") # Usar la función global
-             self.expediente_texto.clear()
+             mostrar_error(f"Error inesperado al mostrar expediente: {e}") 
 
 
     def dar_baja_alumno(self):
         """Elimina al alumno seleccionado de la base de datos."""
-        # Asegurarse que los widgets necesarios existen
         if not hasattr(self, 'tabla_alumnos') or not hasattr(self, 'expediente_texto'):
             return
 
@@ -1402,8 +1459,8 @@ class VentanaPrincipal(QMainWindow):
             return
 
         alumno_id_item = self.tabla_alumnos.item(selected_row, 0)
-        nombre_item = self.tabla_alumnos.item(selected_row, 1) # Nombre(s)
-        ap_paterno_item = self.tabla_alumnos.item(selected_row, 2) # Apellido Paterno
+        nombre_item = self.tabla_alumnos.item(selected_row, 1) 
+        ap_paterno_item = self.tabla_alumnos.item(selected_row, 2) 
 
         if not alumno_id_item or not nombre_item or not ap_paterno_item:
             mostrar_error("No se pudo obtener la información completa del alumno seleccionado.")
@@ -1418,15 +1475,12 @@ class VentanaPrincipal(QMainWindow):
                                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
 
             if reply == QMessageBox.StandardButton.Yes:
-                 # Usar la nueva función de conexión
                 with get_db_connection() as conn:
                     cursor = conn.cursor()
-                    # El PRAGMA ya se ejecutó en get_db_connection
 
-                    # --- BORRADO MANUAL EN CASCADA ---
                     # 1. Obtener IDs de inscripciones del alumno
                     cursor.execute("SELECT id FROM inscripciones WHERE alumno_id = ?", (alumno_id,))
-                    inscripciones_ids_tuples = cursor.fetchall() # Obtiene lista de tuplas/rows
+                    inscripciones_ids_tuples = cursor.fetchall() 
                     # Convertir lista de Rows a lista de IDs
                     inscripciones_ids = [row['id'] for row in inscripciones_ids_tuples]
 
@@ -1446,110 +1500,158 @@ class VentanaPrincipal(QMainWindow):
                     conn.commit()
 
                 mostrar_info(f"Alumno {nombre_completo} (ID: {alumno_id}) dado de baja exitosamente.")
-                self.cargar_tabla_alumnos() # Recargar la tabla
-                self.expediente_texto.clear() # Limpiar el expediente
-                # También recargar combos en otras páginas donde aparezcan alumnos
+                self.cargar_tabla_alumnos() 
+                self.expediente_texto.clear() 
                 self.cargar_tabla_inscripciones_pagos()
 
         except ValueError:
             mostrar_error("Error: ID de alumno inválido.")
         except sqlite3.Error as e:
             mostrar_error(f"Error al dar de baja al alumno: {e}")
-            print(f"--- SQLITE ERROR DETAILED: {e} ---") # Keep detailed console log
+            print(f"--- SQLITE ERROR DETAILED: {e} ---") 
             traceback.print_exc()
         except Exception as e:
              mostrar_error(f"Error inesperado al dar de baja: {e}")
-             print(f"--- UNEXPECTED ERROR DETAILED: {e} ---") # Keep detailed console log
+             print(f"--- UNEXPECTED ERROR DETAILED: {e} ---") 
              traceback.print_exc()
 
 
     # --- Métodos de carga y registro (MODIFICADOS) ---
 
-    def cargar_tabla_inscripciones_pagos(self):
-        """Carga las inscripciones pendientes en el combo de pagos."""
-        try: # Añadir Try/Except por si self.combo_inscripcion_pago no existe al inicio
-            if hasattr(self, 'combo_inscripcion_pago'):
-                current_user_data = self.combo_inscripcion_pago.currentData() # Guardar selección actual
-                self.combo_inscripcion_pago.clear()
-                 # Usar la nueva función de conexión
-                with get_db_connection() as conn:
-                    cursor = conn.cursor()
-                    query = """
-                    SELECT
-                        i.id, i.monto_total, i.monto_pagado,
-                        a.nombres, a.apellido_paterno, a.apellido_materno,
-                        c.nombre_curso
-                    FROM inscripciones i
-                    JOIN alumnos a ON i.alumno_id = a.id
-                    JOIN cursos c ON i.curso_id = c.id
-                    WHERE i.estado != 'Pagado'
-                    ORDER BY a.apellido_paterno, c.nombre_curso
-                    """
-                    cursor.execute(query)
-                    inscripciones = cursor.fetchall()
-
-                    self.combo_inscripcion_pago.addItem("--- Seleccione una inscripción ---", userData=None)
-                    found_index = -1
-                    for index, inscripcion in enumerate(inscripciones): # Usar row factory
-                        insc_id = inscripcion['id']
-                        total = inscripcion['monto_total']
-                        pagado = inscripcion['monto_pagado']
-                        nombres = inscripcion['nombres']
-                        ap_paterno = inscripcion['apellido_paterno']
-                        ap_materno = inscripcion['apellido_materno']
-                        cur_nombre = inscripcion['nombre_curso']
-
-                        texto = f"{ap_paterno} {ap_materno}, {nombres} - {cur_nombre} (Pendiente: ${total-pagado:.2f})"
-                        user_data = (insc_id, total, pagado)
-                        self.combo_inscripcion_pago.addItem(texto, userData=user_data)
-                        if current_user_data and current_user_data[0] == insc_id: # Si coincide el ID de inscripción
-                            found_index = index + 1 # +1 por el item inicial
-
-                    if found_index != -1:
-                        self.combo_inscripcion_pago.setCurrentIndex(found_index) # Restaurar selección
-                    else:
-                         self.actualizar_detalles_pago() # Si no se encontró, actualizar (limpiar)
-
+    def cargar_cache_inscripciones(self):
+        """Carga TODAS las inscripciones (Pagadas, Parciales, Pendientes) en una caché local."""
+        self._inscripciones_cache = []
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                # Consulta SQL modificada para INCLUIR TODAS las inscripciones, incluyendo el estado 'Pagado'.
+                query = """
+                SELECT
+                    i.id, i.monto_total, i.monto_pagado, i.estado,
+                    a.nombres, a.apellido_paterno, a.apellido_materno,
+                    c.nombre_curso
+                FROM inscripciones i
+                JOIN alumnos a ON i.alumno_id = a.id
+                LEFT JOIN cursos c ON i.curso_id = c.id
+                ORDER BY a.apellido_paterno, c.nombre_curso
+                """
+                cursor.execute(query)
+                inscripciones = cursor.fetchall()
+                
+            for inscripcion in inscripciones:
+                # Calcular el saldo pendiente y crear el texto de visualización
+                total = inscripcion['monto_total']
+                pagado = inscripcion['monto_pagado']
+                pendiente = total - pagado
+                estado = inscripcion['estado']
+                
+                # Formato del texto: APELLIDO, NOMBRE - CURSO (Estado o Pendiente)
+                if estado == 'Pagado':
+                    status_text = "(Pagado)"
+                elif estado == 'Pendiente':
+                    status_text = f"(Pendiente: ${pendiente:.2f})"
+                else: # Parcial
+                    status_text = f"(Parcial: ${pendiente:.2f})"
+                
+                texto_completo = f"{inscripcion['apellido_paterno']} {inscripcion['apellido_materno']}, {inscripcion['nombres']} - {inscripcion['nombre_curso']} {status_text}"
+                
+                self._inscripciones_cache.append({
+                    'id': inscripcion['id'],
+                    'data': (inscripcion['id'], total, pagado),
+                    'display_text': texto_completo,
+                    'search_keys': texto_completo.lower() # Texto para búsqueda rápida
+                })
         except sqlite3.Error as e:
-            mostrar_error(f"Error al cargar inscripciones para pagos: {e}")
-        except AttributeError:
-             pass # El combo aún no existe, no hacer nada
+            mostrar_error(f"Error al cargar la caché de inscripciones: {e}")
+            
+        self.actualizar_combo_desde_cache()
+    
+    # ELIMINADO: La función de búsqueda se elimina si el campo de búsqueda ya no está
+    # def buscar_inscripcion(self, search_term):
+    #     """Filtra el QComboBox de inscripciones usando la caché local."""
+    #     search_term = search_term.lower().strip()
+        
+    #     if not search_term:
+    #         self.actualizar_combo_desde_cache(self._inscripciones_cache)
+    #         return
+
+    #     filtered_results = [
+    #         item for item in self._inscripciones_cache
+    #         if search_term in item['search_keys']
+    #     ]
+        
+    #     self.actualizar_combo_desde_cache(filtered_results)
+    
+    def actualizar_combo_desde_cache(self, items_to_display=None):
+        """
+        Rellena el QComboBox con los resultados filtrados o toda la caché.
+        """
+        if items_to_display is None:
+            items_to_display = self._inscripciones_cache
+            
+        self.combo_inscripcion_pago.blockSignals(True) # Evitar que dispare currentIndexChanged
+        self.combo_inscripcion_pago.clear()
+        self.combo_inscripcion_pago.addItem("--- Seleccione una inscripción ---", userData=None)
+        
+        for item in items_to_display:
+            self.combo_inscripcion_pago.addItem(item['display_text'], userData=item['data'])
+            
+        self.combo_inscripcion_pago.blockSignals(False)
+        self.actualizar_detalles_pago() # Para limpiar los detalles si no hay selección
+
+
+    def cargar_tabla_inscripciones_pagos(self):
+        """Recarga la caché de inscripciones y actualiza el combo."""
+        # Esta función ahora solo llama a cargar_cache_inscripciones
+        self.cargar_cache_inscripciones()
 
 
     def actualizar_detalles_pago(self):
         """Actualiza los labels y la tabla de historial cuando se selecciona una inscripción."""
-        try: # Añadir Try/Except
+        try: 
             if hasattr(self, 'combo_inscripcion_pago'):
                 data = self.combo_inscripcion_pago.currentData()
 
                 if not data:
-                    # Asegurarse que los widgets existen antes de modificarlos
                     if hasattr(self, 'lbl_pago_total'): self.lbl_pago_total.setText("$ 0.00")
                     if hasattr(self, 'lbl_pago_pagado'): self.lbl_pago_pagado.setText("$ 0.00")
                     if hasattr(self, 'lbl_pago_pendiente'): self.lbl_pago_pendiente.setText("$ 0.00")
                     if hasattr(self, 'spin_monto_pago'): self.spin_monto_pago.setValue(0.0)
                     if hasattr(self, 'tabla_historial_pagos'): self.tabla_historial_pagos.setRowCount(0)
+                    
+                    if hasattr(self, 'spin_monto_pago'): self.spin_monto_pago.setEnabled(False)
+                    if hasattr(self, 'btn_registrar_pago'): self.btn_registrar_pago.setEnabled(False)
+                    
                     return
 
                 insc_id, total, pagado = data
                 pendiente = total - pagado
+                
+                # Deshabilitar el monto a pagar si ya está saldado
+                if pendiente <= 0.001:
+                    self.spin_monto_pago.setValue(0.00)
+                    self.spin_monto_pago.setEnabled(False)
+                    self.btn_registrar_pago.setEnabled(False)
+                else:
+                    self.spin_monto_pago.setValue(max(0.01, pendiente))
+                    self.spin_monto_pago.setEnabled(True)
+                    self.btn_registrar_pago.setEnabled(True)
+
 
                 if hasattr(self, 'lbl_pago_total'): self.lbl_pago_total.setText(f"$ {total:.2f}")
                 if hasattr(self, 'lbl_pago_pagado'): self.lbl_pago_pagado.setText(f"$ {pagado:.2f}")
                 if hasattr(self, 'lbl_pago_pendiente'): self.lbl_pago_pendiente.setText(f"$ {pendiente:.2f}")
-                if hasattr(self, 'spin_monto_pago'): self.spin_monto_pago.setValue(max(0.01, pendiente))
 
                 # Cargar historial de pagos
                 self.cargar_historial_pagos(insc_id)
         except AttributeError:
-             pass # Widgets aún no existen
+             pass 
 
     def cargar_historial_pagos(self, inscripcion_id):
         """Rellena la tabla con el historial de pagos de una inscripción."""
-        try: # Añadir Try/Except
+        try: 
             if hasattr(self, 'tabla_historial_pagos'):
                 self.tabla_historial_pagos.setRowCount(0)
-                 # Usar la nueva función de conexión
                 with get_db_connection() as conn:
                     cursor = conn.cursor()
                     cursor.execute("""
@@ -1562,7 +1664,7 @@ class VentanaPrincipal(QMainWindow):
                     pagos = cursor.fetchall()
 
                     self.tabla_historial_pagos.setRowCount(len(pagos))
-                    for row, pago in enumerate(pagos): # Acceder por nombre
+                    for row, pago in enumerate(pagos): 
                         self.tabla_historial_pagos.setItem(row, 0, QTableWidgetItem(pago['fecha_pago']))
                         item_monto = QTableWidgetItem(f"$ {pago['monto']:.2f}")
                         item_monto.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -1572,7 +1674,7 @@ class VentanaPrincipal(QMainWindow):
         except sqlite3.Error as e:
             mostrar_error(f"Error al cargar historial de pagos: {e}")
         except AttributeError:
-            pass # Tabla aún no existe
+            pass 
 
     def registrar_pago(self):
         """Registra un nuevo pago en la BD."""
@@ -1589,9 +1691,9 @@ class VentanaPrincipal(QMainWindow):
             return
 
         saldo_pendiente = monto_total - monto_pagado_actual
-        if monto_a_pagar > saldo_pendiente + 0.001: # Añadir tolerancia pequeña para floats
+        if monto_a_pagar > saldo_pendiente + 0.001: 
              reply = QMessageBox.question(self, "Confirmar Sobrepago",
-                                             f"El monto a pagar (${monto_a_pagar:.2f}) es mayor al saldo pendiente (${saldo_pendiente:.2f}).\n¿Desea continuar?",
+                                         f"El monto a pagar (${monto_a_pagar:.2f}) es mayor al saldo pendiente (${saldo_pendiente:.2f}).\n¿Desea continuar?",
                                              QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
              if reply == QMessageBox.StandardButton.No:
                  return
@@ -1601,14 +1703,19 @@ class VentanaPrincipal(QMainWindow):
         metodo_pago = self.combo_metodo_pago.currentText()
 
         nuevo_monto_pagado = monto_pagado_actual + monto_a_pagar
-        # Comparar con una pequeña tolerancia
-        nuevo_estado = 'Pagado' if nuevo_monto_pagado >= monto_total - 0.001 else 'Parcial'
+        
+        # Lógica para determinar el nuevo estado
+        if nuevo_monto_pagado >= monto_total - 0.001:
+            nuevo_estado = 'Pagado'
+        elif nuevo_monto_pagado > 0:
+            nuevo_estado = 'Parcial'
+        else:
+            nuevo_estado = 'Pendiente'
+
 
         try:
-             # Usar la nueva función de conexión
             with get_db_connection() as conn:
                 cursor = conn.cursor()
-                # El PRAGMA ya se ejecutó
 
                 # 1. Insertar en la tabla de pagos
                 cursor.execute("""
@@ -1628,7 +1735,7 @@ class VentanaPrincipal(QMainWindow):
                 mostrar_info("Pago registrado exitosamente.")
 
                 # Recargar todo
-                self.cargar_tabla_inscripciones_pagos() # Recarga el combo y actualiza los detalles
+                self.cargar_tabla_inscripciones_pagos() 
 
         except sqlite3.Error as e:
             mostrar_error(f"Error al registrar el pago: {e}")
@@ -1637,7 +1744,7 @@ class VentanaPrincipal(QMainWindow):
     def actualizar_opciones_pago(self):
         """Actualiza el combo de planes de pago basado en el curso seleccionado."""
         try:
-            if not hasattr(self, 'combo_tipo_pago_registro'): return # Salir si el widget no existe
+            if not hasattr(self, 'combo_tipo_pago_registro'): return 
             
             self.combo_tipo_pago_registro.clear()
             self.lbl_costo_total_registro.setText("$ 0.00")
@@ -1646,7 +1753,7 @@ class VentanaPrincipal(QMainWindow):
             if not curso_id:
                 self.combo_tipo_pago_registro.addItem("--- Seleccione un curso ---", userData=None)
                 return
-                
+            
             with get_db_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("SELECT * FROM cursos WHERE id = ?", (curso_id,))
@@ -1670,12 +1777,12 @@ class VentanaPrincipal(QMainWindow):
                 pago = (costo / 15).quantize(quantizer, rounding=ROUND_HALF_UP)
                 texto = f"Semanal (15 pagos de ${pago})"
                 self.combo_tipo_pago_registro.addItem(texto, userData=("Semanal (15)", float(costo), 15))
-                
-            if curso['costo_sem_12'] > 0: # CAMBIO DE 16 a 12
+              
+            if curso['costo_sem_12'] > 0: 
                 costo = Decimal(curso['costo_sem_12']).quantize(quantizer)
-                pago = (costo / 12).quantize(quantizer, rounding=ROUND_HALF_UP) # CAMBIO DE 16 a 12
-                texto = f"Semanal (12 pagos de ${pago})" # CAMBIO DE 16 a 12
-                self.combo_tipo_pago_registro.addItem(texto, userData=("Semanal (12)", float(costo), 12)) # CAMBIO DE 16 a 12
+                pago = (costo / 12).quantize(quantizer, rounding=ROUND_HALF_UP) 
+                texto = f"Semanal (12 pagos de ${pago})" 
+                self.combo_tipo_pago_registro.addItem(texto, userData=("Semanal (12)", float(costo), 12)) 
 
             if curso['costo_mensual_3'] > 0:
                 costo = Decimal(curso['costo_mensual_3']).quantize(quantizer)
@@ -1699,38 +1806,39 @@ class VentanaPrincipal(QMainWindow):
             else:
                 self.lbl_costo_total_registro.setText("$ 0.00")
         except AttributeError:
-            pass # Widget no existe
+            pass 
 
     def cargar_combo_curso_registro(self):
         """Carga los cursos en el combo del formulario de registro."""
         try:
              if hasattr(self, 'combo_curso_registro'):
-                # Guardar selección actual si existe
+          
                 current_id = self.combo_curso_registro.currentData()
 
                 self.combo_curso_registro.clear()
-                 # Usar la nueva función de conexión
                 with get_db_connection() as conn:
                     cursor = conn.cursor()
                     cursor.execute("SELECT id, nombre_curso FROM cursos ORDER BY nombre_curso")
                     cursos = cursor.fetchall()
                     self.combo_curso_registro.addItem("--- Seleccione un Curso ---", userData=None)
+                 
                     found_index = -1
-                    for index, curso in enumerate(cursos): # Acceder por nombre
+                    for index, curso in enumerate(cursos): 
                         user_data = curso['id']
                         self.combo_curso_registro.addItem(curso['nombre_curso'], userData=user_data)
+                
                         if current_id is not None and curso['id'] == current_id:
                             found_index = index + 1
 
                 if found_index != -1:
                     self.combo_curso_registro.setCurrentIndex(found_index)
                 else:
-                    self.actualizar_opciones_pago() # Limpiar el combo de planes
+                    self.actualizar_opciones_pago() 
 
         except sqlite3.Error as e:
             mostrar_error(f"Error al cargar combo de cursos en registro: {e}")
         except AttributeError:
-            pass # Combo aún no existe
+            pass 
 
     def registrar_alumno_e_inscribir(self):
         """Guarda un nuevo alumno y lo inscribe al curso seleccionado."""
@@ -1754,12 +1862,13 @@ class VentanaPrincipal(QMainWindow):
 
             plan_nombre, monto_total, num_pagos = plan_data
             curso_id = self.combo_curso_registro.currentData()
-            if not curso_id: # Doble chequeo por si acaso
+            if not curso_id: 
                 mostrar_error("Debe seleccionar un curso para inscribir al alumno.")
                 return
                 
             fecha_insc = datetime.date.today().isoformat()
 
+        
             # Recolectar el resto de los datos
             esc_procedencia = self.entry_al_escuela_procedencia.text().strip()
             esc_ingresar = self.entry_al_escuela_ingresar.text().strip()
@@ -1767,7 +1876,7 @@ class VentanaPrincipal(QMainWindow):
             telefono = self.entry_al_telefono.text().strip()
             turno = self.combo_al_turno.currentText()
             autoriza_salida = 1 if self.check_autoriza_salida.isChecked() else 0
-            imprimir_poliza = self.check_imprimir_poliza.isChecked() # NUEVO
+            imprimir_poliza = self.check_imprimir_poliza.isChecked() 
             
             tutor_ap_paterno = self.entry_tutor_ap_paterno.text().strip()
             tutor_ap_materno = self.entry_tutor_ap_materno.text().strip()
@@ -1791,7 +1900,6 @@ class VentanaPrincipal(QMainWindow):
             # --- Inserción en BD (Transacción) ---
             with get_db_connection() as conn:
                 cursor = conn.cursor()
-                # El PRAGMA ya se ejecutó
 
                 # 1. Insertar Alumno
                 cursor.execute("""
@@ -1826,7 +1934,7 @@ class VentanaPrincipal(QMainWindow):
 
                 conn.commit()
 
-            mostrar_info("Alumno registrado e inscrito al curso exitosamente.")
+                mostrar_info("Alumno registrado e inscrito al curso exitosamente.")
 
             # --- Preguntar para generar PDF ---
             reply = QMessageBox.question(self, "Generar PDF",
@@ -1834,10 +1942,10 @@ class VentanaPrincipal(QMainWindow):
                                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
 
             if reply == QMessageBox.StandardButton.Yes:
-                self.generar_ficha_completa_pdf(inscripcion_id, imprimir_poliza) # Pasar el nuevo flag
+                self.generar_ficha_completa_pdf(inscripcion_id, imprimir_poliza) 
 
             self.limpiar_campos_alumno()
-            self.cargar_datos_maestros() # Recarga tablas y combos
+            self.cargar_datos_maestros() 
 
         except sqlite3.IntegrityError:
             mostrar_error("Error: El correo electrónico ya existe o hubo un problema de integridad.")
@@ -1849,7 +1957,7 @@ class VentanaPrincipal(QMainWindow):
              mostrar_error(f"Error inesperado: {e}")
 
 
-    def generar_ficha_completa_pdf(self, inscripcion_id, imprimir_poliza=False): # Añadido parámetro
+    def generar_ficha_completa_pdf(self, inscripcion_id, imprimir_poliza=False): 
         """Genera un PDF con todos los datos del alumno, curso y CALENDARIO DE PAGOS."""
         try:
             with get_db_connection() as conn:
@@ -1902,7 +2010,6 @@ class VentanaPrincipal(QMainWindow):
             titulo_texto = f"<b>Unidad Profesional de Asesorías y Regularización (UPASER)<br/>Formato de Inscripción para el curso: {datos['nombre_curso']}</b>"
             title_p = Paragraph(titulo_texto, styleTitle)
             title_w, title_h = title_p.wrapOn(c, width - 2*inch, height)
-            # Dibujar el título manualmente después de calcular su altura
             title_p.drawOn(c, inch, height - 0.75 * inch - title_h)
             current_y = height - 0.75 * inch - title_h - 16
 
@@ -1942,23 +2049,20 @@ class VentanaPrincipal(QMainWindow):
             current_y = self.draw_text_pdf(c, current_y, f"Folio Inscripción a Curso: {datos['inscripcion_id']}", inch, styleN)
             current_y = self.draw_text_pdf(c, current_y, f"Nombre del Curso: {datos['nombre_curso']}", inch, styleN)
             current_y = self.draw_text_pdf(c, current_y, f"Plan de Pago: {datos['tipo_pago_seleccionado']}", inch, styleN)
-            current_y = self.draw_text_pdf(c, current_y, f"Fecha de Inscripción: {datos['fecha_inscripcion']}", inch, styleN)
             current_y = self.draw_text_pdf(c, current_y, f"Costo Total: $ {datos['monto_total']:.2f}", inch, styleCosto)
             
             # --- CORRECCIÓN: Separar Leyenda y Firma ---
-            # Dejar espacio al final de la página 1
-            current_y = 2.5 * inch # Mover Y a 2.5 pulgadas del borde inferior
+            current_y = 2.5 * inch 
 
             # --- Autorización de Salida (si aplica) ---
             if datos['autoriza_salida_solo'] == 1:
                 leyenda = f"Yo, {nombre_tutor_completo}, autorizo que mi hijo(a): {nombre_alumno_completo}, pueda retirarse de la institución sin que acuda alguna persona mayor de edad a recogerlo al plantel, deslindando de toda responsabilidad a UPASER después de la hora de salida."
-                # Usar la función de dibujo de texto para que maneje el espacio
-                current_y = self.draw_text_pdf(c, current_y + 0.2*inch, leyenda, inch, style=styleSmall) # +0.2 para subirlo un poco
+                current_y = self.draw_text_pdf(c, current_y + 0.2*inch, leyenda, inch, style=styleSmall) 
                 
             
             # --- Firma ---
-            firma_y_base = current_y - 0.5*inch # Posicionar la firma debajo del texto
-            if datos['autoriza_salida_solo'] == 0: # Si no hubo leyenda, posicionar más abajo
+            firma_y_base = current_y - 0.5*inch 
+            if datos['autoriza_salida_solo'] == 0: 
                 firma_y_base = 1.5 * inch
 
             c.line(inch * 1.5, firma_y_base, width - (inch * 1.5), firma_y_base)
@@ -1968,11 +2072,11 @@ class VentanaPrincipal(QMainWindow):
             # ==================================================
             # --- PÁGINA 2: CALENDARIO DE PAGOS ---
             # ==================================================
-            c.showPage() # FORZAR SALTO DE PÁGINA
+            c.showPage() 
             self.draw_watermark(c, width, height)
             self.draw_logo(c, width, height)
             
-            current_y = height - 1.5 * inch # Reiniciar Y para la nueva página
+            current_y = height - 1.5 * inch 
 
             current_y = self.draw_text_pdf(c, current_y, "Calendario de Pagos", inch, styleH_centered)
             
@@ -1988,7 +2092,7 @@ class VentanaPrincipal(QMainWindow):
             if plan_nombre == "Semanal (15)":
                 num_pagos = 15
                 monto_pago = (monto_total / 15).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-            elif plan_nombre == "Semanal (12)": # CAMBIO DE 16 a 12
+            elif plan_nombre == "Semanal (12)": 
                 num_pagos = 12
                 monto_pago = (monto_total / 12).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
             elif plan_nombre == "Mensual (3)":
@@ -2001,7 +2105,6 @@ class VentanaPrincipal(QMainWindow):
                 if plan_nombre.startswith("Semanal"):
                     fecha_pago = fecha_inicio + datetime.timedelta(weeks=i)
                 elif plan_nombre.startswith("Mensual"):
-                    # Cálculo de mes más preciso
                     mes = fecha_inicio.month + i
                     año = fecha_inicio.year + (mes - 1) // 12
                     mes = (mes - 1) % 12 + 1
@@ -2032,9 +2135,10 @@ class VentanaPrincipal(QMainWindow):
                 ('FONTNAME', (0,1), (-1,-1), FONT_NAME),
                 ('FONTSIZE', (0,0), (-1,-1), 10),
                 ('BOTTOMPADDING', (0,0), (-1,0), 6),
+                
                 ('BACKGROUND', (0,1), (-1,-1), colors.whitesmoke),
                 ('GRID', (0,0), (-1,-1), 1, colors.black),
-                ('ALIGN', (2,1), (2,-1), 'RIGHT'), # Alinear montos a la derecha
+                ('ALIGN', (2,1), (2,-1), 'RIGHT'), 
             ]))
 
             w_tabla, h_tabla = tabla_calendario.wrapOn(c, width - 2*inch, height)
@@ -2066,6 +2170,7 @@ class VentanaPrincipal(QMainWindow):
                 story_poliza = []
                 story_poliza.append(Paragraph("PÓLIZA DE GARANTÍA", styleH_centered))
                 story_poliza.append(Spacer(1, 0.2*inch))
+                
                 
                 story_poliza.append(Paragraph("<b>DERECHOS</b>", styleH_poliza))
                 story_poliza.append(Paragraph("a) Recibir sus clases conforme lo señale su horario y fecha de evaluación.", styleN_poliza))
@@ -2102,13 +2207,13 @@ class VentanaPrincipal(QMainWindow):
                 frame_poliza.addFromList(story_poliza, c)
                 
                 # Dibujar firmas al final
-                self.draw_double_signature(c, 2 * inch) # Posición fija a 2 pulgadas del fondo
+                self.draw_double_signature(c, 2 * inch) 
                 
                 # --- PÁGINA 4: TÉRMINOS Y CONDICIONES ---
                 c.showPage()
                 self.draw_watermark(c, width, height)
                 self.draw_logo(c, width, height)
-                current_y = height - 1.5 * inch # Reiniciar Y
+                current_y = height - 1.5 * inch 
                 
                 # Definir un Frame que ocupe la página, dejando márgenes y espacio para firmas
                 frame_terminos = Frame(inch, 2.5*inch, width - 2*inch, height - 4*inch, id='terminosFrame', leftPadding=0, topPadding=0, rightPadding=0, bottomPadding=0)
@@ -2127,15 +2232,16 @@ class VentanaPrincipal(QMainWindow):
                 story_terminos.append(Spacer(1, 0.2*inch))
                 story_terminos.append(Paragraph("<b>II. Comportamiento:</b> UPASER se reserva el derecho de retirar a cualquier persona registrada en el curso, cuyo comportamiento sea considerado inapropiado, por parte de UPASER o sus docentes. En estas circunstancias UPASER no reembolsara ninguna tarifa.", styleN_terminos))
                 story_terminos.append(Spacer(1, 0.2*inch))
-                story_terminos.append(Paragraph("<b>III. Plazo para registrarse:</b> Estamos contentos de apoyar a nuestros alumnos con el proceso de registro en las plataformas oficiales COMIPENS/103 MUNICIPIOS, sin embargo, es responsabilidad total del aspirante. En caso de que el aspirante no se registre en las fechas que la convocatoria este abierta no habrá ningún tipo de reembolso por el pago efectuado al curso de capacitación.", styleN_terminos))
+                story_terminos.append(Paragraph("<b>III. Plazo para registrarse:</b> Estamos contentos de apoyar a nuestros alumnos con el proceso de registro en las plataformas oficiales COMIPEMS/103 MUNICIPIOS, sin embargo, es responsabilidad total del aspirante. En caso de que el aspirante no se registre en las fechas que la convocatoria este abierta no habrá ningún tipo de reembolso por el pago efectuado al curso de capacitación.", styleN_terminos))
                 story_terminos.append(Spacer(1, 0.2*inch))
                 story_terminos.append(Paragraph("<b>IV. Talleres opcionales:</b> UPASER programara talleres a lo largo del curso de capacitación, estos talleres son considerados un plus CON COSTO para cualquier alumno UPASER.", styleN_terminos))
 
                 # Construir la historia en el Frame
                 frame_terminos.addFromList(story_terminos, c)
                 
+            
                 # Dibujar firmas al final
-                self.draw_double_signature(c, 2 * inch) # Posición fija a 2 pulgadas del fondo
+                self.draw_double_signature(c, 2 * inch) 
             
             # --- FIN DEL BLOQUE 'if imprimir_poliza' ---
 
@@ -2178,7 +2284,7 @@ class VentanaPrincipal(QMainWindow):
         self.combo_al_turno.setCurrentIndex(0)
         self.combo_curso_registro.setCurrentIndex(0) 
         self.check_autoriza_salida.setChecked(False)
-        self.check_imprimir_poliza.setChecked(False) # NUEVO
+        self.check_imprimir_poliza.setChecked(False) 
         # Tutor
         self.entry_tutor_ap_paterno.clear()
         self.entry_tutor_ap_materno.clear()
@@ -2200,27 +2306,55 @@ class VentanaPrincipal(QMainWindow):
         self.entry_emerg_2_telefono.clear()
         self.entry_emerg_2_parentesco.clear()
 
-    def cargar_tabla_alumnos(self):
-        """Carga la lista de alumnos en la QTableWidget."""
+    def cargar_tabla_alumnos(self, curso_id=None):
+        """
+        Carga la lista de alumnos en la QTableWidget. 
+        Si se proporciona un curso_id, filtra por ese curso.
+        """
         try: 
-            if hasattr(self, 'tabla_alumnos'):
-                self.tabla_alumnos.setRowCount(0)
-                with get_db_connection() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT id, nombres, apellido_paterno, apellido_materno, email FROM alumnos ORDER BY apellido_paterno")
-                    alumnos = cursor.fetchall()
+            if not hasattr(self, 'tabla_alumnos'): return
 
-                    self.tabla_alumnos.setRowCount(len(alumnos))
-                    for row, alumno in enumerate(alumnos):
-                        self.tabla_alumnos.setItem(row, 0, QTableWidgetItem(str(alumno['id'])))
-                        self.tabla_alumnos.setItem(row, 1, QTableWidgetItem(alumno['nombres']))
-                        self.tabla_alumnos.setItem(row, 2, QTableWidgetItem(alumno['apellido_paterno']))
-                        self.tabla_alumnos.setItem(row, 3, QTableWidgetItem(alumno['apellido_materno']))
-                        self.tabla_alumnos.setItem(row, 4, QTableWidgetItem(alumno['email']))
+            self.tabla_alumnos.setRowCount(0)
+            self.expediente_texto.clear()
+            
+            # --- Consulta SQL modificada para obtener el nombre del curso ---
+            query = """
+            SELECT 
+                a.id, a.nombres, a.apellido_paterno, a.apellido_materno, a.email, c.nombre_curso 
+            FROM 
+                alumnos a
+            LEFT JOIN inscripciones i ON a.id = i.alumno_id
+            LEFT JOIN cursos c ON i.curso_id = c.id
+            """
+            params = []
+            
+            if curso_id is not None:
+                query += " WHERE i.curso_id = ?"
+                params.append(curso_id)
+
+            query += " ORDER BY a.apellido_paterno"
+            # --- Fin Consulta SQL ---
+            
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, tuple(params))
+                alumnos = cursor.fetchall()
+
+            self.tabla_alumnos.setRowCount(len(alumnos))
+            for row, alumno in enumerate(alumnos):
+                curso_nombre = alumno['nombre_curso'] if alumno['nombre_curso'] else "No Inscrito"
+                
+                self.tabla_alumnos.setItem(row, 0, QTableWidgetItem(str(alumno['id'])))
+                self.tabla_alumnos.setItem(row, 1, QTableWidgetItem(alumno['nombres']))
+                self.tabla_alumnos.setItem(row, 2, QTableWidgetItem(alumno['apellido_paterno']))
+                self.tabla_alumnos.setItem(row, 3, QTableWidgetItem(alumno['apellido_materno']))
+                self.tabla_alumnos.setItem(row, 4, QTableWidgetItem(alumno['email']))
+                self.tabla_alumnos.setItem(row, 5, QTableWidgetItem(curso_nombre)) # Nueva Columna
+
         except sqlite3.Error as e:
             mostrar_error(f"Error al cargar tabla de alumnos: {e}")
         except AttributeError:
-            pass # Tabla aún no existe
+            pass 
 
     def registrar_curso(self):
         """DEPRECADO: Usar guardar_curso."""
@@ -2234,13 +2368,13 @@ class VentanaPrincipal(QMainWindow):
         nombre = self.entry_cur_nombre.text().strip()
         costo_exhibicion = self.spin_costo_exhibicion.value()
         costo_sem_15 = self.spin_costo_sem_15.value()
-        costo_sem_12 = self.spin_costo_sem_12.value() # CAMBIO DE 16 a 12
+        costo_sem_12 = self.spin_costo_sem_12.value() 
         costo_mensual_3 = self.spin_costo_mensual_3.value()
 
         if not nombre:
             mostrar_error("El nombre del curso es obligatorio.")
             return
-        if costo_exhibicion == 0 and costo_sem_15 == 0 and costo_sem_12 == 0 and costo_mensual_3 == 0: # CAMBIO DE 16 a 12
+        if costo_exhibicion == 0 and costo_sem_15 == 0 and costo_sem_12 == 0 and costo_mensual_3 == 0: 
             mostrar_error("Debe definir al menos un plan de costo para el curso.")
             return
 
@@ -2252,7 +2386,7 @@ class VentanaPrincipal(QMainWindow):
                     cursor.execute("""
                     INSERT INTO cursos (nombre_curso, costo_exhibicion, costo_sem_15, costo_sem_12, costo_mensual_3)
                     VALUES (?, ?, ?, ?, ?)
-                    """, (nombre, costo_exhibicion, costo_sem_15, costo_sem_12, costo_mensual_3)) # CAMBIO DE 16 a 12
+                    """, (nombre, costo_exhibicion, costo_sem_15, costo_sem_12, costo_mensual_3)) 
                     mostrar_info("Curso guardado exitosamente.")
                 else:
                     # --- ACTUALIZAR CURSO EXISTENTE ---
@@ -2265,7 +2399,7 @@ class VentanaPrincipal(QMainWindow):
                 conn.commit()
 
             self.limpiar_campos_curso()
-            self.cargar_datos_maestros() # Recarga tablas y combos
+            self.cargar_datos_maestros() 
 
         except sqlite3.IntegrityError:
             mostrar_error("Error: El nombre del curso ya existe.")
@@ -2279,14 +2413,14 @@ class VentanaPrincipal(QMainWindow):
                 self.entry_cur_nombre.clear()
                 self.spin_costo_exhibicion.setValue(0.0)
                 self.spin_costo_sem_15.setValue(0.0)
-                self.spin_costo_sem_12.setValue(0.0) # CAMBIO DE 16 a 12
+                self.spin_costo_sem_12.setValue(0.0) 
                 self.spin_costo_mensual_3.setValue(0.0)
                 
                 self.curso_seleccionado_id = None
                 self.btn_guardar_curso.setText("Guardar Curso")
                 self.tabla_cursos.clearSelection()
         except AttributeError:
-            pass # Widgets no existen aún
+            pass 
 
     def seleccionar_curso_para_edicion(self):
         """Carga los datos del curso seleccionado en el formulario de edición."""
@@ -2299,7 +2433,7 @@ class VentanaPrincipal(QMainWindow):
         if selected_row < 0:
              self.limpiar_campos_curso()
              return
-             
+            
         curso_id_item = self.tabla_cursos.item(selected_row, 0)
         if not curso_id_item: return
 
@@ -2347,14 +2481,14 @@ class VentanaPrincipal(QMainWindow):
                 cursor = conn.cursor()
                 cursor.execute("SELECT COUNT(id) as count FROM inscripciones WHERE curso_id = ?", (curso_id,))
                 conteo = cursor.fetchone()
-            
+        
             if conteo['count'] > 0:
                 mostrar_error(f"No se puede eliminar el curso '{nombre_curso}' porque tiene {conteo['count']} alumno(s) inscrito(s).")
                 return
 
             # Si no hay alumnos, proceder a eliminar
             reply = QMessageBox.question(self, "Confirmar Eliminación",
-                                         f"¿Está seguro que desea eliminar el curso:\n\n{nombre_curso} (ID: {curso_id})?\n\nEsta acción no se puede deshacer.",
+                                         f"¿Está seguro que desea eliminar al curso:\n\n{nombre_curso} (ID: {curso_id})?\n\nEsta acción no se puede deshacer.",
                                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
 
             if reply == QMessageBox.StandardButton.Yes:
@@ -2384,14 +2518,14 @@ class VentanaPrincipal(QMainWindow):
                     cursos = cursor.fetchall()
 
                     self.tabla_cursos.setRowCount(len(cursos))
-                    for row, curso in enumerate(cursos):
+            for row, curso in enumerate(cursos):
                         self.tabla_cursos.setItem(row, 0, QTableWidgetItem(str(curso['id'])))
                         self.tabla_cursos.setItem(row, 1, QTableWidgetItem(curso['nombre_curso']))
                         self.tabla_cursos.setItem(row, 2, QTableWidgetItem(f"$ {curso['costo_exhibicion']:.2f}"))
                         self.tabla_cursos.setItem(row, 3, QTableWidgetItem(f"$ {curso['costo_sem_15']:.2f}"))
-                        self.tabla_cursos.setItem(row, 4, QTableWidgetItem(f"$ {curso['costo_sem_12']:.2f}")) # CAMBIO DE 16 a 12
+                        self.tabla_cursos.setItem(row, 4, QTableWidgetItem(f"$ {curso['costo_sem_12']:.2f}")) 
                         self.tabla_cursos.setItem(row, 5, QTableWidgetItem(f"$ {curso['costo_mensual_3']:.2f}"))
-                        
+                   
                         # Alinear costos a la derecha
                         for col in range(2, 6):
                             item = self.tabla_cursos.item(row, col)
@@ -2401,17 +2535,17 @@ class VentanaPrincipal(QMainWindow):
         except sqlite3.Error as e:
             mostrar_error(f"Error al cargar tabla de cursos: {e}")
         except AttributeError:
-             pass # Tabla aún no existe
+            pass 
 
     def registrar_nuevo_usuario(self):
-        """DEPRECADO: Usar guardar_usuario en su lugar."""
-        self.guardar_usuario() # Redirigir a la nueva función
-            
+        """DEPRECADO: Usar guardar_usuario."""
+        self.guardar_usuario() 
+
     def guardar_usuario(self):
         """Guarda un usuario nuevo o actualiza uno existente."""
         if not all(hasattr(self, w) for w in ['entry_usr_nombre', 'entry_usr_telefono', 'entry_usr_email', 'combo_usr_rol']):
             return 
-            
+
         nombre = self.entry_usr_nombre.text().strip()
         telefono = self.entry_usr_telefono.text().strip()
         email = self.entry_usr_email.text().strip()
@@ -2427,12 +2561,12 @@ class VentanaPrincipal(QMainWindow):
                 
                 if self.usuario_seleccionado_id is None:
                     # --- CREAR NUEVO USUARIO ---
-                    password = secrets.token_hex(4) # 8 caracteres
+                    password = secrets.token_hex(4) 
                     cursor.execute("""
                     INSERT INTO usuarios (nombre_completo, telefono, email, rol, password)
                     VALUES (?, ?, ?, ?, ?)
                     """, (nombre, telefono, email, rol, password))
-                    user_id = cursor.lastrowid # Este es el "No. de Empleado"
+                    user_id = cursor.lastrowid 
                     conn.commit()
                     
                     # Mostrar credenciales al admin
@@ -2440,7 +2574,7 @@ class VentanaPrincipal(QMainWindow):
                                  f"No. de Empleado (ID): {user_id}\n"
                                  f"Usuario (Email): {email}\n"
                                  f"Contraseña: {password}\n\n"
-                                 f"Por favor, guarde esta contraseña. No se puede recuperar.")
+                                 "Por favor, guarde esta contraseña. No se puede recuperar.")
                 
                 else:
                     # --- ACTUALIZAR USUARIO EXISTENTE ---
@@ -2484,10 +2618,11 @@ class VentanaPrincipal(QMainWindow):
         """Carga los datos del usuario seleccionado en el formulario de edición."""
         selected_items = self.tabla_usuarios.selectedItems()
         if not selected_items:
-            self.limpiar_campos_usuario() # Limpiar si la selección se quita
+            self.limpiar_campos_usuario() 
             return
 
         selected_row = self.tabla_usuarios.currentRow()
+        
         if selected_row < 0:
              self.limpiar_campos_usuario()
              return
@@ -2519,7 +2654,6 @@ class VentanaPrincipal(QMainWindow):
     def dar_baja_usuario(self):
         """Elimina un usuario seleccionado de la BD."""
         if self.usuario_seleccionado_id is None:
-            # Si no hay ID, intentar obtenerlo de la tabla
             selected_items = self.tabla_usuarios.selectedItems()
             if not selected_items:
                 mostrar_error("Por favor, seleccione un usuario de la lista para eliminar.")
@@ -2572,6 +2706,7 @@ class VentanaPrincipal(QMainWindow):
         try:
             if hasattr(self, 'entry_usr_nombre'):
                 self.entry_usr_nombre.clear()
+            
                 self.entry_usr_telefono.clear()
                 self.entry_usr_email.clear()
                 self.combo_usr_rol.setCurrentIndex(0)
@@ -2581,7 +2716,7 @@ class VentanaPrincipal(QMainWindow):
                 self.btn_cambiar_password.setVisible(False)
                 self.tabla_usuarios.clearSelection()
         except AttributeError:
-            pass # Widgets no existen aún
+            pass 
 
     def cargar_tabla_usuarios(self):
         """Carga la lista de usuarios (empleados) en la QTableWidget."""
@@ -2616,6 +2751,10 @@ class VentanaPrincipal(QMainWindow):
             self.cargar_tabla_inscripciones_pagos()
         if hasattr(self, 'cargar_tabla_usuarios') and self.user_role == "Administrador":
             self.cargar_tabla_usuarios()
+        
+        if hasattr(self, 'cargar_cursos_para_filtro'): 
+            self.cargar_cursos_para_filtro()
+
 
     # --- NUEVAS FUNCIONES DE TEMA ---
     def cargar_configuracion_tema(self):
@@ -2629,7 +2768,7 @@ class VentanaPrincipal(QMainWindow):
                     return theme, accent
         except Exception as e:
             print(f"Error al cargar configuración: {e}")
-        return "Claro", "Naranja" # Defaults
+        return "Claro", "Naranja" 
 
     def guardar_configuracion_tema(self):
         """Guarda la configuración actual en CONFIG_FILE."""
@@ -2661,98 +2800,204 @@ class VentanaPrincipal(QMainWindow):
 def get_accent_stylesheet(accent_name):
     """Retorna el QSS para un color de acento específico."""
     if accent_name == "Azul":
-        return """
-            #navBar { background-color: #0d6efd; }
-            #navButton:hover { background-color: #0b5ed7; }
-            #navButton[selected="true"] { background-color: #0a58ca; }
-            #topBar { background-color: #0a58ca; }
-            #shortcutsTitle { border-bottom: 2px solid #0d6efd; }
-            #shortcutIcon { color: #0d6efd; }
-            QGroupBox::title { color: #0a58ca; }
-            QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus { border: 1px solid #0d6efd; }
-            QComboBox QAbstractItemView { selection-background-color: #0d6efd; }
-            QCheckBox::indicator:checked { background-color: #0d6efd; border: 1px solid #0a58ca; }
-            QPushButton#primaryButton { background-color: #0d6efd; }
-            QPushButton#primaryButton:hover { background-color: #0b5ed7; }
-            QPushButton#primaryButton:pressed { background-color: #0a58ca; }
-            QHeaderView::section { background-color: #0d6efd; border: 1px solid #0a58ca; }
+        return f"""
+            /* Se establece el color de acento para hover/select */
+            :root {{
+                --accent-color: #0d6efd;
+            }}
+            #navBar {{ 
+                /* Se usa un fondo neutro para el menú */
+                background-color: transparent;
+            }}
+            #navButton {{
+                color: #555555; /* Texto gris neutro en claro */
+                margin: 5px 10px;
+                border-radius: 8px; /* Mac: Esquinas suaves */
+                background-color: transparent;
+                padding-left: 20px; /* Alineación del texto */
+                
+            }}
+            #navButton:hover {{ 
+                background-color: rgba(13, 110, 253, 0.1); 
+                color: #0d6efd; 
+            }}
+            #navButton[selected="true"] {{ 
+                background-color: rgba(13, 110, 253, 0.2); 
+                color: #0d6efd;
+                font-weight: 600; /* Mac: Font semi-bold */
+                border-left: none; /* Mac: Eliminar borde lateral, usar solo el fondo */
+            }}
+            QGroupBox::title {{ color: #0a58ca; }}
+            QHeaderView::section {{ background-color: #0d6efd; border: 1px solid #0a58ca; }}
+            #topBar {{ background-color: #0a58ca; }}
+            
+            /* Ajustes en Modo Oscuro */
+            QWidget[style="dark"] #navButton {{ color: #E0E0E0; }}
+            QWidget[style="dark"] #navButton:hover {{ 
+                background-color: rgba(13, 110, 253, 0.2); 
+                color: #0d6efd; 
+            }}
+            QWidget[style="dark"] #navButton[selected="true"] {{ 
+                background-color: rgba(13, 110, 253, 0.3); 
+                color: #0d6efd;
+                border-left: none;
+            }}
         """
     elif accent_name == "Verde":
-        return """
-            #navBar { background-color: #198754; }
-            #navButton:hover { background-color: #157347; }
-            #navButton[selected="true"] { background-color: #146c43; }
-            #topBar { background-color: #146c43; }
-            #shortcutsTitle { border-bottom: 2px solid #198754; }
-            #shortcutIcon { color: #198754; }
-            QGroupBox::title { color: #146c43; }
-            QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus { border: 1px solid #198754; }
-            QComboBox QAbstractItemView { selection-background-color: #198754; }
-            QCheckBox::indicator:checked { background-color: #198754; border: 1px solid #146c43; }
-            QPushButton#primaryButton { background-color: #198754; }
-            QPushButton#primaryButton:hover { background-color: #157347; }
-            QPushButton#primaryButton:pressed { background-color: #146c43; }
-            QHeaderView::section { background-color: #198754; border: 1px solid #146c43; }
+        return f"""
+            :root {{
+                --accent-color: #198754;
+            }}
+            #navBar {{ 
+                background-color: transparent;
+            }}
+            #navButton {{
+                color: #555555; 
+                margin: 5px 10px;
+                border-radius: 8px;
+                background-color: transparent;
+                padding-left: 20px;
+            }}
+            #navButton:hover {{ 
+                background-color: rgba(25, 135, 84, 0.1); 
+                color: #198754; 
+            }}
+            #navButton[selected="true"] {{ 
+                background-color: rgba(25, 135, 84, 0.2); 
+                color: #198754;
+                font-weight: 600;
+                border-left: none;
+            }}
+            QGroupBox::title {{ color: #146c43; }}
+            QHeaderView::section {{ background-color: #198754; border: 1px solid #146c43; }}
+            #topBar {{ background-color: #146c43; }}
+            
+            /* Ajustes en Modo Oscuro */
+            QWidget[style="dark"] #navButton {{ color: #E0E0E0; }}
+            QWidget[style="dark"] #navButton:hover {{ 
+                background-color: rgba(25, 135, 84, 0.2); 
+                color: #198754; 
+            }}
+            QWidget[style="dark"] #navButton[selected="true"] {{ 
+                background-color: rgba(25, 135, 84, 0.3); 
+                color: #198754;
+                border-left: none;
+            }}
         """
     # Default (Naranja)
-    return """
-        #navBar { background-color: #FFA726; }
-        #navButton:hover { background-color: #FB8C00; }
-        #navButton[selected="true"] { background-color: #E65100; }
-        #topBar { background-color: #4A148C; } /* Color Morado Fijo para Acento Naranja */
-        #shortcutsTitle { border-bottom: 2px solid #FFA726; }
-        #shortcutIcon { color: #FFA726; }
-        QGroupBox::title { color: #E65100; }
-        QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus { border: 1px solid #FFA726; }
-        QComboBox QAbstractItemView { selection-background-color: #FFA726; }
-        QCheckBox::indicator:checked { background-color: #FFA726; border: 1px solid #E65100; }
-        QPushButton#primaryButton { background-color: #007ACC; } /* Botón primario se mantiene azul */
-        QPushButton#primaryButton:hover { background-color: #0099E6; }
-        QPushButton#primaryButton:pressed { background-color: #005F99; }
-        QHeaderView::section { background-color: #FFA726; border: 1px solid #E65100; }
+    return f"""
+        :root {{
+            --accent-color: #FFA726;
+        }}
+        #navBar {{ 
+            background-color: transparent;
+        }}
+        #navButton {{
+            color: #555555; 
+            margin: 5px 10px;
+            border-radius: 8px;
+            background-color: transparent;
+            padding-left: 20px;
+        }}
+        #navButton:hover {{ 
+            background-color: rgba(255, 167, 38, 0.1); 
+            color: #E65100;
+        }}
+        #navButton[selected="true"] {{ 
+            background-color: rgba(255, 167, 38, 0.2); 
+            color: #E65100;
+            font-weight: 600;
+            border-left: none;
+        }}
+        QGroupBox::title {{ color: #E65100; }}
+        QHeaderView::section {{ background-color: #FFA726; border: 1px solid #E65100; }}
+        #topBar {{ background-color: #E65100; }} /* Se usa un color más profundo */
+
+        /* Ajustes en Modo Oscuro */
+        QWidget[style="dark"] #navButton {{ color: #E0E0E0; }}
+        QWidget[style="dark"] #navButton:hover {{ 
+            background-color: rgba(255, 167, 38, 0.2); 
+            color: #FFA726; 
+        }}
+        QWidget[style="dark"] #navButton[selected="true"] {{ 
+            background-color: rgba(255, 167, 38, 0.3); 
+            color: #FFA726;
+            border-left: none;
+        }}
     """
 
 style_sheet_light = """
-    /* --- Tema Claro --- */
+    /* --- Tema Claro (Base) --- */
     QWidget {
         background-color: #FFFFFF;
         color: #333333;
         font-family: 'Segoe UI', Arial, sans-serif;
         font-size: 10pt;
     }
-    QMainWindow { background-color: #FFFFFF; }
-    /* --- CORRECCIÓN: Texto de barra superior siempre blanco --- */
+    /* Estilo del Widget principal para que el QSS sepa que está en modo 'claro' */
+    QMainWindow { background-color: #FFFFFF; qproperty-style: 'light'; }
+    
+    /* CORRECCIÓN CRÍTICA: Fuerza el color del texto a blanco para asegurar legibilidad sobre el fondo de acento saturado */
     #topBar QLabel, #topBarUser, #topBarLabel, #topBarIcon { 
         color: #FFFFFF; 
         font-size: 9pt; 
     }
     #topBarUser { font-weight: bold; font-size: 10pt; }
-    #topBarButton { background-color: transparent; color: #FFFFFF; border: none; font-size: 16pt; padding: 5px; }
+    #topBarButton { background-color: transparent;
+        color: #FFFFFF; border: none; font-size: 16pt; padding: 5px; }
     #topBarButton:hover { background-color: rgba(255, 255, 255, 0.1); }
     
-    #navBar { color: #FFFFFF; }
-    #navButton { background-color: transparent; color: #FFFFFF; border: none; border-radius: 4px; padding: 15px; font-weight: bold; font-size: 11pt; text-align: left; padding-left: 20px; }
+    #navBar { background-color: #F8F8F8; } /* Fondo más claro para el menú */
+    
+    /* Reglas base del botón de navegación (para ambos modos, los colores se aplican con el accent) */
+    #navButton { 
+        border: none; 
+        padding: 15px 10px; 
+        font-size: 11pt; 
+        text-align: left; 
+        padding-left: 20px;
+        font-weight: normal; 
+    }
+    
     #mainContentArea, #contentPage { background-color: #FFFFFF; }
     QScrollArea { border: none; background-color: #FFFFFF; }
     #welcomeTitle { font-size: 24pt; font-weight: bold; color: #333333; }
-    #shortcutsTitle { font-size: 16pt; font-weight: bold; color: #555555; padding-bottom: 5px; }
-    #shortcutButton { border: none; }
-    #shortcutIcon { background-color: #F5F5F5; border: 1px solid #E0E0E0; border-radius: 10px; font-size: 48pt; }
+    #shortcutsTitle { font-size: 16pt;
+        font-weight: bold; color: #555555; padding-bottom: 5px; }
+    #shortcutButton { 
+        border: 1px solid #E0E0E0;
+        background-color: #FFFFFF; 
+        border-radius: 12px;
+        padding: 15px;
+        /* Sombra Sutil y Profesional */
+        box-shadow: 0px 1px 3px rgba(0, 0, 0, 0.05), 0px 1px 2px rgba(0, 0, 0, 0.1);
+    }
+    #shortcutIcon { 
+        background-color: #F0F0F0; /* Fondo más limpio para el ícono */
+        border: none; 
+        border-radius: 8px; /* Menos redondeado */
+        font-size: 36pt; /* Ícono un poco más pequeño, más elegante */
+        padding: 10px;
+    }
     #shortcutIcon:hover { background-color: #E0E0E0; }
     #shortcutLabel { font-size: 11pt; font-weight: bold; color: #333333; }
     QGroupBox { background-color: #F9F9F9; border: 1px solid #E0E0E0; border-radius: 6px; margin-top: 10px; padding: 10px; }
     QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 0 10px 0 10px; font-size: 12pt; font-weight: bold; }
     QLabel { color: #333333; }
-    QLineEdit, QComboBox, QDoubleSpinBox { background-color: #FFFFFF; color: #333333; border: 1px solid #C0C0C0; border-radius: 4px; padding: 5px; min-height: 20px; }
+    QLineEdit, QComboBox, QDoubleSpinBox { background-color: #FFFFFF; color: #333333;
+        border: 1px solid #C0C0C0; border-radius: 4px; padding: 5px; min-height: 20px; }
     QComboBox QAbstractItemView { background-color: #FFFFFF; color: #333333; }
     QCheckBox { color: #333333; font-size: 9pt; }
     QCheckBox::indicator { width: 16px; height: 16px; }
     QCheckBox::indicator:unchecked { border: 1px solid #C0C0C0; background-color: #FFFFFF; border-radius: 3px; }
+    QCheckBox::indicator:checked { border: 1px solid #909090; }
     #expedienteDisplay { background-color: #FDFDFD; border: 1px solid #E0E0E0; font-family: Consolas, monospace; font-size: 9pt; }
-    #deleteButton { background-color: #D32F2F; color: #FFFFFF; border: none; border-radius: 4px; padding: 10px 20px; font-weight: bold; font-size: 10pt; margin-top: 10px; }
+    #deleteButton { background-color: #D32F2F; color: #FFFFFF; border: none; border-radius: 4px; padding: 10px 20px; font-weight: bold;
+        font-size: 10pt; margin-top: 10px; }
     #deleteButton:hover { background-color: #E53935; }
     #deleteButton:pressed { background-color: #B71C1C; }
-    #secondaryButton { background-color: #607D8B; color: #FFFFFF; border: none; border-radius: 4px; padding: 10px 20px; font-weight: bold; font-size: 10pt; }
+    #secondaryButton { background-color: #607D8B; color: #FFFFFF; border: none; border-radius: 4px; padding: 10px 20px; font-weight: bold;
+        font-size: 10pt; }
     #secondaryButton:hover { background-color: #546E7A; }
     QPushButton#primaryButton { background-color: #007ACC; color: #FFFFFF; border: none; border-radius: 4px; padding: 10px 20px; font-weight: bold; font-size: 11pt; min-height: 25px; }
     QPushButton#primaryButton:hover { background-color: #0099E6; }
@@ -2764,54 +3009,80 @@ style_sheet_light = """
 """
 
 style_sheet_dark = """
-    /* --- Tema Oscuro --- */
+    /* --- Tema Oscuro (Base) --- */
     QWidget {
-        background-color: #2E2E2E;
+        background-color: #2D2D2D; /* Gris oscuro para mayor contraste */
         color: #E0E0E0;
         font-family: 'Segoe UI', Arial, sans-serif;
         font-size: 10pt;
     }
-    QMainWindow { background-color: #2E2E2E; }
-    /* --- CORRECCIÓN: Texto de barra superior siempre blanco --- */
+    /* Estilo del Widget principal para que el QSS sepa que está en modo 'oscuro' */
+    QMainWindow { background-color: #2D2D2D; qproperty-style: 'dark'; }
+
     #topBar QLabel, #topBarUser, #topBarLabel, #topBarIcon { 
-        color: #FFFFFF; 
+        color: #FFFFFF;
         font-size: 9pt; 
     }
-    #topBarUser { font-weight: bold; font-size: 10pt; }
-    #topBarButton { background-color: transparent; color: #FFFFFF; border: none; font-size: 16pt; padding: 5px; }
+    #topBarUser { font-weight: 600; font-size: 11pt; } 
+    #topBarButton { background-color: transparent;
+        color: #FFFFFF; border: none; font-size: 16pt; padding: 5px; }
     #topBarButton:hover { background-color: #3A3A3A; }
-    #navButton { background-color: #4A4A4A; color: #E0E0E0; border: 1px solid #5C5C5C; border-radius: 4px; padding: 15px; font-weight: bold; font-size: 11pt; text-align: left; padding-left: 20px; }
-    #navButton:hover { background-color: #5A5A5A; }
-    #mainContentArea, #contentPage { background-color: #2E2E2E; }
-    QScrollArea { border: none; background-color: #2E2E2E; }
-    #welcomeTitle { font-size: 24pt; font-weight: bold; color: #E0E0E0; }
-    #shortcutsTitle { font-size: 16pt; font-weight: bold; color: #C0C0C0; padding-bottom: 5px; }
-    #shortcutButton { border: none; }
-    #shortcutIcon { background-color: #3C3C3C; border: 1px solid #5C5C5C; border-radius: 10px; font-size: 48pt; }
-    #shortcutIcon:hover { background-color: #4A4A4A; }
-    #shortcutLabel { font-size: 11pt; font-weight: bold; color: #E0E0E0; }
-    QGroupBox { background-color: #3C3C3C; border: 1px solid #5C5C5C; border-radius: 6px; margin-top: 10px; padding: 10px; }
-    QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 0 10px 0 10px; font-size: 12pt; font-weight: bold; }
+    
+    #navBar { background-color: #3A3A3A; } /* Fondo del menú ligeramente más claro para contraste */
+    
+    /* Reglas base del botón de navegación */
+    #navButton { 
+        border: none; 
+        padding: 15px 10px; 
+        font-size: 11pt; 
+        text-align: left; 
+        padding-left: 20px;
+        font-weight: normal;
+        border-radius: 8px; /* Esquinas redondeadas */
+        margin: 5px 8px; /* Margen para flotar */
+    }
+
+    #mainContentArea, #contentPage { background-color: #2D2D2D; }
+    QScrollArea { border: none; background-color: #2D2D2D; }
+    #welcomeTitle { font-size: 24pt; font-weight: 600; color: #E0E0E0; }
+    #shortcutsTitle { font-size: 16pt;
+        font-weight: 500; color: #C0C0C0; padding-bottom: 5px; }
+    #shortcutButton { 
+        border: 1px solid #4D4D4D;
+        background-color: #3A3A3A; /* Fondo de botones de acceso */
+        border-radius: 12px;
+        padding: 15px;
+    }
+    #shortcutIcon { 
+        background-color: #4A4A4A; /* Fondo más limpio para el ícono */
+        border: none;
+        border-radius: 8px;
+        font-size: 36pt; 
+        padding: 10px;
+    }
+    #shortcutIcon:hover { background-color: #5A5A5A; }
+    QGroupBox { background-color: #3A3A3A; border: 1px solid #4D4D4D; border-radius: 8px; margin-top: 10px; padding: 10px; }
+    QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 0 10px 0 10px; font-size: 12pt; font-weight: 600; }
     QLabel { color: #E0E0E0; }
-    QLineEdit, QComboBox, QDoubleSpinBox { background-color: #4A4A4A; color: #E0E0E0; border: 1px solid #5C5C5C; border-radius: 4px; padding: 5px; min-height: 20px; }
-    QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus { border: 1px solid #E0E0E0; }
+    QLineEdit, QComboBox, QDoubleSpinBox { background-color: #4A4A4A; color: #E0E0E0;
+        border: 1px solid #4D4D4D; border-radius: 6px; padding: 5px; min-height: 20px; }
+    QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus { border: 1px solid #707070; }
     QComboBox QAbstractItemView { background-color: #4A4A4A; color: #E0E0E0; selection-background-color: #5A5A5A; }
     QCheckBox { color: #E0E0E0; font-size: 9pt; }
     QCheckBox::indicator { width: 16px; height: 16px; }
-    QCheckBox::indicator:unchecked { border: 1px solid #5C5C5C; background-color: #4A4A4A; border-radius: 3px; }
+    QCheckBox::indicator:unchecked { border: 1px solid #4D4D4D; background-color: #3A3A3A; border-radius: 3px; }
     QCheckBox::indicator:checked { border: 1px solid #909090; }
-    #expedienteDisplay { background-color: #353535; border: 1px solid #5C5C5C; font-family: Consolas, monospace; font-size: 9pt; color: #E0E0E0; }
-    #deleteButton { background-color: #D32F2F; color: #FFFFFF; border: none; border-radius: 4px; padding: 10px 20px; font-weight: bold; font-size: 10pt; margin-top: 10px; }
+    #expedienteDisplay { background-color: #3A3A3A; border: 1px solid #4D4D4D; font-family: Consolas, monospace; font-size: 9pt; }
+    #deleteButton { background-color: #D32F2F; color: #FFFFFF; border: none; border-radius: 6px; padding: 10px 20px; font-weight: 600; font-size: 10pt; margin-top: 10px; }
     #deleteButton:hover { background-color: #E53935; }
     #deleteButton:pressed { background-color: #B71C1C; }
-    #secondaryButton { background-color: #607D8B; color: #FFFFFF; border: none; border-radius: 4px; padding: 10px 20px; font-weight: bold; font-size: 10pt; }
-    #secondaryButton:hover { background-color: #546E7A; }
-    QPushButton#primaryButton { background-color: #007ACC; color: #FFFFFF; border: none; border-radius: 4px; padding: 10px 20px; font-weight: bold; font-size: 11pt; min-height: 25px; }
+    #secondaryButton { background-color: #607D8B; color: #FFFFFF; border: none; border-radius: 6px; padding: 10px 20px; font-weight: 600; font-size: 10pt; }
+    QPushButton#primaryButton { background-color: #007ACC; color: #FFFFFF; border: none; border-radius: 6px; padding: 10px 20px; font-weight: 600; font-size: 11pt; min-height: 25px; }
     QPushButton#primaryButton:hover { background-color: #0099E6; }
     QPushButton#primaryButton:pressed { background-color: #005F99; }
-    QTableWidget { background-color: #3C3C3C; color: #E0E0E0; gridline-color: #5C5C5C; border: 1px solid #5C5C5C; selection-background-color: #5A5A5A; selection-color: #E0E0E0; }
-    QHeaderView::section { color: #FFFFFF; padding: 6px; font-weight: bold; border: 1px solid #5C5C5C; }
-    QMessageBox { background-color: #3C3C3C; color: #E0E0E0; }
+    QTableWidget { background-color: #3A3A3A; color: #E0E0E0; gridline-color: #4D4D4D; border: 1px solid #4D4D4D; selection-background-color: #5A5A5A; selection-color: #E0E0E0; }
+    QHeaderView::section { color: #FFFFFF; padding: 6px; font-weight: 600; border: 1px solid #4D4D4D; }
+    QMessageBox { background-color: #3A3A3A; color: #E0E0E0; }
     #placeholderText { font-style: italic; color: #888888; }
 """
 
@@ -2826,7 +3097,7 @@ def get_full_stylesheet(theme, accent):
 if __name__ == '__main__':
 
     try:
-        # --- CORRECCIÓN DE ERROR LOGIN: Llamar a inicializar_db() PRIMERO ---
+        # 1. Asegurar que la DB esté inicializada
         inicializar_db()
         
         app = QApplication(sys.argv)
@@ -2838,34 +3109,32 @@ if __name__ == '__main__':
             # 1. Iniciar la pantalla de Login
             login_window = LoginScreen()
             login_window.show()
-            app.exec() # Ejecutar el loop del login
+            app.exec() 
 
             # Si el usuario cerró el login sin autenticarse, salimos del bucle
             if not login_window.accept_login:
                 login_exitoso = False
-                continue # Salta al final del bucle
+                continue 
 
             # 2. Si el login fue exitoso, obtener usuario y mostrar ventana principal
             username = login_window.username
             full_username = login_window.full_username
             user_role = login_window.user_role # Obtener el ROL
             
-            # La configuración de estilo se carga y aplica DENTRO de VentanaPrincipal
-            
-            window = VentanaPrincipal(username, full_username, user_role) # Pasar el ROL
-            window.showMaximized() # Mostrar maximizado por defecto
+            window = VentanaPrincipal(username, full_username, user_role) 
+            window.showMaximized() 
 
-            app.exec() # Ejecutar el loop de la aplicación principal
+            app.exec() 
 
             # 3. Cuando la app principal se cierra, revisamos si fue por "Cerrar Sesión"
             if not window.logout_solicitado:
-                login_exitoso = False # El usuario cerró la ventana, salimos del bucle
+                login_exitoso = False 
 
         # --- Limpiar archivos temporales al salir del bucle principal ---
-        if window and hasattr(window, '_temp_pdf_files'): # Verificar si window se creó
+        if window and hasattr(window, '_temp_pdf_files'): 
             window.limpiar_archivos_temporales()
 
-        sys.exit(0) # Salida limpia
+        sys.exit(0) 
 
     except Exception as e:
         # Captura de error final por si algo falla en la inicialización
