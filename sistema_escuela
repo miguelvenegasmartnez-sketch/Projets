@@ -19,7 +19,7 @@ try:
         QMenu, QSizePolicy, QSpacerItem, QListWidget, QListWidgetItem # Necesario para el nuevo menú
     )
     # --- AÑADIDO QLocale ---
-    from PyQt6.QtCore import Qt, QDate, QTimer, QDateTime, QSize, QUrl, QLocale, QPoint # Necesario para QPoint
+    from PyQt6.QtCore import Qt, QDate, QTimer, QDateTime, QSize, QUrl, QLocale, QPoint, QPropertyAnimation, QEasingCurve # Necesario para QPoint
     from PyQt6.QtGui import QFont, QIcon, QPixmap, QColor, QDesktopServices
 except ImportError as e:
     print(f"Error: Faltan bibliotecas de PyQt6. Ejecuta: pip install PyQt6\nDetalle: {e}")
@@ -328,7 +328,9 @@ class LoginScreen(QWidget):
 
         login_layout.addStretch() 
 
-        main_layout.addWidget(login_panel, 2) 
+        main_layout.addWidget(login_panel, 2)
+        self.username_input.returnPressed.connect(self.password_input.setFocus)
+        self.password_input.returnPressed.connect(self.handle_login)
 
         # Panel Derecho: Mensaje de Bienvenida y Fondo
         self.welcome_panel = QWidget()
@@ -881,7 +883,7 @@ class VentanaPrincipal(QMainWindow):
         layout.addLayout(layout_accesos)
         layout.addStretch()
         return widget
-
+    
     def crear_boton_acceso(self, icono, texto, on_click):
         """Crea un botón de acceso directo (icono + texto)."""
         widget = QWidget()
@@ -902,8 +904,33 @@ class VentanaPrincipal(QMainWindow):
 
         return widget
 
+
+    def _acceso(self, icono, texto, on_click):
+        """Crea un botón de acceso directo (icono + texto)."""
+        widget = QWidget()
+        widget.setObjectName("shortcutButton")
+        layout = QVBoxLayout(widget)
+
+        btn = QPushButton(icono)
+        btn.setObjectName("shortcutIcon")
+        btn.setFixedSize(100, 100)
+        btn.clicked.connect(on_click)
+
+        lbl = QLabel(texto)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl.setObjectName("shortcutLabel")
+
+        layout.addWidget(btn)
+        layout.addWidget(lbl)
+
+        return widget
+
     def cambiar_pagina(self, index):
-        """Cambia la página visible en el QStackedWidget."""
+        """Cambia la página visible en el QStackedWidget CON ANIMACIÓN."""
+        
+        current_index = self.stacked_widget.currentIndex()
+        if current_index == index:
+            return # No hacer nada si ya estamos en esa página
 
         # Resetear estilos de todos los botones principales
         for btn in self.nav_buttons:
@@ -913,42 +940,71 @@ class VentanaPrincipal(QMainWindow):
 
         # Mapeo del índice de página a botón y carga de datos
         boton_activo = None
+        
         if index == 0: 
-            self.stacked_widget.setCurrentIndex(0)
+            # self.stacked_widget.setCurrentIndex(0) # Se maneja abajo
             boton_activo = self.btn_nav_inicio
         elif index == 1: 
-            self.stacked_widget.setCurrentIndex(1)
+            # self.stacked_widget.setCurrentIndex(1)
             boton_activo = self.btn_nav_inscripcion
             self.cargar_combo_curso_registro() 
         elif index == 2: 
-            self.stacked_widget.setCurrentIndex(2)
+            # self.stacked_widget.setCurrentIndex(2)
             boton_activo = self.btn_nav_pagos
             self.cargar_tabla_inscripciones_pagos() 
         elif index == 3: 
-            self.stacked_widget.setCurrentIndex(3)
+            # self.stacked_widget.setCurrentIndex(3)
             boton_activo = self.btn_nav_lista_alumnos
             self.cargar_tabla_alumnos() 
             self.cargar_cursos_para_filtro() 
         elif index == 4: 
              if self.permisos.get('can_manage_courses') or self.permisos.get('is_admin'):
-                self.stacked_widget.setCurrentIndex(4)
-                # ... (resto del código) ...
+                # self.stacked_widget.setCurrentIndex(4)
+                boton_activo = self.btn_nav_gestion_cursos
+                self.cargar_tabla_cursos() # Cargar datos ANTES de mostrar
         elif index == 5: 
             if self.permisos.get('can_manage_users') or self.permisos.get('is_admin'):
-                self.stacked_widget.setCurrentIndex(5)
-                # ... (resto del código) ...
+                # self.stacked_widget.setCurrentIndex(5)
+                boton_activo = self.btn_nav_gestion_usuarios
+                self.cargar_tabla_usuarios() # Cargar datos ANTES de mostrar
         elif index == 6: 
             if self.permisos.get('can_manage_subjects') or self.permisos.get('is_admin'):
-                self.stacked_widget.setCurrentIndex(6)
-                # ... (resto del código) ...
+                # self.stacked_widget.setCurrentIndex(6)
+                boton_activo = None # No hay botón directo
+                self.cargar_combo_cursos_materias() # Cargar datos
         elif index == 7: 
             if self.permisos.get('can_assign_grades') or self.permisos.get('is_admin'):
-                self.stacked_widget.setCurrentIndex(7)
-                # ... (resto del código) ...
+                # self.stacked_widget.setCurrentIndex(7)
+                boton_activo = None # No hay botón directo
+                self.cargar_combo_cursos_calif() # Cargar datos
         elif index == 8:
             if self.permisos.get('can_access_settings') or self.permisos.get('is_admin'):
-                self.stacked_widget.setCurrentIndex(8)
-                # ... (resto del código) ...
+                # self.stacked_widget.setCurrentIndex(8)
+                boton_activo = self.btn_nav_config
+                # No hay datos que cargar para la config
+        else:
+            return # Índice no válido
+
+        # --- LÓGICA DE ANIMACIÓN DE DESLIZAMIENTO ---
+        
+        target_widget = self.stacked_widget.widget(index)
+        width = self.stacked_widget.width()
+        
+        # Mover la página nueva a la derecha (fuera de la pantalla)
+        target_widget.setGeometry(width, 0, width, self.stacked_widget.height())
+        
+        # Establecer la página como la actual
+        self.stacked_widget.setCurrentIndex(index)
+        
+        # Animación de entrada
+        self.slide_animation = QPropertyAnimation(target_widget, b"pos")
+        self.slide_animation.setDuration(300) # 300 ms
+        self.slide_animation.setStartValue(QPoint(width, 0))
+        self.slide_animation.setEndValue(QPoint(0, 0))
+        self.slide_animation.setEasingCurve(QEasingCurve.Type.InOutCubic) # Curva suave
+        self.slide_animation.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+        
+        # --- FIN DE ANIMACIÓN ---
                 
         # Poner estilo seleccionado al botón activo (si aplica)
         if boton_activo:
@@ -1092,6 +1148,8 @@ class VentanaPrincipal(QMainWindow):
 
         # Añadir el scroll area al layout principal de la página
         layout_principal.addWidget(scroll_area)
+
+        self.entry_emerg_2_parentesco.returnPressed.connect(self.registrar_alumno_e_inscribir)
 
         
         return widget
@@ -1323,7 +1381,9 @@ class VentanaPrincipal(QMainWindow):
         layout_usuario_tabla.addWidget(self.btn_eliminar_usuario)
 
         layout_main.addWidget(panel_usuario_form)
-        layout_main.addWidget(panel_usuario_tabla, 1) 
+        layout_main.addWidget(panel_usuario_tabla, 1)
+
+        self.entry_usr_email.returnPressed.connect(self.guardar_usuario)
         
         return widget
     
@@ -1396,7 +1456,9 @@ class VentanaPrincipal(QMainWindow):
         layout_cursos_tabla.addWidget(self.btn_eliminar_curso)
 
         layout_main.addWidget(panel_cursos_form)
-        layout_main.addWidget(panel_cursos_tabla, 1) 
+        layout_main.addWidget(panel_cursos_tabla, 1)
+
+        self.entry_cur_nombre.returnPressed.connect(self.guardar_curso)
         
         return widget
     
@@ -1806,6 +1868,8 @@ class VentanaPrincipal(QMainWindow):
         self.combo_curso_materias.currentIndexChanged.connect(self.cargar_tabla_materias)
         self.btn_anadir_materia.clicked.connect(self.anadir_materia)
         self.btn_eliminar_materia.clicked.connect(self.eliminar_materia)
+
+        self.entry_nombre_materia.returnPressed.connect(self.anadir_materia)
 
         return widget
 
