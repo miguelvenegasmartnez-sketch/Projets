@@ -16,7 +16,7 @@ try:
         QTableWidget, QTableWidgetItem, QMessageBox, QGroupBox, QFormLayout,
         QDoubleSpinBox, QHeaderView, QFileDialog, QGraphicsDropShadowEffect,
         QStackedWidget, QFrame, QScrollArea, QCheckBox, QTextEdit, QInputDialog,
-        QMenu, QSizePolicy, QSpacerItem # Necesario para el nuevo menú
+        QMenu, QSizePolicy, QSpacerItem, QListWidget, QListWidgetItem # Necesario para el nuevo menú
     )
     # --- AÑADIDO QLocale ---
     from PyQt6.QtCore import Qt, QDate, QTimer, QDateTime, QSize, QUrl, QLocale, QPoint # Necesario para QPoint
@@ -180,6 +180,29 @@ def inicializar_db():
             """)
         except sqlite3.IntegrityError:
             pass 
+
+        # --- NUEVA TABLA: Materias (Asignaturas por Curso) ---
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS materias (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            curso_id INTEGER NOT NULL,
+            nombre_materia TEXT NOT NULL,
+            FOREIGN KEY (curso_id) REFERENCES cursos(id) ON DELETE CASCADE
+        )
+        """)
+
+        # --- NUEVA TABLA: Calificaciones (Notas por Alumno/Materia) ---
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS calificaciones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            inscripcion_id INTEGER NOT NULL,
+            materia_id INTEGER NOT NULL,
+            calificacion REAL DEFAULT 0.0,
+            observaciones TEXT DEFAULT '',
+            FOREIGN KEY (inscripcion_id) REFERENCES inscripciones(id) ON DELETE CASCADE,
+            FOREIGN KEY (materia_id) REFERENCES materias(id) ON DELETE CASCADE
+        )
+        """)
         
         conn.commit()
     except sqlite3.Error as e:
@@ -607,6 +630,8 @@ class VentanaPrincipal(QMainWindow):
         self.pagina_lista_alumnos = self.crear_pagina_lista_alumnos() 
         self.pagina_gestion_cursos = self.crear_pagina_gestion_cursos() 
         self.pagina_gestion_usuarios = self.crear_pagina_gestion_usuarios()
+        self.pagina_gestion_materias = self.crear_pagina_gestion_materias()
+        self.pagina_gestion_calificaciones = self.crear_pagina_gestion_calificaciones()
         self.pagina_configuracion = self.crear_pagina_configuracion() 
 
         # Añadir páginas al StackedWidget 
@@ -615,8 +640,10 @@ class VentanaPrincipal(QMainWindow):
         self.stacked_widget.addWidget(self.pagina_pagos) 
         self.stacked_widget.addWidget(self.pagina_lista_alumnos) 
         self.stacked_widget.addWidget(self.pagina_gestion_cursos) 
-        self.stacked_widget.addWidget(self.pagina_gestion_usuarios) 
-        self.stacked_widget.addWidget(self.pagina_configuracion) 
+        self.stacked_widget.addWidget(self.pagina_gestion_usuarios)
+        self.stacked_widget.addWidget(self.pagina_gestion_materias)
+        self.stacked_widget.addWidget(self.pagina_gestion_calificaciones) 
+        self.stacked_widget.addWidget(self.pagina_configuracion)
 
         layout_contenido.addWidget(self.stacked_widget, 1) 
 
@@ -757,8 +784,10 @@ class VentanaPrincipal(QMainWindow):
             menu.addSeparator()
             menu.addAction("📚 Gestionar Cursos", lambda: self.cambiar_pagina(4))
             menu.addAction("👤 Gestionar Usuarios", lambda: self.cambiar_pagina(5))
+            menu.addAction("📖 Gestionar Materias", lambda: self.cambiar_pagina(6))
+            menu.addAction("📊 Asignar Calificaciones", lambda: self.cambiar_pagina(7))
             menu.addSeparator()
-            menu.addAction("⚙️ Configuración", lambda: self.cambiar_pagina(6))
+            menu.addAction("⚙️ Configuración", lambda: self.cambiar_pagina(8))
             
         # Mostrar el menú justo debajo del botón "Menú"
         # Usamos mapToGlobal para obtener la posición global del botón
@@ -1143,6 +1172,9 @@ class VentanaPrincipal(QMainWindow):
         self.btn_dar_baja = QPushButton("Dar de Baja Alumno Seleccionado")
         self.btn_dar_baja.setObjectName("deleteButton") 
         self.btn_dar_baja.clicked.connect(self.dar_baja_alumno)
+        self.btn_generar_boleta = QPushButton("Generar Boleta de Calificaciones")
+        self.btn_generar_boleta.setObjectName("primaryButton")
+        self.btn_generar_boleta.clicked.connect(self.generar_boleta_pdf)
 
         layout_derecho.addWidget(group_expediente)
         layout_derecho.addWidget(self.btn_dar_baja)
@@ -1297,6 +1329,310 @@ class VentanaPrincipal(QMainWindow):
         layout_main.addWidget(panel_usuario_tabla, 1) 
         
         return widget
+    
+    # ---- PÁGINA 6: GESTIONAR MATERIAS ----
+    def crear_pagina_gestion_materias(self):
+        """Crea la interfaz para añadir o quitar materias a un curso."""
+        widget = QWidget()
+        widget.setObjectName("contentPage")
+        layout_main = QHBoxLayout(widget)
+        layout_main.setContentsMargins(15, 15, 15, 15)
+
+        # Panel Izquierdo: Selección de Curso
+        panel_izq = QGroupBox("Seleccionar Curso")
+        layout_izq = QVBoxLayout(panel_izq)
+        
+        self.combo_curso_materias = QComboBox()
+        self.tabla_materias = QTableWidget(0, 2)
+        self.tabla_materias.setHorizontalHeaderLabels(["ID", "Nombre de la Materia"])
+        self.tabla_materias.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.tabla_materias.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.tabla_materias.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+
+        layout_izq.addWidget(QLabel("Curso:"))
+        layout_izq.addWidget(self.combo_curso_materias)
+        layout_izq.addWidget(self.tabla_materias)
+        
+        layout_main.addWidget(panel_izq, 1)
+
+        # Panel Derecho: Añadir/Eliminar Materias
+        panel_der = QGroupBox("Añadir/Eliminar Materia")
+        layout_der = QFormLayout(panel_der)
+        layout_der.setSpacing(10)
+
+        self.entry_nombre_materia = QLineEdit()
+        self.btn_anadir_materia = QPushButton("Añadir Materia al Curso")
+        self.btn_anadir_materia.setObjectName("primaryButton")
+        
+        self.btn_eliminar_materia = QPushButton("Eliminar Materia Seleccionada")
+        self.btn_eliminar_materia.setObjectName("deleteButton")
+        
+        layout_der.addRow(QLabel("Nombre Nueva Materia:"), self.entry_nombre_materia)
+        layout_der.addRow(self.btn_anadir_materia)
+        layout_der.addRow(self.btn_eliminar_materia)
+        
+        layout_main.addWidget(panel_der)
+        
+        # Conexiones
+        self.combo_curso_materias.currentIndexChanged.connect(self.cargar_tabla_materias)
+        self.btn_anadir_materia.clicked.connect(self.anadir_materia)
+        self.btn_eliminar_materia.clicked.connect(self.eliminar_materia)
+
+        return widget
+
+    def cargar_combo_cursos_materias(self):
+        """Carga los cursos en el combo de la pág. de gestión de materias."""
+        try:
+            if not hasattr(self, 'combo_curso_materias'): return
+            self.combo_curso_materias.clear()
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT id, nombre_curso FROM cursos ORDER BY nombre_curso")
+                cursos = cursor.fetchall()
+            
+            self.combo_curso_materias.addItem("--- Seleccione un Curso ---", userData=None)
+            for curso in cursos:
+                self.combo_curso_materias.addItem(curso['nombre_curso'], userData=curso['id'])
+        except Exception as e:
+            mostrar_error(f"Error al cargar cursos para materias: {e}")
+
+    def cargar_tabla_materias(self):
+        """Carga las materias del curso seleccionado en la tabla."""
+        try:
+            if not hasattr(self, 'tabla_materias'): return
+            self.tabla_materias.setRowCount(0)
+            curso_id = self.combo_curso_materias.currentData()
+            if not curso_id: return
+
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT id, nombre_materia FROM materias WHERE curso_id = ? ORDER BY nombre_materia", (curso_id,))
+                materias = cursor.fetchall()
+            
+            self.tabla_materias.setRowCount(len(materias))
+            for row, materia in enumerate(materias):
+                self.tabla_materias.setItem(row, 0, QTableWidgetItem(str(materia['id'])))
+                self.tabla_materias.setItem(row, 1, QTableWidgetItem(materia['nombre_materia']))
+        
+        except Exception as e:
+            mostrar_error(f"Error al cargar tabla de materias: {e}")
+
+    def anadir_materia(self):
+        curso_id = self.combo_curso_materias.currentData()
+        nombre_materia = self.entry_nombre_materia.text().strip()
+        
+        if not curso_id or not nombre_materia:
+            mostrar_error("Debe seleccionar un curso y escribir un nombre para la materia.")
+            return
+            
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("INSERT INTO materias (curso_id, nombre_materia) VALUES (?, ?)", (curso_id, nombre_materia))
+                conn.commit()
+            
+            self.entry_nombre_materia.clear()
+            self.cargar_tabla_materias() # Recargar la lista
+        except Exception as e:
+            mostrar_error(f"Error al añadir materia: {e}")
+
+    def eliminar_materia(self):
+        selected_items = self.tabla_materias.selectedItems()
+        if not selected_items:
+            mostrar_error("Seleccione una materia de la tabla para eliminar.")
+            return
+        
+        materia_id = int(self.tabla_materias.item(self.tabla_materias.currentRow(), 0).text())
+        
+        reply = QMessageBox.question(self, "Confirmar Eliminación",
+                                     "¿Seguro que desea eliminar esta materia?\nEsto eliminará también todas las calificaciones asociadas a ella.",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    # Gracias a "ON DELETE CASCADE" en la tabla calificaciones,
+                    # SQLite borrará automáticamente las calificaciones asociadas.
+                    cursor.execute("DELETE FROM materias WHERE id = ?", (materia_id,))
+                    conn.commit()
+                self.cargar_tabla_materias()
+            except Exception as e:
+                mostrar_error(f"Error al eliminar materia: {e}")
+
+    # ---- PÁGINA 7: ASIGNAR CALIFICACIONES ----
+    def crear_pagina_gestion_calificaciones(self):
+        """Crea la interfaz para asignar calificaciones a los alumnos."""
+        widget = QWidget()
+        widget.setObjectName("contentPage")
+        layout_main = QHBoxLayout(widget)
+        layout_main.setContentsMargins(15, 15, 15, 15)
+
+        # Panel Izquierdo: Selección de Curso y Alumno
+        panel_izq = QGroupBox("Selección")
+        layout_izq = QVBoxLayout(panel_izq)
+        
+        self.combo_curso_calif = QComboBox()
+        self.lista_alumnos_calif = QListWidget()
+        
+        layout_izq.addWidget(QLabel("1. Seleccione el Curso:"))
+        layout_izq.addWidget(self.combo_curso_calif)
+        layout_izq.addWidget(QLabel("2. Seleccione el Alumno:"))
+        layout_izq.addWidget(self.lista_alumnos_calif)
+        layout_main.addWidget(panel_izq, 1)
+
+        # Panel Derecho: Tabla de Calificaciones
+        panel_der = QGroupBox("Calificaciones del Alumno")
+        layout_der = QVBoxLayout(panel_der)
+        
+        self.tabla_calificaciones = QTableWidget(0, 4) # ID_Materia (oculto), Materia, Calificación, Observaciones
+        self.tabla_calificaciones.setHorizontalHeaderLabels(["ID_Materia", "Materia", "Calificación (0-10)", "Observaciones"])
+        self.tabla_calificaciones.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.tabla_calificaciones.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.tabla_calificaciones.hideColumn(0) # Ocultamos la columna ID
+        
+        self.btn_guardar_calificaciones = QPushButton("Guardar Calificaciones")
+        self.btn_guardar_calificaciones.setObjectName("primaryButton")
+        
+        layout_der.addWidget(self.tabla_calificaciones)
+        layout_der.addWidget(self.btn_guardar_calificaciones)
+        layout_main.addWidget(panel_der, 2)
+        
+        # Conexiones
+        self.combo_curso_calif.currentIndexChanged.connect(self.cargar_alumnos_para_calificar)
+        self.lista_alumnos_calif.currentItemChanged.connect(self.cargar_tabla_calificaciones)
+        self.btn_guardar_calificaciones.clicked.connect(self.guardar_calificaciones)
+        
+        return widget
+        
+    def cargar_combo_cursos_calif(self):
+        """Carga los cursos en el combo de la pág. de calificaciones."""
+        try:
+            if not hasattr(self, 'combo_curso_calif'): return
+            self.combo_curso_calif.clear()
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT id, nombre_curso FROM cursos ORDER BY nombre_curso")
+                cursos = cursor.fetchall()
+            
+            self.combo_curso_calif.addItem("--- Seleccione un Curso ---", userData=None)
+            for curso in cursos:
+                self.combo_curso_calif.addItem(curso['nombre_curso'], userData=curso['id'])
+        except Exception as e:
+            mostrar_error(f"Error al cargar cursos para calificar: {e}")
+
+    def cargar_alumnos_para_calificar(self):
+        """Carga la lista de alumnos inscritos en el curso seleccionado."""
+        try:
+            if not hasattr(self, 'lista_alumnos_calif'): return
+            self.lista_alumnos_calif.clear()
+            self.tabla_calificaciones.setRowCount(0)
+            curso_id = self.combo_curso_calif.currentData()
+            if not curso_id: return
+
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT i.id, a.nombres, a.apellido_paterno, a.apellido_materno
+                    FROM inscripciones i
+                    JOIN alumnos a ON i.alumno_id = a.id
+                    WHERE i.curso_id = ?
+                    ORDER BY a.apellido_paterno
+                """, (curso_id,))
+                alumnos = cursor.fetchall()
+            
+            for alumno in alumnos:
+                nombre_completo = f"{alumno['apellido_paterno']} {alumno['apellido_materno']}, {alumno['nombres']}"
+                item = QListWidgetItem(nombre_completo)
+                item.setData(Qt.ItemDataRole.UserRole, alumno['id']) # Guardamos el ID de INSCRIPCIÓN
+                self.lista_alumnos_calif.addItem(item)
+        except Exception as e:
+            mostrar_error(f"Error al cargar alumnos para calificar: {e}")
+
+    def cargar_tabla_calificaciones(self, current_item, previous_item):
+        """Carga las materias y las calificaciones existentes del alumno."""
+        try:
+            if not hasattr(self, 'tabla_calificaciones') or not current_item:
+                self.tabla_calificaciones.setRowCount(0)
+                return
+
+            inscripcion_id = current_item.data(Qt.ItemDataRole.UserRole)
+            curso_id = self.combo_curso_calif.currentData()
+            
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                # 1. Obtener todas las materias de ese curso
+                cursor.execute("SELECT id, nombre_materia FROM materias WHERE curso_id = ?", (curso_id,))
+                materias = cursor.fetchall()
+                
+                # 2. Obtener las calificaciones YA GUARDADAS para esa inscripción
+                cursor.execute("SELECT materia_id, calificacion, observaciones FROM calificaciones WHERE inscripcion_id = ?", (inscripcion_id,))
+                calif_guardadas = {c['materia_id']: (c['calificacion'], c['observaciones']) for c in cursor.fetchall()}
+
+            self.tabla_calificaciones.setRowCount(len(materias))
+            for row, materia in enumerate(materias):
+                materia_id = materia['id']
+                calif, obs = calif_guardadas.get(materia_id, (0.0, "")) # Default
+                
+                self.tabla_calificaciones.setItem(row, 0, QTableWidgetItem(str(materia_id)))
+                self.tabla_calificaciones.setItem(row, 1, QTableWidgetItem(materia['nombre_materia']))
+                self.tabla_calificaciones.setItem(row, 2, QTableWidgetItem(str(calif)))
+                self.tabla_calificaciones.setItem(row, 3, QTableWidgetItem(obs))
+                
+                # La columna 1 (Materia) no debe ser editable
+                item_materia = self.tabla_calificaciones.item(row, 1)
+                item_materia.setFlags(item_materia.flags() & ~Qt.ItemFlag.ItemIsEditable)
+
+        except Exception as e:
+            mostrar_error(f"Error al cargar tabla de calificaciones: {e}")
+
+    def guardar_calificaciones(self):
+        """Guarda o actualiza las calificaciones de la tabla en la BD."""
+        try:
+            current_item = self.lista_alumnos_calif.currentItem()
+            if not current_item:
+                mostrar_error("Debe seleccionar un alumno.")
+                return
+            
+            inscripcion_id = current_item.data(Qt.ItemDataRole.UserRole)
+            
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                
+                for row in range(self.tabla_calificaciones.rowCount()):
+                    materia_id = int(self.tabla_calificaciones.item(row, 0).text())
+                    
+                    calificacion_str = self.tabla_calificaciones.item(row, 2).text()
+                    try:
+                        calificacion = float(calificacion_str)
+                    except ValueError:
+                        calificacion = 0.0
+                        
+                    observaciones = self.tabla_calificaciones.item(row, 3).text()
+                    
+                    # Usar "INSERT OR REPLACE" (UPSERT)
+                    # Primero, verificamos si existe
+                    cursor.execute("SELECT id FROM calificaciones WHERE inscripcion_id = ? AND materia_id = ?", (inscripcion_id, materia_id))
+                    existe = cursor.fetchone()
+                    
+                    if existe:
+                        # Actualizar
+                        cursor.execute("""
+                            UPDATE calificaciones SET calificacion = ?, observaciones = ?
+                            WHERE id = ?
+                        """, (calificacion, observaciones, existe['id']))
+                    else:
+                        # Insertar
+                        cursor.execute("""
+                            INSERT INTO calificaciones (inscripcion_id, materia_id, calificacion, observaciones)
+                            VALUES (?, ?, ?, ?)
+                        """, (inscripcion_id, materia_id, calificacion, observaciones))
+
+                conn.commit()
+                mostrar_info("Calificaciones guardadas exitosamente.")
+
+        except Exception as e:
+            mostrar_error(f"Error al guardar calificaciones: {e}")
 
     # ---- PÁGINA 6: CONFIGURACIÓN (NUEVA) ----
     def crear_pagina_configuracion(self):
@@ -2199,7 +2535,7 @@ class VentanaPrincipal(QMainWindow):
                 story_poliza.append(Paragraph("<b>NOTA.</b> El alumno podrá solicitar su garantía siempre y cuando cumpla con los requisitos antes mencionados.", styleN_poliza))
                 story_poliza.append(Spacer(1, 0.15*inch))
 
-                story_poliza.append(Paragraph("<b>CLAUSULA PARA EMPLEAR SU IMAGEN</b>", styleH_poliza))
+                story_poliza.append(Paragraph("<b>CLAUSULA PARA USO DE MARTKETING</b>", styleH_poliza))
                 story_poliza.append(Paragraph("El alumno autoriza expresamente a UPASER a captar, reproducir y utilizar su imagen, nombre y/o voz a través de fotografías, grabaciones de video o cualquier otro medio audiovisual, con fines exclusivamente publicitarios, institucionales, informativos y/o académicos relacionados con las actividades de la institución.", styleN_poliza))
                 story_poliza.append(Paragraph("Dicha autorización se concede de manera gratuita, sin limitación territorial ni temporal, y comprende su difusión en medios digitales, electrónicos y redes sociales oficiales de UPASER, así como en cualquier otra plataforma en línea utilizada por la institución.", styleN_poliza))
 
@@ -2224,7 +2560,7 @@ class VentanaPrincipal(QMainWindow):
                 
                 story_terminos.append(Paragraph("Es de suma importancia leer cuidadosamente este apartado antes de iniciar tu curso, para que conozcas tus derechos y obligaciones como alumno UPASER.", styleN_terminos))
                 story_terminos.append(Spacer(1, 0.2*inch))
-                story_terminos.append(Paragraph("La Unidad Profesional de Asesoría y Regularización (UPASER) tiene como garantía que el alumno se quede en sus primeras 5 opciones que seleccione en el concurso COMIPEMS/103 Municipios, asegurando que nuestro curso es competente bajo nuestro método de enseñanza.", styleN_terminos))
+                story_terminos.append(Paragraph("La Unidad Profesional de Asesoría y Regularización (UPASER) tiene como garantía que el alumno se quede en sus primeras 5 opciones que seleccione en el concurso ECOEMS/103 Municipios/EXAMEN DE INGRESO A UNIVERSIDAD (UNAM, IPN, UAM, UAEMex, ETC), asegurando que nuestro curso es competente bajo nuestro método de enseñanza.", styleN_terminos))
                 story_terminos.append(Spacer(1, 0.2*inch))
                 story_terminos.append(Paragraph("Antes de efectuar el pago, el usuario deberá aceptar la Política de Privacidad, una vez confirmado el pago del curso seleccionado por el aspirante este no podrá solicitar reembolso.", styleN_terminos))
                 story_terminos.append(Spacer(1, 0.2*inch))
@@ -2256,6 +2592,172 @@ class VentanaPrincipal(QMainWindow):
 
         except Exception as e:
             mostrar_error(f"Error al generar o abrir PDF completo: {e}\n{traceback.format_exc()}")
+    
+    def generar_boleta_pdf(self):
+        """Genera la boleta de calificaciones en PDF para el alumno seleccionado."""
+        
+        # 1. Obtener el Alumno ID seleccionado de la tabla
+        selected_items = self.tabla_alumnos.selectedItems()
+        if not selected_items or self.tabla_alumnos.currentRow() < 0:
+            mostrar_error("Por favor, seleccione un alumno de la lista.")
+            return
+
+        try:
+            alumno_id = int(self.tabla_alumnos.item(self.tabla_alumnos.currentRow(), 0).text())
+        except Exception:
+            mostrar_error("No se pudo obtener el ID del alumno seleccionado.")
+            return
+            
+        inscripcion_id_seleccionada = None
+        curso_nombre_seleccionado = ""
+        
+        try:
+            # 2. Verificar inscripciones del alumno
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT i.id, c.nombre_curso 
+                    FROM inscripciones i
+                    JOIN cursos c ON i.curso_id = c.id
+                    WHERE i.alumno_id = ?
+                """, (alumno_id,))
+                inscripciones = cursor.fetchall()
+
+            if not inscripciones:
+                mostrar_error("Este alumno no está inscrito en ningún curso.")
+                return
+            
+            if len(inscripciones) == 1:
+                # Si solo tiene una, la usamos
+                inscripcion_id_seleccionada = inscripciones[0]['id']
+                curso_nombre_seleccionado = inscripciones[0]['nombre_curso']
+            else:
+                # Si tiene varias, preguntamos al usuario
+                nombres_cursos = [i['nombre_curso'] for i in inscripciones]
+                curso_elegido, ok = QInputDialog.getItem(self, "Seleccionar Curso",
+                                                         "Este alumno está en varios cursos. ¿De cuál desea generar la boleta?",
+                                                         nombres_cursos, 0, False)
+                if ok and curso_elegido:
+                    # Encontrar el ID correspondiente
+                    for insc in inscripciones:
+                        if insc['nombre_curso'] == curso_elegido:
+                            inscripcion_id_seleccionada = insc['id']
+                            curso_nombre_seleccionado = insc['nombre_curso']
+                            break
+                else:
+                    return # El usuario canceló
+
+            if not inscripcion_id_seleccionada:
+                mostrar_error("No se pudo seleccionar una inscripción válida.")
+                return
+
+            # 3. Obtener todos los datos para el PDF
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                # Datos del alumno
+                cursor.execute("SELECT * FROM alumnos WHERE id = ?", (alumno_id,))
+                datos_alumno = cursor.fetchone()
+                
+                # Calificaciones
+                cursor.execute("""
+                    SELECT m.nombre_materia, c.calificacion, c.observaciones 
+                    FROM calificaciones c
+                    JOIN materias m ON c.materia_id = m.id
+                    WHERE c.inscripcion_id = ?
+                    ORDER BY m.nombre_materia
+                """, (inscripcion_id_seleccionada,))
+                calificaciones = cursor.fetchall()
+
+            if not datos_alumno:
+                mostrar_error("Error fatal: No se encontraron los datos del alumno.")
+                return
+
+            # 4. Generar el PDF
+            temp_pdf = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+            filename = temp_pdf.name
+            temp_pdf.close() 
+
+            c = canvas.Canvas(filename, pagesize=letter)
+            width, height = letter
+            
+            # Reutilizar estilos (similares a la ficha de inscripción)
+            styles = getSampleStyleSheet()
+            styleN = ParagraphStyle(name='Normal_Arial', parent=styles['Normal'], fontName=FONT_NAME, fontSize=12, leading=14)
+            styleH_centered = ParagraphStyle(name='Heading_Arial_Centered', parent=styles['Heading3'], fontName=FONT_BOLD_NAME, fontSize=12, alignment=TA_CENTER, spaceAfter=8)
+            styleTitle = ParagraphStyle(name='Title_Arial', parent=styles['h1'], fontName=FONT_BOLD_NAME, fontSize=14, alignment=TA_CENTER, spaceAfter=16)
+
+            # --- Dibujar PDF ---
+            self.draw_watermark(c, width, height)
+            self.draw_logo(c, width, height)
+
+            # Título
+            titulo_texto = f"<b>Unidad Profesional de Asesorías y Regularización (UPASER)<br/>Boleta de Calificaciones</b>"
+            title_p = Paragraph(titulo_texto, styleTitle)
+            title_w, title_h = title_p.wrapOn(c, width - 2*inch, height)
+            title_p.drawOn(c, inch, height - 0.75 * inch - title_h)
+            current_y = height - 0.75 * inch - title_h - 16
+
+            # Datos
+            nombre_alumno_completo = f"{datos_alumno['nombres']} {datos_alumno['apellido_paterno']} {datos_alumno['apellido_materno']}"
+            current_y = self.draw_text_pdf(c, current_y, f"<b>Alumno:</b> {nombre_alumno_completo}", inch, styleN)
+            current_y = self.draw_text_pdf(c, current_y, f"<b>Curso:</b> {curso_nombre_seleccionado}", inch, styleN)
+            current_y -= 0.25 * inch
+
+            # Tabla de Calificaciones
+            data_tabla = [["Materia", "Calificación", "Observaciones"]]
+            total_calif = 0.0
+            num_materias = 0
+            
+            if calificaciones:
+                for calif in calificaciones:
+                    data_tabla.append([
+                        Paragraph(calif['nombre_materia'], styleN),
+                        f"{calif['calificacion']:.1f}",
+                        Paragraph(calif['observaciones'], styleN)
+                    ])
+                    total_calif += calif['calificacion']
+                    num_materias += 1
+            else:
+                data_tabla.append(["(Sin materias asignadas a este curso)", "", ""])
+
+            tabla_calif = Table(data_tabla, colWidths=[3*inch, 1.5*inch, 3*inch])
+            tabla_calif.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), colors.grey),
+                ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+                ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                ('FONTNAME', (0,0), (-1,0), FONT_BOLD_NAME),
+                ('FONTNAME', (0,1), (-1,-1), FONT_NAME),
+                ('FONTSIZE', (0,0), (-1,-1), 10),
+                ('BOTTOMPADDING', (0,0), (-1,0), 6),
+                ('BACKGROUND', (0,1), (-1,-1), colors.whitesmoke),
+                ('GRID', (0,0), (-1,-1), 1, colors.black),
+                ('ALIGN', (0,1), (0,-1), 'LEFT'), # Materias a la izquierda
+                ('ALIGN', (2,1), (2,-1), 'LEFT'), # Observaciones a la izquierda
+            ]))
+            
+            w_tabla, h_tabla = tabla_calif.wrapOn(c, width - 2*inch, height)
+            tabla_calif.drawOn(c, inch, current_y - h_tabla)
+            current_y -= (h_tabla + 0.25 * inch)
+
+            # Promedio
+            promedio = (total_calif / num_materias) if num_materias > 0 else 0.0
+            current_y = self.draw_text_pdf(c, current_y, f"<b>Promedio General: {promedio:.2f}</b>", inch, styleN)
+            
+            # Firma
+            firma_y_base = 2 * inch
+            c.line(inch * 2.5, firma_y_base, width - (inch * 2.5), firma_y_base)
+            c.setFont(FONT_NAME, 10)
+            c.drawCentredString(width / 2, firma_y_base - 0.2 * inch, "Control Escolar UPASER")
+
+            # Guardar y abrir
+            c.save()
+            self._temp_pdf_files.append(filename)
+            url = QUrl.fromLocalFile(filename)
+            QDesktopServices.openUrl(url)
+
+        except Exception as e:
+            mostrar_error(f"Error al generar boleta PDF: {e}\n{traceback.format_exc()}")
 
 
     def limpiar_archivos_temporales(self):
@@ -2754,6 +3256,9 @@ class VentanaPrincipal(QMainWindow):
         
         if hasattr(self, 'cargar_cursos_para_filtro'): 
             self.cargar_cursos_para_filtro()
+        if self.user_role == "Administrador":
+            if hasattr(self, 'cargar_combo_cursos_materias'): self.cargar_combo_cursos_materias()
+            if hasattr(self, 'cargar_combo_cursos_calif'): self.cargar_combo_cursos_calif()
 
 
     # --- NUEVAS FUNCIONES DE TEMA ---
