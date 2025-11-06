@@ -161,25 +161,41 @@ def inicializar_db():
         """)
         
         # --- NUEVA TABLA: Usuarios ---
+        #cursor.execute("DROP TABLE IF EXISTS usuarios") #
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS usuarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nombre_completo TEXT NOT NULL,
             telefono TEXT,
             email TEXT NOT NULL UNIQUE,
-            rol TEXT NOT NULL,
+            permisos TEXT NOT NULL,  -- Reemplaza a 'rol'
             password TEXT NOT NULL
         )
         """)
         
-        # --- Insertar usuario admin por defecto ---
+        # --- Insertar usuario admin por defecto con todos los permisos ---
         try:
+            # Definir todos los permisos para el admin
+            admin_permissions = {
+                "is_admin": True,
+                "can_register_students": True,
+                "can_register_payments": True,
+                "can_view_all_students": True,
+                "can_manage_courses": True,
+                "can_manage_users": True,
+                "can_manage_subjects": True,
+                "can_assign_grades": True,
+                "can_access_settings": True
+            }
+            # Convertir el diccionario a un string JSON para guardarlo
+            admin_permisos_json = json.dumps(admin_permissions)
+            
             cursor.execute("""
-            INSERT INTO usuarios (id, nombre_completo, email, rol, password)
-            VALUES (1, 'Administrador', 'admin@sistema.com', 'Administrador', 'admin123')
-            """)
+            INSERT INTO usuarios (id, nombre_completo, email, permisos, password)
+            VALUES (1, 'Administrador', 'admin@sistema.com', ?, 'admin123')
+            """, (admin_permisos_json,))
         except sqlite3.IntegrityError:
-            pass 
+            pass
 
         # --- NUEVA TABLA: Materias (Asignaturas por Curso) ---
         cursor.execute("""
@@ -192,13 +208,19 @@ def inicializar_db():
         """)
 
         # --- NUEVA TABLA: Calificaciones (Notas por Alumno/Materia) ---
+        cursor.execute("DROP TABLE IF EXISTS calificaciones")
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS calificaciones (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             inscripcion_id INTEGER NOT NULL,
             materia_id INTEGER NOT NULL,
-            calificacion REAL DEFAULT 0.0,
-            observaciones TEXT DEFAULT '',
+            
+            parcial_1 REAL DEFAULT 0.0,
+            obs_1 TEXT DEFAULT '',
+            
+            parcial_2 REAL DEFAULT 0.0,
+            obs_2 TEXT DEFAULT '',
+
             FOREIGN KEY (inscripcion_id) REFERENCES inscripciones(id) ON DELETE CASCADE,
             FOREIGN KEY (materia_id) REFERENCES materias(id) ON DELETE CASCADE
         )
@@ -436,6 +458,7 @@ class LoginScreen(QWidget):
         try:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
+                # --- INICIO DE MODIFICACIÓN: Seleccionar 'permisos' en lugar de 'rol' ---
                 cursor.execute("SELECT * FROM usuarios WHERE email = ? AND password = ?", (email, password))
                 usuario = cursor.fetchone()
                 
@@ -443,7 +466,18 @@ class LoginScreen(QWidget):
                 self.accept_login = True
                 self.username = usuario['email'] 
                 self.full_username = usuario['nombre_completo']
-                self.user_role = usuario['rol'] 
+                
+                # Cargar el string JSON de la DB y convertirlo a un diccionario Python
+                try:
+                    self.permisos_dict = json.loads(usuario['permisos'])
+                except json.JSONDecodeError:
+                    # Fallback por si el JSON está corrupto
+                    self.permisos_dict = {"is_admin": False} 
+                
+                # Guardar el rol anterior por compatibilidad (aunque usaremos el dict)
+                self.user_role = "Administrador" if self.permisos_dict.get("is_admin") else "Asesor"
+                # --- FIN DE MODIFICACIÓN ---
+                
                 self.close() 
             else:
                 QMessageBox.warning(self, "Error de Login", "Email o contraseña incorrectos.")
@@ -492,16 +526,18 @@ class LoginScreen(QWidget):
 
     def closeEvent(self, event):
         if not self.accept_login:
-            sys.exit(0) 
+            sys.exit(0)
+        event.permisos_dict = self.permisos_dict 
         event.accept()
 
 # ---- Ventana Principal de la Aplicación (REDISEÑADA AL ESTILO DASHBOARD) ----
 class VentanaPrincipal(QMainWindow):
-    def __init__(self, username, full_username, user_role): 
+    def __init__(self, username, full_username, user_role, permisos_dict):
         super().__init__()
         self.username = username
         self.full_username = full_username 
-        self.user_role = user_role 
+        self.user_role = user_role
+        self.permisos = permisos_dict
         self.logout_solicitado = False 
         self._temp_pdf_files = [] 
         self.usuario_seleccionado_id = None 
@@ -662,7 +698,7 @@ class VentanaPrincipal(QMainWindow):
         if hasattr(self, 'btn_nav_gestion_usuarios'):
             self.btn_nav_gestion_usuarios.clicked.connect(lambda: self.cambiar_pagina(5))
         if hasattr(self, 'btn_nav_config'):
-            self.btn_nav_config.clicked.connect(lambda: self.cambiar_pagina(6))
+            self.btn_nav_config.clicked.connect(lambda: self.cambiar_pagina(8))
            
         
         self.btn_logout.clicked.connect(self.cerrar_sesion)
@@ -780,7 +816,7 @@ class VentanaPrincipal(QMainWindow):
         menu.addAction("👥 Lista de Alumnos", lambda: self.cambiar_pagina(3))
         
         # Sección de Administración (solo si es Admin)
-        if self.user_role == "Administrador":
+        if self.permisos.get('is_admin'): # O usar permisos específicos
             menu.addSeparator()
             menu.addAction("📚 Gestionar Cursos", lambda: self.cambiar_pagina(4))
             menu.addAction("👤 Gestionar Usuarios", lambda: self.cambiar_pagina(5))
@@ -833,10 +869,11 @@ class VentanaPrincipal(QMainWindow):
         layout_accesos.addWidget(btn_sc_gestionar)
         
         # --- AÑADIR ACCESOS DE ADMIN ---
-        if self.user_role == "Administrador":
+        if self.permisos.get('can_manage_courses') or self.permisos.get('is_admin'):
             btn_sc_cursos = self.crear_boton_acceso("📚", "Gestionar Cursos", lambda: self.cambiar_pagina(4))
-            btn_sc_usuarios = self.crear_boton_acceso("👤", "Gestionar Usuarios", lambda: self.cambiar_pagina(5))
             layout_accesos.addWidget(btn_sc_cursos)
+        if self.permisos.get('can_manage_users') or self.permisos.get('is_admin'):
+            btn_sc_usuarios = self.crear_boton_acceso("👤", "Gestionar Usuarios", lambda: self.cambiar_pagina(5))
             layout_accesos.addWidget(btn_sc_usuarios)
             
         layout_accesos.addStretch()
@@ -893,19 +930,25 @@ class VentanaPrincipal(QMainWindow):
             self.cargar_tabla_alumnos() 
             self.cargar_cursos_para_filtro() 
         elif index == 4: 
-            if self.user_role == "Administrador":
+             if self.permisos.get('can_manage_courses') or self.permisos.get('is_admin'):
                 self.stacked_widget.setCurrentIndex(4)
-                boton_activo = self.btn_nav_gestion_cursos
-                self.cargar_tabla_cursos() 
+                # ... (resto del código) ...
         elif index == 5: 
-            if self.user_role == "Administrador":
+            if self.permisos.get('can_manage_users') or self.permisos.get('is_admin'):
                 self.stacked_widget.setCurrentIndex(5)
-                boton_activo = self.btn_nav_gestion_usuarios
-                self.cargar_tabla_usuarios() 
+                # ... (resto del código) ...
         elif index == 6: 
-            if self.user_role == "Administrador":
+            if self.permisos.get('can_manage_subjects') or self.permisos.get('is_admin'):
                 self.stacked_widget.setCurrentIndex(6)
-                boton_activo = self.btn_nav_config
+                # ... (resto del código) ...
+        elif index == 7: 
+            if self.permisos.get('can_assign_grades') or self.permisos.get('is_admin'):
+                self.stacked_widget.setCurrentIndex(7)
+                # ... (resto del código) ...
+        elif index == 8:
+            if self.permisos.get('can_access_settings') or self.permisos.get('is_admin'):
+                self.stacked_widget.setCurrentIndex(8)
+                # ... (resto del código) ...
                 
         # Poner estilo seleccionado al botón activo (si aplica)
         if boton_activo:
@@ -1178,6 +1221,7 @@ class VentanaPrincipal(QMainWindow):
 
         layout_derecho.addWidget(group_expediente)
         layout_derecho.addWidget(self.btn_dar_baja)
+        layout_derecho.addWidget(self.btn_generar_boleta)
 
         layout_principal.addWidget(panel_derecho, 1) 
 
@@ -1186,6 +1230,103 @@ class VentanaPrincipal(QMainWindow):
 
         return widget
 
+    # ---- PÁGINA 4: GESTIONAR CURSOS ----
+    def crear_pagina_gestion_usuarios(self):
+        """Crea la interfaz para la página de gestión de usuarios."""
+        widget = QWidget()
+        widget.setObjectName("contentPage")
+        layout_main = QHBoxLayout(widget)
+        layout_main.setContentsMargins(15, 15, 15, 15)
+
+        # Panel Izquierdo: Formulario de Usuario
+        panel_usuario_form = QGroupBox("Registrar / Editar Usuario")
+        layout_form = QVBoxLayout(panel_usuario_form)
+        
+        form_usuario = QFormLayout()
+        self.entry_usr_nombre = QLineEdit()
+        self.entry_usr_telefono = QLineEdit()
+        self.entry_usr_email = QLineEdit()
+        
+        form_usuario.addRow(QLabel("Nombre Completo:"), self.entry_usr_nombre)
+        form_usuario.addRow(QLabel("Teléfono:"), self.entry_usr_telefono)
+        form_usuario.addRow(QLabel("Correo Electrónico:"), self.entry_usr_email)
+        
+        layout_form.addLayout(form_usuario)
+
+        # --- INICIO DE MODIFICACIÓN: Añadir CheckBoxes de Permisos ---
+        
+        # Definir los permisos (texto_amigable, clave_json)
+        self.permisos_map = [
+            ("Registrar Alumnos", "can_register_students"),
+            ("Registrar Pagos", "can_register_payments"),
+            ("Ver Lista Alumnos", "can_view_all_students"),
+            ("Gestionar Cursos", "can_manage_courses"),
+            ("Gestionar Materias", "can_manage_subjects"),
+            ("Asignar Calificaciones", "can_assign_grades"),
+            ("Gestionar Usuarios", "can_manage_users"),
+            ("Ver Configuración", "can_access_settings"),
+            ("ES ADMINISTRADOR (Acceso Total)", "is_admin"),
+        ]
+        
+        self.permisos_checkboxes = {} # Diccionario para guardar los checkboxes
+
+        group_permisos = QGroupBox("Permisos del Usuario")
+        layout_permisos = QGridLayout(group_permisos)
+
+        for i, (texto, clave) in enumerate(self.permisos_map):
+            chk = QCheckBox(texto)
+            self.permisos_checkboxes[clave] = chk
+            layout_permisos.addWidget(chk, i, 0)
+
+        layout_form.addWidget(group_permisos)
+        # --- FIN DE MODIFICACIÓN ---
+
+        # Botones de acción del formulario
+        self.btn_guardar_usuario = QPushButton("Guardar Usuario")
+        self.btn_guardar_usuario.setObjectName("primaryButton")
+        self.btn_guardar_usuario.clicked.connect(self.guardar_usuario) 
+
+        self.btn_limpiar_form_usuario = QPushButton("Limpiar Formulario")
+        self.btn_limpiar_form_usuario.setObjectName("secondaryButton") 
+        self.btn_limpiar_form_usuario.clicked.connect(self.limpiar_campos_usuario)
+
+        self.btn_cambiar_password = QPushButton("Cambiar Contraseña")
+        self.btn_cambiar_password.setObjectName("secondaryButton") 
+        self.btn_cambiar_password.clicked.connect(self.cambiar_password_usuario)
+        self.btn_cambiar_password.setVisible(False) 
+
+        layout_botones_form = QHBoxLayout()
+        layout_botones_form.addWidget(self.btn_guardar_usuario)
+        layout_botones_form.addWidget(self.btn_limpiar_form_usuario)
+        
+        layout_form.addLayout(layout_botones_form)
+        layout_form.addWidget(self.btn_cambiar_password)
+        layout_form.addStretch() 
+        
+        # Panel Derecho: Tabla de Usuarios
+        panel_usuario_tabla = QGroupBox("Lista de Usuarios")
+        layout_usuario_tabla = QVBoxLayout(panel_usuario_tabla)
+        # --- MODIFICADO: Quitar columna 'Rol' ---
+        self.tabla_usuarios = QTableWidget(0, 3)
+        self.tabla_usuarios.setHorizontalHeaderLabels(["ID (No. Empleado)", "Nombre", "Email"])
+        self.tabla_usuarios.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.tabla_usuarios.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.tabla_usuarios.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.tabla_usuarios.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.tabla_usuarios.itemSelectionChanged.connect(self.seleccionar_usuario_para_edicion)
+        
+        self.btn_eliminar_usuario = QPushButton("Eliminar Usuario Seleccionado")
+        self.btn_eliminar_usuario.setObjectName("deleteButton") 
+        self.btn_eliminar_usuario.clicked.connect(self.dar_baja_usuario)
+
+        layout_usuario_tabla.addWidget(self.tabla_usuarios)
+        layout_usuario_tabla.addWidget(self.btn_eliminar_usuario)
+
+        layout_main.addWidget(panel_usuario_form)
+        layout_main.addWidget(panel_usuario_tabla, 1) 
+        
+        return widget
+    
     # ---- PÁGINA 4: GESTIONAR CURSOS ----
     def crear_pagina_gestion_cursos(self):
         """Crea la interfaz para la página de gestión de cursos."""
@@ -1261,6 +1402,7 @@ class VentanaPrincipal(QMainWindow):
     
         
     # ---- PÁGINA 5: GESTIONAR USUARIOS (NUEVA CON EDICIÓN) ----
+    # ---- PÁGINA 5: GESTIONAR USUARIOS (NUEVA CON PERMISOS) ----
     def crear_pagina_gestion_usuarios(self):
         """Crea la interfaz para la página de gestión de usuarios."""
         widget = QWidget()
@@ -1276,14 +1418,44 @@ class VentanaPrincipal(QMainWindow):
         self.entry_usr_nombre = QLineEdit()
         self.entry_usr_telefono = QLineEdit()
         self.entry_usr_email = QLineEdit()
-        self.combo_usr_rol = QComboBox()
-        self.combo_usr_rol.addItems(["Asesor", "Administrador"])
         
         form_usuario.addRow(QLabel("Nombre Completo:"), self.entry_usr_nombre)
         form_usuario.addRow(QLabel("Teléfono:"), self.entry_usr_telefono)
         form_usuario.addRow(QLabel("Correo Electrónico:"), self.entry_usr_email)
-        form_usuario.addRow(QLabel("Rol:"), self.combo_usr_rol)
         
+        layout_form.addLayout(form_usuario)
+
+        # --- INICIO DE MODIFICACIÓN: Añadir CheckBoxes de Permisos ---
+        
+        # Definir los permisos (texto_amigable, clave_json)
+        self.permisos_map = [
+            ("Registrar Alumnos", "can_register_students"),
+            ("Registrar Pagos", "can_register_payments"),
+            ("Ver Lista Alumnos", "can_view_all_students"),
+            ("Gestionar Cursos", "can_manage_courses"),
+            ("Gestionar Materias", "can_manage_subjects"),
+            ("Asignar Calificaciones", "can_assign_grades"),
+            ("Gestionar Usuarios", "can_manage_users"),
+            ("Ver Configuración", "can_access_settings"),
+            ("ES ADMINISTRADOR (Acceso Total)", "is_admin"),
+        ]
+        
+        self.permisos_checkboxes = {} # Diccionario para guardar los checkboxes
+
+        group_permisos = QGroupBox("Permisos del Usuario")
+        layout_permisos = QGridLayout(group_permisos)
+
+        for i, (texto, clave) in enumerate(self.permisos_map):
+            chk = QCheckBox(texto)
+            self.permisos_checkboxes[clave] = chk
+            layout_permisos.addWidget(chk, i, 0)
+
+            if clave == 'is_admin':
+                chk.toggled.connect(self.toggle_all_permissions)
+
+        layout_form.addWidget(group_permisos)
+        # --- FIN DE MODIFICACIÓN ---
+
         # Botones de acción del formulario
         self.btn_guardar_usuario = QPushButton("Guardar Usuario")
         self.btn_guardar_usuario.setObjectName("primaryButton")
@@ -1302,7 +1474,6 @@ class VentanaPrincipal(QMainWindow):
         layout_botones_form.addWidget(self.btn_guardar_usuario)
         layout_botones_form.addWidget(self.btn_limpiar_form_usuario)
         
-        layout_form.addLayout(form_usuario)
         layout_form.addLayout(layout_botones_form)
         layout_form.addWidget(self.btn_cambiar_password)
         layout_form.addStretch() 
@@ -1310,8 +1481,9 @@ class VentanaPrincipal(QMainWindow):
         # Panel Derecho: Tabla de Usuarios
         panel_usuario_tabla = QGroupBox("Lista de Usuarios")
         layout_usuario_tabla = QVBoxLayout(panel_usuario_tabla)
-        self.tabla_usuarios = QTableWidget(0, 4)
-        self.tabla_usuarios.setHorizontalHeaderLabels(["ID (No. Empleado)", "Nombre", "Email", "Rol"])
+        # --- MODIFICADO: Quitar columna 'Rol' ---
+        self.tabla_usuarios = QTableWidget(0, 3)
+        self.tabla_usuarios.setHorizontalHeaderLabels(["ID (No. Empleado)", "Nombre", "Email"])
         self.tabla_usuarios.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.tabla_usuarios.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.tabla_usuarios.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -1329,6 +1501,263 @@ class VentanaPrincipal(QMainWindow):
         layout_main.addWidget(panel_usuario_tabla, 1) 
         
         return widget
+    
+    # ---- (PÁGINA 6: GESTIONAR MATERIAS - Esta debe estar aquí) ----
+    def crear_pagina_gestion_materias(self):
+        """Crea la interfaz para añadir o quitar materias a un curso."""
+        # ... (Asegúrate de que esta función esté presente) ...
+        # (El código de esta función no se muestra para abreviar,
+        #  pero debe estar en tu archivo entre crear_pagina_gestion_usuarios
+        #  y crear_pagina_gestion_calificaciones)
+        pass # Reemplaza 'pass' con el código de la función si la borraste
+    
+    # ---- (PÁGINA 7: ASIGNAR CALIFICACIONES - Esta debe estar aquí) ----
+    def crear_pagina_gestion_calificaciones(self):
+        """Crea la interfaz para asignar calificaciones a los alumnos."""
+        # ... (El código de esta función debe estar aquí) ...
+        pass # Reemplaza 'pass' con el código de la función si la borraste
+        
+    # ---- (PÁGINA 8: CONFIGURACIÓN - Esta debe estar aquí) ----
+    def crear_pagina_configuracion(self):
+        """Crea la interfaz para la página de configuración."""
+        # ... (El código de esta función debe estar aquí) ...
+        pass # Reemplaza 'pass' con el código de la función si la borraste
+
+
+    # --- LÓGICA DE GESTIÓN DE USUARIOS (ACTUALIZADA) ---
+
+    def guardar_usuario(self):
+        """Guarda un usuario nuevo o actualiza uno existente."""
+        if not all(hasattr(self, w) for w in ['entry_usr_nombre', 'entry_usr_email', 'permisos_checkboxes']):
+            return 
+
+        nombre = self.entry_usr_nombre.text().strip()
+        telefono = self.entry_usr_telefono.text().strip()
+        email = self.entry_usr_email.text().strip()
+        
+        if not nombre or not email:
+            mostrar_error("Nombre Completo y Correo Electrónico son obligatorios.")
+            return
+            
+        # --- INICIO DE MODIFICACIÓN: Construir diccionario de permisos ---
+        permisos_dict = {}
+        for clave, checkbox in self.permisos_checkboxes.items():
+            permisos_dict[clave] = checkbox.isChecked()
+        
+        # Convertir a JSON
+        permisos_json = json.dumps(permisos_dict)
+        # --- FIN DE MODIFICACIÓN ---
+            
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                
+                if self.usuario_seleccionado_id is None:
+                    # --- CREAR NUEVO USUARIO ---
+                    password = secrets.token_hex(4) 
+                    cursor.execute("""
+                    INSERT INTO usuarios (nombre_completo, telefono, email, permisos, password)
+                    VALUES (?, ?, ?, ?, ?)
+                    """, (nombre, telefono, email, permisos_json, password))
+                    user_id = cursor.lastrowid 
+                    conn.commit()
+                    
+                    mostrar_info(f"Usuario creado exitosamente:\n\n"
+                                 f"No. de Empleado (ID): {user_id}\n"
+                                 f"Usuario (Email): {email}\n"
+                                 f"Contraseña: {password}\n\n"
+                                 "Por favor, guarde esta contraseña. No se puede recuperar.")
+                
+                else:
+                    # --- ACTUALIZAR USUARIO EXISTENTE ---
+                    cursor.execute("""
+                    UPDATE usuarios SET nombre_completo = ?, telefono = ?, email = ?, permisos = ?
+                    WHERE id = ?
+                    """, (nombre, telefono, email, permisos_json, self.usuario_seleccionado_id))
+                    conn.commit()
+                    mostrar_info(f"Usuario (ID: {self.usuario_seleccionado_id}) actualizado exitosamente.")
+                         
+            self.limpiar_campos_usuario()
+            self.cargar_tabla_usuarios()
+            
+        except sqlite3.IntegrityError:
+            mostrar_error("Error: Ese correo electrónico ya está registrado.")
+        except sqlite3.Error as e:
+            mostrar_error(f"Error al registrar usuario: {e}")
+
+    def cambiar_password_usuario(self):
+        """Cambia la contraseña del usuario seleccionado."""
+        if self.usuario_seleccionado_id is None:
+            mostrar_error("No hay ningún usuario seleccionado.")
+            return
+        
+        # --- AÑADIDO: Proteger al Admin ID 1 ---
+        if self.usuario_seleccionado_id == 1:
+            mostrar_error("No se puede cambiar la contraseña del Administrador principal desde aquí.")
+            return
+
+        nueva_pass, ok = QInputDialog.getText(self, "Cambiar Contraseña",
+                                              "Ingrese la nueva contraseña:", QLineEdit.EchoMode.Password)
+        
+        if ok and nueva_pass:
+            try:
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("UPDATE usuarios SET password = ? WHERE id = ?", (nueva_pass, self.usuario_seleccionado_id))
+                    conn.commit()
+                mostrar_info("Contraseña actualizada exitosamente.")
+            except sqlite3.Error as e:
+                mostrar_error(f"Error al cambiar la contraseña: {e}")
+        elif ok and not nueva_pass:
+            mostrar_error("La contraseña no puede estar vacía.")
+
+    def seleccionar_usuario_para_edicion(self):
+        """Carga los datos del usuario seleccionado en el formulario de edición."""
+        selected_items = self.tabla_usuarios.selectedItems()
+        if not selected_items:
+            self.limpiar_campos_usuario() 
+            return
+
+        selected_row = self.tabla_usuarios.currentRow()
+        
+        if selected_row < 0:
+             self.limpiar_campos_usuario()
+             return
+             
+        user_id_item = self.tabla_usuarios.item(selected_row, 0)
+        if not user_id_item: return
+
+        try:
+            user_id = int(user_id_item.text())
+            
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM usuarios WHERE id = ?", (user_id,))
+                datos = cursor.fetchone()
+
+            if datos:
+                self.usuario_seleccionado_id = user_id
+                self.entry_usr_nombre.setText(datos['nombre_completo'])
+                self.entry_usr_telefono.setText(datos['telefono'])
+                self.entry_usr_email.setText(datos['email'])
+                
+                # --- INICIO DE MODIFICACIÓN: Cargar permisos ---
+                try:
+                    permisos_dict = json.loads(datos['permisos'])
+                except json.JSONDecodeError:
+                    permisos_dict = {} # Fallback
+
+                # Asignar el estado de los checkboxes
+                for clave, checkbox in self.permisos_checkboxes.items():
+                    checkbox.setChecked(permisos_dict.get(clave, False))
+                # --- FIN DE MODIFICACIÓN ---
+                
+                self.btn_guardar_usuario.setText("Actualizar Usuario")
+
+                is_admin = permisos_dict.get('is_admin', False)
+                
+                # Proteger al Admin ID 1
+                if user_id == 1:
+                    self.btn_cambiar_password.setVisible(False)
+                    self.toggle_all_permissions(True) # Deshabilita todo
+                else:
+                    self.btn_cambiar_password.setVisible(True)
+                    self.toggle_all_permissions(is_admin)
+
+        except Exception as e:
+            mostrar_error(f"Error al cargar datos de usuario: {e}")
+            self.limpiar_campos_usuario()
+
+    def dar_baja_usuario(self):
+        """Elimina un usuario seleccionado de la BD."""
+        
+        # --- Lógica de selección mejorada ---
+        user_id_a_eliminar = None
+        nombre_seleccionado = ""
+        
+        selected_items = self.tabla_usuarios.selectedItems()
+        if selected_items and self.tabla_usuarios.currentRow() >= 0:
+            selected_row = self.tabla_usuarios.currentRow()
+            user_id_item = self.tabla_usuarios.item(selected_row, 0)
+            nombre_item = self.tabla_usuarios.item(selected_row, 1)
+            if user_id_item:
+                user_id_a_eliminar = int(user_id_item.text())
+                nombre_seleccionado = nombre_item.text()
+        else:
+             mostrar_error("Por favor, seleccione un usuario de la lista para eliminar.")
+             return
+        # --- Fin lógica de selección ---
+
+        # Protección para el admin ID 1 y para no borrarse a sí mismo
+        if user_id_a_eliminar == 1:
+            mostrar_error("No se puede eliminar al administrador principal (ID 1).")
+            return
+            
+        if self.username == self.tabla_usuarios.item(self.tabla_usuarios.currentRow(), 2).text():
+            mostrar_error("No puede eliminarse a sí mismo.")
+            return
+
+        reply = QMessageBox.question(self, "Confirmar Eliminación",
+                                     f"¿Está seguro que desea eliminar al usuario:\n\n{nombre_seleccionado} (ID: {user_id_a_eliminar})?\n\nEsta acción no se puede deshacer.",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("DELETE FROM usuarios WHERE id = ?", (user_id_a_eliminar,))
+                    conn.commit()
+                
+                mostrar_info(f"Usuario {nombre_seleccionado} eliminado exitosamente.")
+                self.limpiar_campos_usuario()
+                self.cargar_tabla_usuarios()
+
+            except sqlite3.Error as e:
+                mostrar_error(f"Error al eliminar usuario: {e}")
+
+            
+    def limpiar_campos_usuario(self):
+        """Limpia el formulario de gestión de usuarios y resetea el modo a 'Guardar'."""
+        try:
+            if hasattr(self, 'entry_usr_nombre'):
+                self.entry_usr_nombre.clear()
+                self.entry_usr_telefono.clear()
+                self.entry_usr_email.clear()
+                
+                # --- INICIO DE MODIFICACIÓN: Limpiar y HABILITAR checkboxes ---
+                if hasattr(self, 'permisos_checkboxes'):
+                    for checkbox in self.permisos_checkboxes.values():
+                        checkbox.setChecked(False)
+                        checkbox.setEnabled(True) # Asegurarse de que estén habilitados
+                # --- FIN DE MODIFICACIÓN ---
+                
+                self.usuario_seleccionado_id = None
+                self.btn_guardar_usuario.setText("Guardar Usuario")
+                self.btn_cambiar_password.setVisible(False)
+                self.tabla_usuarios.clearSelection()
+        except AttributeError:
+            pass 
+
+    def cargar_tabla_usuarios(self):
+        """Carga la lista de usuarios (empleados) en la QTableWidget."""
+        try: 
+            if hasattr(self, 'tabla_usuarios'):
+                self.tabla_usuarios.setRowCount(0)
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    # --- MODIFICADO: Quitar 'rol' ---
+                    cursor.execute("SELECT id, nombre_completo, email FROM usuarios ORDER BY nombre_completo")
+                    usuarios = cursor.fetchall()
+
+                    self.tabla_usuarios.setRowCount(len(usuarios))
+                    for row, usuario in enumerate(usuarios):
+                        self.tabla_usuarios.setItem(row, 0, QTableWidgetItem(str(usuario['id'])))
+                        self.tabla_usuarios.setItem(row, 1, QTableWidgetItem(usuario['nombre_completo']))
+                        self.tabla_usuarios.setItem(row, 2, QTableWidgetItem(usuario['email']))
+        except sqlite3.Error as e:
+            mostrar_error(f"Error al cargar tabla de usuarios: {e}")
+        except AttributeError:
+            pass
     
     # ---- PÁGINA 6: GESTIONAR MATERIAS ----
     def crear_pagina_gestion_materias(self):
@@ -1485,11 +1914,22 @@ class VentanaPrincipal(QMainWindow):
         panel_der = QGroupBox("Calificaciones del Alumno")
         layout_der = QVBoxLayout(panel_der)
         
+        # --- INICIO DE MODIFICACIÓN: Añadir selector de parcial ---
+        selector_layout = QHBoxLayout()
+        selector_layout.addWidget(QLabel("Seleccionar Parcial:"))
+        self.combo_parcial_select = QComboBox()
+        self.combo_parcial_select.addItems(["Primer Parcial", "Segundo Parcial"])
+        selector_layout.addWidget(self.combo_parcial_select)
+        selector_layout.addStretch()
+        layout_der.addLayout(selector_layout)
+        # --- FIN DE MODIFICACIÓN ---
+
         self.tabla_calificaciones = QTableWidget(0, 4) # ID_Materia (oculto), Materia, Calificación, Observaciones
         self.tabla_calificaciones.setHorizontalHeaderLabels(["ID_Materia", "Materia", "Calificación (0-10)", "Observaciones"])
         self.tabla_calificaciones.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.tabla_calificaciones.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self.tabla_calificaciones.hideColumn(0) # Ocultamos la columna ID
+        self.tabla_calificaciones.setEditTriggers(QTableWidget.EditTrigger.DoubleClicked) # Permitir edición
         
         self.btn_guardar_calificaciones = QPushButton("Guardar Calificaciones")
         self.btn_guardar_calificaciones.setObjectName("primaryButton")
@@ -1502,6 +1942,11 @@ class VentanaPrincipal(QMainWindow):
         self.combo_curso_calif.currentIndexChanged.connect(self.cargar_alumnos_para_calificar)
         self.lista_alumnos_calif.currentItemChanged.connect(self.cargar_tabla_calificaciones)
         self.btn_guardar_calificaciones.clicked.connect(self.guardar_calificaciones)
+        
+        # --- INICIO DE MODIFICACIÓN: Conectar el nuevo ComboBox ---
+        # (Añadimos un lambda para que llame a la función de recarga)
+        self.combo_parcial_select.currentIndexChanged.connect(lambda: self.cargar_tabla_calificaciones(self.lista_alumnos_calif.currentItem(), None))
+        # --- FIN DE MODIFICACIÓN ---
         
         return widget
         
@@ -1559,15 +2004,27 @@ class VentanaPrincipal(QMainWindow):
             inscripcion_id = current_item.data(Qt.ItemDataRole.UserRole)
             curso_id = self.combo_curso_calif.currentData()
             
+            # --- INICIO DE MODIFICACIÓN: Determinar qué parcial cargar ---
+            idx_parcial = self.combo_parcial_select.currentIndex()
+            col_calif_db = f"parcial_{idx_parcial + 1}"
+            col_obs_db = f"obs_{idx_parcial + 1}"
+            # --- FIN DE MODIFICACIÓN ---
+            
             with get_db_connection() as conn:
                 cursor = conn.cursor()
                 # 1. Obtener todas las materias de ese curso
                 cursor.execute("SELECT id, nombre_materia FROM materias WHERE curso_id = ?", (curso_id,))
                 materias = cursor.fetchall()
                 
-                # 2. Obtener las calificaciones YA GUARDADAS para esa inscripción
-                cursor.execute("SELECT materia_id, calificacion, observaciones FROM calificaciones WHERE inscripcion_id = ?", (inscripcion_id,))
-                calif_guardadas = {c['materia_id']: (c['calificacion'], c['observaciones']) for c in cursor.fetchall()}
+                # 2. Obtener las calificaciones YA GUARDADAS
+                # --- MODIFICADO: Seleccionar solo las columnas del parcial elegido ---
+                cursor.execute(f"SELECT materia_id, {col_calif_db}, {col_obs_db} FROM calificaciones WHERE inscripcion_id = ?", (inscripcion_id,))
+                
+                # Mapear materia_id -> (calificacion, observacion)
+                calif_guardadas = {
+                    c['materia_id']: (c[col_calif_db], c[col_obs_db]) 
+                    for c in cursor.fetchall()
+                }
 
             self.tabla_calificaciones.setRowCount(len(materias))
             for row, materia in enumerate(materias):
@@ -1596,6 +2053,12 @@ class VentanaPrincipal(QMainWindow):
             
             inscripcion_id = current_item.data(Qt.ItemDataRole.UserRole)
             
+            # --- INICIO DE MODIFICACIÓN: Determinar dónde guardar ---
+            idx_parcial = self.combo_parcial_select.currentIndex()
+            col_calif_db = f"parcial_{idx_parcial + 1}"
+            col_obs_db = f"obs_{idx_parcial + 1}"
+            # --- FIN DE MODIFICACIÓN ---
+            
             with get_db_connection() as conn:
                 cursor = conn.cursor()
                 
@@ -1611,25 +2074,26 @@ class VentanaPrincipal(QMainWindow):
                     observaciones = self.tabla_calificaciones.item(row, 3).text()
                     
                     # Usar "INSERT OR REPLACE" (UPSERT)
-                    # Primero, verificamos si existe
                     cursor.execute("SELECT id FROM calificaciones WHERE inscripcion_id = ? AND materia_id = ?", (inscripcion_id, materia_id))
                     existe = cursor.fetchone()
                     
                     if existe:
-                        # Actualizar
-                        cursor.execute("""
-                            UPDATE calificaciones SET calificacion = ?, observaciones = ?
+                        # Actualizar (MODIFICADO para guardar en la columna correcta)
+                        query = f"""
+                            UPDATE calificaciones SET {col_calif_db} = ?, {col_obs_db} = ?
                             WHERE id = ?
-                        """, (calificacion, observaciones, existe['id']))
+                        """
+                        cursor.execute(query, (calificacion, observaciones, existe['id']))
                     else:
-                        # Insertar
-                        cursor.execute("""
-                            INSERT INTO calificaciones (inscripcion_id, materia_id, calificacion, observaciones)
+                        # Insertar (MODIFICADO para guardar en la columna correcta)
+                        query = f"""
+                            INSERT INTO calificaciones (inscripcion_id, materia_id, {col_calif_db}, {col_obs_db})
                             VALUES (?, ?, ?, ?)
-                        """, (inscripcion_id, materia_id, calificacion, observaciones))
+                        """
+                        cursor.execute(query, (inscripcion_id, materia_id, calificacion, observaciones))
 
                 conn.commit()
-                mostrar_info("Calificaciones guardadas exitosamente.")
+            mostrar_info("Calificaciones guardadas exitosamente.")
 
         except Exception as e:
             mostrar_error(f"Error al guardar calificaciones: {e}")
@@ -2611,6 +3075,30 @@ class VentanaPrincipal(QMainWindow):
         inscripcion_id_seleccionada = None
         curso_nombre_seleccionado = ""
         
+        # --- INICIO DE MODIFICACIÓN: Cambiar a 2 parciales + Promedio Final ---
+        parciales = ["Primer Parcial", "Segundo Parcial", "Promedio Final"]
+        parcial_elegido, ok = QInputDialog.getItem(self, "Seleccionar Boleta",
+                                                     "¿Qué boleta desea generar?",
+                                                     parciales, 0, False)
+        
+        if not ok or not parcial_elegido:
+            return # El usuario canceló
+        
+        # Determinar columnas de la DB
+        col_calif_db = ""
+        col_obs_db = ""
+        
+        if parcial_elegido == "Primer Parcial":
+            idx_parcial = 0
+            col_calif_db = "parcial_1"
+            col_obs_db = "obs_1"
+        elif parcial_elegido == "Segundo Parcial":
+            idx_parcial = 1
+            col_calif_db = "parcial_2"
+            col_obs_db = "obs_2"
+        # Si es "Promedio Final", dejamos las variables vacías por ahora
+        # --- FIN DE MODIFICACIÓN ---
+
         try:
             # 2. Verificar inscripciones del alumno
             with get_db_connection() as conn:
@@ -2628,24 +3116,21 @@ class VentanaPrincipal(QMainWindow):
                 return
             
             if len(inscripciones) == 1:
-                # Si solo tiene una, la usamos
                 inscripcion_id_seleccionada = inscripciones[0]['id']
                 curso_nombre_seleccionado = inscripciones[0]['nombre_curso']
             else:
-                # Si tiene varias, preguntamos al usuario
                 nombres_cursos = [i['nombre_curso'] for i in inscripciones]
                 curso_elegido, ok = QInputDialog.getItem(self, "Seleccionar Curso",
                                                          "Este alumno está en varios cursos. ¿De cuál desea generar la boleta?",
                                                          nombres_cursos, 0, False)
                 if ok and curso_elegido:
-                    # Encontrar el ID correspondiente
                     for insc in inscripciones:
                         if insc['nombre_curso'] == curso_elegido:
                             inscripcion_id_seleccionada = insc['id']
                             curso_nombre_seleccionado = insc['nombre_curso']
                             break
                 else:
-                    return # El usuario canceló
+                    return
 
             if not inscripcion_id_seleccionada:
                 mostrar_error("No se pudo seleccionar una inscripción válida.")
@@ -2654,19 +3139,32 @@ class VentanaPrincipal(QMainWindow):
             # 3. Obtener todos los datos para el PDF
             with get_db_connection() as conn:
                 cursor = conn.cursor()
-                # Datos del alumno
                 cursor.execute("SELECT * FROM alumnos WHERE id = ?", (alumno_id,))
                 datos_alumno = cursor.fetchone()
                 
-                # Calificaciones
-                cursor.execute("""
-                    SELECT m.nombre_materia, c.calificacion, c.observaciones 
-                    FROM calificaciones c
-                    JOIN materias m ON c.materia_id = m.id
-                    WHERE c.inscripcion_id = ?
-                    ORDER BY m.nombre_materia
-                """, (inscripcion_id_seleccionada,))
+                # --- INICIO DE MODIFICACIÓN: Lógica para Promedio Final ---
+                if parcial_elegido == "Promedio Final":
+                    query = """
+                        SELECT m.nombre_materia, c.parcial_1, c.parcial_2, c.obs_1, c.obs_2 
+                        FROM calificaciones c
+                        JOIN materias m ON c.materia_id = m.id
+                        WHERE c.inscripcion_id = ?
+                        ORDER BY m.nombre_materia
+                    """
+                    cursor.execute(query, (inscripcion_id_seleccionada,))
+                else:
+                    # Lógica original para parcial individual
+                    query = f"""
+                        SELECT m.nombre_materia, c.{col_calif_db} AS calificacion, c.{col_obs_db} AS observaciones 
+                        FROM calificaciones c
+                        JOIN materias m ON c.materia_id = m.id
+                        WHERE c.inscripcion_id = ?
+                        ORDER BY m.nombre_materia
+                    """
+                    cursor.execute(query, (inscripcion_id_seleccionada,))
+                
                 calificaciones = cursor.fetchall()
+                # --- FIN DE MODIFICACIÓN ---
 
             if not datos_alumno:
                 mostrar_error("Error fatal: No se encontraron los datos del alumno.")
@@ -2680,18 +3178,16 @@ class VentanaPrincipal(QMainWindow):
             c = canvas.Canvas(filename, pagesize=letter)
             width, height = letter
             
-            # Reutilizar estilos (similares a la ficha de inscripción)
             styles = getSampleStyleSheet()
             styleN = ParagraphStyle(name='Normal_Arial', parent=styles['Normal'], fontName=FONT_NAME, fontSize=12, leading=14)
             styleH_centered = ParagraphStyle(name='Heading_Arial_Centered', parent=styles['Heading3'], fontName=FONT_BOLD_NAME, fontSize=12, alignment=TA_CENTER, spaceAfter=8)
             styleTitle = ParagraphStyle(name='Title_Arial', parent=styles['h1'], fontName=FONT_BOLD_NAME, fontSize=14, alignment=TA_CENTER, spaceAfter=16)
 
-            # --- Dibujar PDF ---
             self.draw_watermark(c, width, height)
             self.draw_logo(c, width, height)
 
-            # Título
-            titulo_texto = f"<b>Unidad Profesional de Asesorías y Regularización (UPASER)<br/>Boleta de Calificaciones</b>"
+            # Título (MODIFICADO)
+            titulo_texto = f"<b>Unidad Profesional de Asesorías y Regularización (UPASER)<br/>Boleta de Calificaciones: {parcial_elegido.upper()}</b>"
             title_p = Paragraph(titulo_texto, styleTitle)
             title_w, title_h = title_p.wrapOn(c, width - 2*inch, height)
             title_p.drawOn(c, inch, height - 0.75 * inch - title_h)
@@ -2703,46 +3199,100 @@ class VentanaPrincipal(QMainWindow):
             current_y = self.draw_text_pdf(c, current_y, f"<b>Curso:</b> {curso_nombre_seleccionado}", inch, styleN)
             current_y -= 0.25 * inch
 
-            # Tabla de Calificaciones
-            data_tabla = [["Materia", "Calificación", "Observaciones"]]
-            total_calif = 0.0
-            num_materias = 0
+            # --- INICIO DE MODIFICACIÓN: Columnas dinámicas para Promedio ---
+            if parcial_elegido == "Promedio Final":
+                data_tabla = [["Materia", "Parcial 1", "Parcial 2", "Promedio"]]
+                colWidths = [3*inch, 1.5*inch, 1.5*inch, 1.5*inch]
+            else:
+                data_tabla = [["Materia", "Calificación", "Observaciones"]]
+                colWidths = [2.5*inch, 1.5*inch, 2.5*inch]
+            # --- FIN DE MODIFICACIÓN ---
             
+            total_promedio_final = 0.0
+            num_materias = 0
+
             if calificaciones:
                 for calif in calificaciones:
-                    data_tabla.append([
-                        Paragraph(calif['nombre_materia'], styleN),
-                        f"{calif['calificacion']:.1f}",
-                        Paragraph(calif['observaciones'], styleN)
-                    ])
-                    total_calif += calif['calificacion']
-                    num_materias += 1
+                    # --- INICIO DE MODIFICACIÓN: Lógica de llenado de tabla ---
+                    if parcial_elegido == "Promedio Final":
+                        p1 = calif['parcial_1']
+                        p2 = calif['parcial_2']
+                        promedio_materia = (p1 + p2) / 2.0
+                        data_tabla.append([
+                            Paragraph(calif['nombre_materia'], styleN),
+                            f"{p1:.1f}",
+                            f"{p2:.1f}",
+                            f"{promedio_materia:.1f}"
+                        ])
+                        total_promedio_final += promedio_materia
+                        num_materias += 1
+                    else:
+                        # Lógica original
+                        data_tabla.append([
+                            Paragraph(calif['nombre_materia'], styleN),
+                            f"{calif['calificacion']:.1f}",
+                            Paragraph(calif['observaciones'], styleN)
+                        ])
+                        total_promedio_final += calif['calificacion']
+                        num_materias += 1
+                    # --- FIN DE MODIFICACIÓN ---
             else:
-                data_tabla.append(["(Sin materias asignadas a este curso)", "", ""])
+                # Lógica original adaptada
+                if parcial_elegido == "Promedio Final":
+                     data_tabla.append(["(Sin materias asignadas)", "", "", ""])
+                else:
+                     data_tabla.append(["(Sin materias asignadas)", "", ""])
 
-            tabla_calif = Table(data_tabla, colWidths=[3*inch, 1.5*inch, 3*inch])
-            tabla_calif.setStyle(TableStyle([
-                ('BACKGROUND', (0,0), (-1,0), colors.grey),
-                ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
-                ('ALIGN', (0,0), (-1,-1), 'CENTER'),
-                ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-                ('FONTNAME', (0,0), (-1,0), FONT_BOLD_NAME),
-                ('FONTNAME', (0,1), (-1,-1), FONT_NAME),
-                ('FONTSIZE', (0,0), (-1,-1), 10),
-                ('BOTTOMPADDING', (0,0), (-1,0), 6),
-                ('BACKGROUND', (0,1), (-1,-1), colors.whitesmoke),
-                ('GRID', (0,0), (-1,-1), 1, colors.black),
-                ('ALIGN', (0,1), (0,-1), 'LEFT'), # Materias a la izquierda
-                ('ALIGN', (2,1), (2,-1), 'LEFT'), # Observaciones a la izquierda
-            ]))
+            tabla_calif = Table(data_tabla, colWidths=colWidths)
+            
+            # --- INICIO DE MODIFICACIÓN: Estilo dinámico ---
+            if parcial_elegido == "Promedio Final":
+                table_style = TableStyle([
+                    ('BACKGROUND', (0,0), (-1,0), colors.grey),
+                    ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+                    ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                    ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                    ('FONTNAME', (0,0), (-1,0), FONT_BOLD_NAME),
+                    ('FONTNAME', (0,1), (-1,-1), FONT_NAME),
+                    ('FONTSIZE', (0,0), (-1,-1), 10),
+                    ('BOTTOMPADDING', (0,0), (-1,0), 6),
+                    ('BACKGROUND', (0,1), (-1,-1), colors.whitesmoke),
+                    ('GRID', (0,0), (-1,-1), 1, colors.black),
+                    ('ALIGN', (0,1), (0,-1), 'LEFT'), # Materias a la izquierda
+                ])
+            else:
+                 table_style = TableStyle([
+                    ('BACKGROUND', (0,0), (-1,0), colors.grey),
+                    ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+                    ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                    ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                    ('FONTNAME', (0,0), (-1,0), FONT_BOLD_NAME),
+                    ('FONTNAME', (0,1), (-1,-1), FONT_NAME),
+                    ('FONTSIZE', (0,0), (-1,-1), 10),
+                    ('BOTTOMPADDING', (0,0), (-1,0), 6),
+                    ('BACKGROUND', (0,1), (-1,-1), colors.whitesmoke),
+                    ('GRID', (0,0), (-1,-1), 1, colors.black),
+                    ('ALIGN', (0,1), (0,-1), 'LEFT'), # Materias a la izquierda
+                    ('ALIGN', (2,1), (2,-1), 'LEFT'), # Observaciones a la izquierda
+                ])
+            tabla_calif.setStyle(table_style)
+            # --- FIN DE MODIFICACIÓN ---
             
             w_tabla, h_tabla = tabla_calif.wrapOn(c, width - 2*inch, height)
-            tabla_calif.drawOn(c, inch, current_y - h_tabla)
+            x_centered = (width - w_tabla) / 2.0
+            tabla_calif.drawOn(c, x_centered, current_y - h_tabla)
             current_y -= (h_tabla + 0.25 * inch)
 
-            # Promedio
-            promedio = (total_calif / num_materias) if num_materias > 0 else 0.0
-            current_y = self.draw_text_pdf(c, current_y, f"<b>Promedio General: {promedio:.2f}</b>", inch, styleN)
+            # Promedio (MODIFICADO)
+            promedio_final = (total_promedio_final / num_materias) if num_materias > 0 else 0.0
+            
+            # --- INICIO DE MODIFICACIÓN: Título del promedio ---
+            promedio_titulo = f"PROMEDIO {parcial_elegido.upper()}"
+            if parcial_elegido == "Promedio Final":
+                promedio_titulo = "PROMEDIO GENERAL"
+                
+            current_y = self.draw_text_pdf(c, current_y, f"<b>{promedio_titulo}: {promedio_final:.2f}</b>", inch, styleN)
+            # --- FIN DE MODIFICACIÓN ---
             
             # Firma
             firma_y_base = 2 * inch
@@ -2758,7 +3308,6 @@ class VentanaPrincipal(QMainWindow):
 
         except Exception as e:
             mostrar_error(f"Error al generar boleta PDF: {e}\n{traceback.format_exc()}")
-
 
     def limpiar_archivos_temporales(self):
         """Elimina los archivos PDF temporales creados."""
@@ -3045,17 +3594,25 @@ class VentanaPrincipal(QMainWindow):
 
     def guardar_usuario(self):
         """Guarda un usuario nuevo o actualiza uno existente."""
-        if not all(hasattr(self, w) for w in ['entry_usr_nombre', 'entry_usr_telefono', 'entry_usr_email', 'combo_usr_rol']):
+        if not all(hasattr(self, w) for w in ['entry_usr_nombre', 'entry_usr_email', 'permisos_checkboxes']):
             return 
 
         nombre = self.entry_usr_nombre.text().strip()
         telefono = self.entry_usr_telefono.text().strip()
         email = self.entry_usr_email.text().strip()
-        rol = self.combo_usr_rol.currentText()
         
         if not nombre or not email:
             mostrar_error("Nombre Completo y Correo Electrónico son obligatorios.")
             return
+            
+        # --- INICIO DE MODIFICACIÓN: Construir diccionario de permisos ---
+        permisos_dict = {}
+        for clave, checkbox in self.permisos_checkboxes.items():
+            permisos_dict[clave] = checkbox.isChecked()
+        
+        # Convertir a JSON
+        permisos_json = json.dumps(permisos_dict)
+        # --- FIN DE MODIFICACIÓN ---
             
         try:
             with get_db_connection() as conn:
@@ -3065,13 +3622,12 @@ class VentanaPrincipal(QMainWindow):
                     # --- CREAR NUEVO USUARIO ---
                     password = secrets.token_hex(4) 
                     cursor.execute("""
-                    INSERT INTO usuarios (nombre_completo, telefono, email, rol, password)
+                    INSERT INTO usuarios (nombre_completo, telefono, email, permisos, password)
                     VALUES (?, ?, ?, ?, ?)
-                    """, (nombre, telefono, email, rol, password))
+                    """, (nombre, telefono, email, permisos_json, password))
                     user_id = cursor.lastrowid 
                     conn.commit()
                     
-                    # Mostrar credenciales al admin
                     mostrar_info(f"Usuario creado exitosamente:\n\n"
                                  f"No. de Empleado (ID): {user_id}\n"
                                  f"Usuario (Email): {email}\n"
@@ -3081,9 +3637,9 @@ class VentanaPrincipal(QMainWindow):
                 else:
                     # --- ACTUALIZAR USUARIO EXISTENTE ---
                     cursor.execute("""
-                    UPDATE usuarios SET nombre_completo = ?, telefono = ?, email = ?, rol = ?
+                    UPDATE usuarios SET nombre_completo = ?, telefono = ?, email = ?, permisos = ?
                     WHERE id = ?
-                    """, (nombre, telefono, email, rol, self.usuario_seleccionado_id))
+                    """, (nombre, telefono, email, permisos_json, self.usuario_seleccionado_id))
                     conn.commit()
                     mostrar_info(f"Usuario (ID: {self.usuario_seleccionado_id}) actualizado exitosamente.")
                          
@@ -3134,6 +3690,7 @@ class VentanaPrincipal(QMainWindow):
 
         try:
             user_id = int(user_id_item.text())
+            
             with get_db_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("SELECT * FROM usuarios WHERE id = ?", (user_id,))
@@ -3144,10 +3701,25 @@ class VentanaPrincipal(QMainWindow):
                 self.entry_usr_nombre.setText(datos['nombre_completo'])
                 self.entry_usr_telefono.setText(datos['telefono'])
                 self.entry_usr_email.setText(datos['email'])
-                self.combo_usr_rol.setCurrentText(datos['rol'])
+                
+                # --- INICIO DE MODIFICACIÓN: Cargar permisos ---
+                try:
+                    permisos_dict = json.loads(datos['permisos'])
+                except json.JSONDecodeError:
+                    permisos_dict = {} # Fallback
+
+                # Asignar el estado de los checkboxes
+                for clave, checkbox in self.permisos_checkboxes.items():
+                    checkbox.setChecked(permisos_dict.get(clave, False))
+                # --- FIN DE MODIFICACIÓN ---
                 
                 self.btn_guardar_usuario.setText("Actualizar Usuario")
-                self.btn_cambiar_password.setVisible(True)
+                
+                # Proteger al Admin ID 1
+                if user_id == 1:
+                    self.btn_cambiar_password.setVisible(False)
+                else:
+                    self.btn_cambiar_password.setVisible(True)
 
         except Exception as e:
             mostrar_error(f"Error al cargar datos de usuario: {e}")
@@ -3208,17 +3780,38 @@ class VentanaPrincipal(QMainWindow):
         try:
             if hasattr(self, 'entry_usr_nombre'):
                 self.entry_usr_nombre.clear()
-            
                 self.entry_usr_telefono.clear()
                 self.entry_usr_email.clear()
-                self.combo_usr_rol.setCurrentIndex(0)
+                
+                # --- INICIO DE MODIFICACIÓN: Limpiar checkboxes ---
+                if hasattr(self, 'permisos_checkboxes'):
+                    for checkbox in self.permisos_checkboxes.values():
+                        checkbox.setChecked(False)
+                        checkbox.setEnabled(True)
+                # --- FIN DE MODIFICACIÓN ---
                 
                 self.usuario_seleccionado_id = None
                 self.btn_guardar_usuario.setText("Guardar Usuario")
                 self.btn_cambiar_password.setVisible(False)
                 self.tabla_usuarios.clearSelection()
         except AttributeError:
-            pass 
+            pass
+    
+    def toggle_all_permissions(self, is_admin_checked):
+        """
+        Se llama cuando el checkbox 'ES ADMINISTRADOR' cambia.
+        Habilita/deshabilita y marca/desmarca todos los demás permisos.
+        """
+        if not hasattr(self, 'permisos_checkboxes'):
+            return # Salir si los checkboxes no están listos
+
+        for clave, checkbox in self.permisos_checkboxes.items():
+            if clave == 'is_admin':
+                continue # No te deshabilites a ti mismo
+
+            # Si 'is_admin' está marcado, deshabilita y marca los otros
+            checkbox.setEnabled(not is_admin_checked)
+            checkbox.setChecked(is_admin_checked)
 
     def cargar_tabla_usuarios(self):
         """Carga la lista de usuarios (empleados) en la QTableWidget."""
@@ -3227,7 +3820,8 @@ class VentanaPrincipal(QMainWindow):
                 self.tabla_usuarios.setRowCount(0)
                 with get_db_connection() as conn:
                     cursor = conn.cursor()
-                    cursor.execute("SELECT id, nombre_completo, email, rol FROM usuarios ORDER BY nombre_completo")
+                    # --- MODIFICADO: Quitar 'rol' ---
+                    cursor.execute("SELECT id, nombre_completo, email FROM usuarios ORDER BY nombre_completo")
                     usuarios = cursor.fetchall()
 
                     self.tabla_usuarios.setRowCount(len(usuarios))
@@ -3235,11 +3829,10 @@ class VentanaPrincipal(QMainWindow):
                         self.tabla_usuarios.setItem(row, 0, QTableWidgetItem(str(usuario['id'])))
                         self.tabla_usuarios.setItem(row, 1, QTableWidgetItem(usuario['nombre_completo']))
                         self.tabla_usuarios.setItem(row, 2, QTableWidgetItem(usuario['email']))
-                        self.tabla_usuarios.setItem(row, 3, QTableWidgetItem(usuario['rol']))
         except sqlite3.Error as e:
             mostrar_error(f"Error al cargar tabla de usuarios: {e}")
         except AttributeError:
-             pass 
+            pass
 
     def cargar_datos_maestros(self):
         """Función central para recargar todos los datos."""
@@ -3296,8 +3889,24 @@ class VentanaPrincipal(QMainWindow):
 
     def aplicar_estilo_actual(self):
         """Aplica el stylesheet combinado a la aplicación."""
+        
+        # --- INICIO DE CORRECCIÓN ---
+        # 1. Asignar la propiedad 'style' dinámicamente a la VentanaPrincipal (self)
+        # Esto permite que los selectores QSS como QWidget[style="dark"] funcionen.
+        theme_name = "claro" if self.theme == "Claro" else "dark"
+        self.setProperty("style", theme_name)
+        
+        # 2. Cargar el QSS
         stylesheet = get_full_stylesheet(self.theme, self.accent)
+        
+        # 3. Aplicar el QSS a toda la aplicación
         app.setStyleSheet(stylesheet)
+
+        # 4. "Pulir" la ventana para forzar que se reapliquen los estilos
+        # basados en la nueva propiedad 'style' que acabamos de poner.
+        self.style().unpolish(self)
+        self.style().polish(self)
+        # --- FIN DE CORRECCIÓN ---
 
 
 # ---- HOJAS DE ESTILO (QSS) ----
@@ -3439,8 +4048,6 @@ style_sheet_light = """
         font-family: 'Segoe UI', Arial, sans-serif;
         font-size: 10pt;
     }
-    /* Estilo del Widget principal para que el QSS sepa que está en modo 'claro' */
-    QMainWindow { background-color: #FFFFFF; qproperty-style: 'light'; }
     
     /* CORRECCIÓN CRÍTICA: Fuerza el color del texto a blanco para asegurar legibilidad sobre el fondo de acento saturado */
     #topBar QLabel, #topBarUser, #topBarLabel, #topBarIcon { 
@@ -3495,7 +4102,11 @@ style_sheet_light = """
     QCheckBox { color: #333333; font-size: 9pt; }
     QCheckBox::indicator { width: 16px; height: 16px; }
     QCheckBox::indicator:unchecked { border: 1px solid #C0C0C0; background-color: #FFFFFF; border-radius: 3px; }
-    QCheckBox::indicator:checked { border: 1px solid #909090; }
+    QCheckBox::indicator:checked { 
+            background-color: #007ACC;
+            border: 1px solid #007ACC;
+            image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><path fill="none" stroke="%23FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3 8l3 3l7-7"/></svg>');
+        }
     #expedienteDisplay { background-color: #FDFDFD; border: 1px solid #E0E0E0; font-family: Consolas, monospace; font-size: 9pt; }
     #deleteButton { background-color: #D32F2F; color: #FFFFFF; border: none; border-radius: 4px; padding: 10px 20px; font-weight: bold;
         font-size: 10pt; margin-top: 10px; }
@@ -3521,8 +4132,6 @@ style_sheet_dark = """
         font-family: 'Segoe UI', Arial, sans-serif;
         font-size: 10pt;
     }
-    /* Estilo del Widget principal para que el QSS sepa que está en modo 'oscuro' */
-    QMainWindow { background-color: #2D2D2D; qproperty-style: 'dark'; }
 
     #topBar QLabel, #topBarUser, #topBarLabel, #topBarIcon { 
         color: #FFFFFF;
@@ -3576,7 +4185,11 @@ style_sheet_dark = """
     QCheckBox { color: #E0E0E0; font-size: 9pt; }
     QCheckBox::indicator { width: 16px; height: 16px; }
     QCheckBox::indicator:unchecked { border: 1px solid #4D4D4D; background-color: #3A3A3A; border-radius: 3px; }
-    QCheckBox::indicator:checked { border: 1px solid #909090; }
+    QCheckBox::indicator:checked { 
+            background-color: #007ACC;
+            border: 1px solid #007ACC;
+            image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><path fill="none" stroke="%23FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3 8l3 3l7-7"/></svg>');
+        }
     #expedienteDisplay { background-color: #3A3A3A; border: 1px solid #4D4D4D; font-family: Consolas, monospace; font-size: 9pt; }
     #deleteButton { background-color: #D32F2F; color: #FFFFFF; border: none; border-radius: 6px; padding: 10px 20px; font-weight: 600; font-size: 10pt; margin-top: 10px; }
     #deleteButton:hover { background-color: #E53935; }
@@ -3625,8 +4238,9 @@ if __name__ == '__main__':
             username = login_window.username
             full_username = login_window.full_username
             user_role = login_window.user_role # Obtener el ROL
+            permisos_dict = login_window.permisos_dict
             
-            window = VentanaPrincipal(username, full_username, user_role) 
+            window = VentanaPrincipal(username, full_username, user_role, permisos_dict)
             window.showMaximized() 
 
             app.exec() 
