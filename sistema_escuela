@@ -7,7 +7,7 @@ import tempfile
 from decimal import Decimal, ROUND_HALF_UP 
 import secrets 
 import json 
-from PIL import Image as PILImage
+from PIL import Image as PILImage, ImageOps, ImageDraw
 
 # --- Importar bibliotecas de PyQt6 (Fusionadas) ---
 try:
@@ -28,6 +28,9 @@ except ImportError as e:
 
 # --- Importar ReportLab para PDF ---
 try:
+    from reportlab.graphics.barcode import code128
+    from reportlab.graphics.shapes import Drawing
+    from reportlab.graphics import renderPDF
     from reportlab.pdfgen import canvas
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.units import inch, mm # Asegúrate de tener 'mm' aquí también
@@ -35,6 +38,7 @@ try:
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.platypus import Paragraph, Image, Spacer, Table, TableStyle, Frame
     from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    from reportlab.lib.units import mm
     from reportlab.lib import colors
     FONT_NAME = 'Helvetica'
     FONT_BOLD_NAME = 'Helvetica-Bold'
@@ -154,7 +158,8 @@ def inicializar_db():
             costo_sem_12 REAL DEFAULT 0.0,
             costo_mensual_3 REAL DEFAULT 0.0,
             costo_bi_semanal REAL DEFAULT 0.0, 
-            costo_mensual_4 REAL DEFAULT 0.0
+            costo_mensual_4 REAL DEFAULT 0.0,
+            costo_mensualidad REAL DEFAULT 0.0
         )
         """)
         
@@ -162,6 +167,7 @@ def inicializar_db():
         try:
              cursor.execute("ALTER TABLE cursos ADD COLUMN IF NOT EXISTS costo_bi_semanal REAL DEFAULT 0.0")
              cursor.execute("ALTER TABLE cursos ADD COLUMN IF NOT EXISTS costo_mensual_4 REAL DEFAULT 0.0")
+             cursor.execute("ALTER TABLE cursos ADD COLUMN IF NOT EXISTS costo_mensualidad REAL DEFAULT 0.0")
              conn.commit()
         except sqlite3.OperationalError:
             pass 
@@ -1727,6 +1733,10 @@ class VentanaPrincipal(QMainWindow):
         elif index == 8:
             if self.permisos.get('can_access_settings') or self.permisos.get('is_admin'):
                 boton_activo = self.btn_nav_config
+        elif index == 9: # Página de Gestión de Personal
+             if self.permisos.get('is_admin'): # O el permiso que decidas
+                # boton_activo = ... (No hay botón principal, se maneja por menú)
+                self.cargar_tabla_personal()
 
         # 4. --- INICIO DE ANIMACIÓN ESTILO MACOS ---
         # Obtenemos el widget que va a entrar y el ancho actual del contenedor
@@ -2278,6 +2288,10 @@ class VentanaPrincipal(QMainWindow):
         self.spin_costo_mensual_4.setRange(0.0, 100000.0)
         self.spin_costo_mensual_4.setPrefix("$ ")
         
+        self.spin_costo_mensualidad = QDoubleSpinBox()
+        self.spin_costo_mensualidad.setRange(0.0, 100000.0)
+        self.spin_costo_mensualidad.setPrefix("$ ")
+        
         form_cursos.addRow(QLabel("Nombre del Curso:"), self.entry_cur_nombre)
         form_cursos.addRow(QLabel("Costo (Exhibición Única):"), self.spin_costo_exhibicion)
         form_cursos.addRow(QLabel("Costo Total (15 Semanas):"), self.spin_costo_sem_15)
@@ -2285,6 +2299,9 @@ class VentanaPrincipal(QMainWindow):
         form_cursos.addRow(QLabel("Costo Total (3 meses):"), self.spin_costo_mensual_3)
         form_cursos.addRow(QLabel("Costo Total (Bi Semanal):"), self.spin_costo_bi_semanal)
         form_cursos.addRow(QLabel("Costo Total (4 Meses):"), self.spin_costo_mensual_4)
+        label_mensualidad = QLabel("Mensualidad (Colegiatura):")
+        label_mensualidad.setToolTip("Costo mensual recurrente (para escuelas). Deje en 0 si no aplica.")
+        form_cursos.addRow(label_mensualidad, self.spin_costo_mensualidad)
         
         self.btn_guardar_curso = QPushButton("Guardar Curso")
         self.btn_guardar_curso.setObjectName("primaryButton")
@@ -3682,6 +3699,12 @@ class VentanaPrincipal(QMainWindow):
                 pago = (costo / 4).quantize(quantizer, rounding=ROUND_HALF_UP)
                 texto = f"Mensual (4 pagos de ${pago})"
                 self.combo_tipo_pago_registro.addItem(texto, userData=("Mensual (4)", float(costo), 4))
+                
+            if 'costo_mensualidad' in curso.keys() and curso['costo_mensualidad'] > 0:
+                costo = Decimal(curso['costo_mensualidad']).quantize(quantizer)
+                texto = f"Colegiatura Mensual (${costo})"
+                
+                self.combo_tipo_pago_registro.addItem(texto, userData=("Mensualidad", float(costo), 1))
 
         except sqlite3.Error as e:
             mostrar_error(f"Error al cargar planes de pago: {e}")
@@ -4033,13 +4056,24 @@ class VentanaPrincipal(QMainWindow):
             elif plan_nombre == "Mensual (3)":
                 num_pagos = 3
                 monto_pago = (monto_total / 3).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            elif plan_nombre == "Bisemanal (2)": # (Añadido para completar)
+                num_pagos = 2
+                monto_pago = (monto_total / 2).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            elif plan_nombre == "Mensual (4)": # (Añadido para completar)
+                num_pagos = 4
+                monto_pago = (monto_total / 4).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            elif plan_nombre == "Mensualidad":
+                # ¡AQUÍ ESTÁ TU LÓGICA NUEVA!
+                num_pagos = 12 # 12 meses del año escolar
+                # monto_total ya es el costo mensual, así que monto_pago es correcto
+                monto_pago = monto_total
             
             monto_acumulado = Decimal('0.00')
             for i in range(num_pagos):
                 fecha_pago = fecha_inicio
                 if plan_nombre.startswith("Semanal"):
                     fecha_pago = fecha_inicio + datetime.timedelta(weeks=i)
-                elif plan_nombre.startswith("Mensual"):
+                elif plan_nombre.startswith("Mensual") or plan_nombre == "Mensualidad":
                     mes = fecha_inicio.month + i
                     año = fecha_inicio.year + (mes - 1) // 12
                     mes = (mes - 1) % 12 + 1
@@ -4050,7 +4084,7 @@ class VentanaPrincipal(QMainWindow):
 
                 
                 monto_actual = monto_pago
-                if i == num_pagos - 1:
+                if plan_nombre != "Mensualidad" and i == num_pagos - 1:
                     monto_actual = monto_total - monto_acumulado
                     
                 calendario_data.append([
@@ -4058,7 +4092,8 @@ class VentanaPrincipal(QMainWindow):
                     fecha_pago.strftime("%Y-%m-%d"), 
                     f"$ {monto_actual:.2f}"
                 ])
-                monto_acumulado += monto_actual
+                if plan_nombre != "Mensualidad":
+                   monto_acumulado += monto_actual
             
             # Dibujar la tabla del calendario
             tabla_calendario = Table(calendario_data, colWidths=[1*inch, 2.5*inch, 2*inch])
@@ -4317,6 +4352,16 @@ class VentanaPrincipal(QMainWindow):
             styleN = ParagraphStyle(name='Normal_Arial', parent=styles['Normal'], fontName=FONT_NAME, fontSize=12, leading=14)
             styleH_centered = ParagraphStyle(name='Heading_Arial_Centered', parent=styles['Heading3'], fontName=FONT_BOLD_NAME, fontSize=12, alignment=TA_CENTER, spaceAfter=8)
             styleTitle = ParagraphStyle(name='Title_Arial', parent=styles['h1'], fontName=FONT_BOLD_NAME, fontSize=14, alignment=TA_CENTER, spaceAfter=16)
+            
+            styleLegenda = ParagraphStyle(
+                name='Legenda_Boleta', 
+                parent=styles['Normal'], 
+                fontName=FONT_BOLD_NAME, 
+                fontSize=9, 
+                leading=11, 
+                alignment=TA_CENTER, 
+                textColor=colors.black
+            )
 
             self.draw_watermark(c, width, height)
             self.draw_logo(c, width, height)
@@ -4427,13 +4472,21 @@ class VentanaPrincipal(QMainWindow):
                 promedio_titulo = "PROMEDIO GENERAL"
                 
             current_y = self.draw_text_pdf(c, current_y, f"<b>{promedio_titulo}: {promedio_final:.2f}</b>", inch, styleN)
-            # --- FIN DE MODIFICACIÓN ---
+            # --- FIN DE MODIFICACIÓN --
             
             # Firma
             firma_y_base = 2 * inch
             c.line(inch * 2.5, firma_y_base, width - (inch * 2.5), firma_y_base)
+            texto_firma_y = firma_y_base - 0.2 * inch
             c.setFont(FONT_NAME, 10)
             c.drawCentredString(width / 2, firma_y_base - 0.2 * inch, "Control Escolar UPASER")
+            
+            leyenda_texto = "RECUERDA: Para que puedas hacer valida tu PÓLIZA DE GARANTÍA, es necesario contar con un PROMEDIO GENERAL mínimo de 8.0."
+            p = Paragraph(leyenda_texto, styleLegenda)
+            p_width, p_height = p.wrapOn(c, width - 2*inch, height)
+            x_centered = (width - p_width) / 2.0
+            y_pos = texto_firma_y - p_height - (0.1 * inch)
+            p.drawOn(c, x_centered, y_pos)
 
             # Guardar y abrir
             c.save()
@@ -4763,11 +4816,12 @@ class VentanaPrincipal(QMainWindow):
         costo_mensual_3 = self.spin_costo_mensual_3.value()
         costo_bi_semanal = self.spin_costo_bi_semanal.value()
         costo_mensual_4 = self.spin_costo_mensual_4.value()
+        costo_mensualidad = self.spin_costo_mensualidad.value()
 
         if not nombre:
             mostrar_error("El nombre del curso es obligatorio.")
             return
-        if costo_exhibicion == 0 and costo_sem_15 == 0 and costo_sem_12 == 0 and costo_mensual_3 == 0 and costo_bi_semanal == 0 and costo_mensual_4 == 0:
+        if costo_exhibicion == 0 and costo_sem_15 == 0 and costo_sem_12 == 0 and costo_mensual_3 == 0 and costo_bi_semanal == 0 and costo_mensual_4 == 0 and costo_mensualidad == 0:
             mostrar_error("Debe definir al menos un plan de costo para el curso.")
             return
 
@@ -4775,22 +4829,20 @@ class VentanaPrincipal(QMainWindow):
             with get_db_connection() as conn:
                 cursor = conn.cursor()
                 if self.curso_seleccionado_id is None:
-                    # --- CREAR NUEVO CURSO ---
+                    # --- MODIFICA EL INSERT ---
                     cursor.execute("""
-                    INSERT INTO cursos (nombre_curso, costo_exhibicion, costo_sem_15, costo_sem_12, costo_mensual_3, costo_bi_semanal, costo_mensual_4)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """, (nombre, costo_exhibicion, costo_sem_15, costo_sem_12, costo_mensual_3, costo_bi_semanal, costo_mensual_4)) 
-                    mostrar_info("Curso guardado exitosamente.")
+                    INSERT INTO cursos (nombre_curso, costo_exhibicion, costo_sem_15, costo_sem_12, costo_mensual_3, costo_bi_semanal, costo_mensual_4, costo_mensualidad)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (nombre, costo_exhibicion, costo_sem_15, costo_sem_12, costo_mensual_3, costo_bi_semanal, costo_mensual_4, costo_mensualidad)) 
                 else:
-                    # --- ACTUALIZAR CURSO EXISTENTE ---
+                    # --- MODIFICA EL UPDATE ---
                     cursor.execute("""
-                    UPDATE cursos SET nombre_curso = ?, costo_exhibicion = ?, costo_sem_15 = ?, costo_sem_12 = ?, costo_mensual_3 = ?, costo_bi_semanal = ?, costo_mensual_4 = ?
+                    UPDATE cursos SET nombre_curso = ?, costo_exhibicion = ?, costo_sem_15 = ?, costo_sem_12 = ?, costo_mensual_3 = ?, costo_bi_semanal = ?, costo_mensual_4 = ?, costo_mensualidad = ?
                     WHERE id = ?
-                    """, (nombre, costo_exhibicion, costo_sem_15, costo_sem_12, costo_mensual_3, costo_bi_semanal, costo_mensual_4, self.curso_seleccionado_id))
-                    mostrar_info(f"Curso (ID: {self.curso_seleccionado_id}) actualizado exitosamente.")
+                    """, (nombre, costo_exhibicion, costo_sem_15, costo_sem_12, costo_mensual_3, costo_bi_semanal, costo_mensual_4, costo_mensualidad, self.curso_seleccionado_id))
                 
                 conn.commit()
-
+                
             self.limpiar_campos_curso()
             self.cargar_datos_maestros() 
 
@@ -4810,6 +4862,7 @@ class VentanaPrincipal(QMainWindow):
                 self.spin_costo_mensual_3.setValue(0.0)
                 self.spin_costo_bi_semanal.setValue(0.0)
                 self.spin_costo_mensual_4.setValue(0.0)
+                self.spin_costo_mensualidad.setValue(0.0)
                 
                 self.curso_seleccionado_id = None
                 self.btn_guardar_curso.setText("Guardar Curso")
@@ -4848,6 +4901,7 @@ class VentanaPrincipal(QMainWindow):
                 self.spin_costo_mensual_3.setValue(datos['costo_mensual_3'])
                 self.spin_costo_bi_semanal.setValue(datos['costo_bi_semanal'])
                 self.spin_costo_mensual_4.setValue(datos['costo_mensual_4'])
+                self.spin_costo_mensualidad.setValue(datos['costo_mensualidad'] if 'costo_mensualidad' in datos.keys() else 0.0)
                 
                 self.btn_guardar_curso.setText("Actualizar Curso")
 
@@ -5470,14 +5524,17 @@ class VentanaPrincipal(QMainWindow):
                 mostrar_error(f"Error al eliminar personal: {e}")
 
     def generar_credencial_personal_pdf(self):
-        """Genera la credencial para el personal (copia de la de estudiante)."""
-        # (Lógica copiada de generar_credencial_pdf y adaptada)
+        """
+        Genera la credencial de personal REUTILIZANDO el diseño de la credencial de alumno.
+        """
         
+        # --- 1. DEFINICIONES DE TAMAÑO ---
         PAGE_WIDTH, PAGE_HEIGHT = letter 
         GAFETE_W, GAFETE_H = 85.6 * mm, 53.98 * mm 
         MARGIN_X = (PAGE_WIDTH - (GAFETE_W * 2 + 10 * mm)) / 2 
-        MARGIN_Y = PAGE_HEIGHT - GAFETE_H - 15 * mm
+        MARGIN_Y = PAGE_HEIGHT - GAFETE_H - 15 * mm 
         
+        # --- 2. OBTENER DATOS DEL PERSONAL ---
         selected_items = self.tabla_personal.selectedItems()
         if not selected_items or self.tabla_personal.currentRow() < 0:
             mostrar_error("Por favor, seleccione un empleado de la lista.")
@@ -5485,31 +5542,30 @@ class VentanaPrincipal(QMainWindow):
         try:
              personal_id = int(self.tabla_personal.item(self.tabla_personal.currentRow(), 0).text())
         except Exception:
+            mostrar_error("No se pudo obtener el ID del personal.")
             return
 
         try:
             with get_db_connection() as conn:
-                # --- CAMBIO: Consultar tabla 'personal' ---
                 datos = conn.cursor().execute("SELECT * FROM personal WHERE id = ?", (personal_id,)).fetchone()
 
             if not datos:
                 mostrar_error("No se encontraron datos para el empleado.")
                 return
 
-            temp_pdf = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
-            filename = temp_pdf.name
-            temp_pdf.close()
+            # --- 3. FUNCIONES DE AYUDA (Reutilizadas de la credencial de alumno) ---
 
-            c = canvas.Canvas(filename, pagesize=letter)
-            
-            # (Reutilizamos las funciones auxiliares de la credencial de estudiante)
             def dibujar_marca_agua(canvas_obj, width, height):
                 if os.path.exists(LOGO_PATH):
-                    canvas_obj.saveState()
-                    canvas_obj.setFillAlpha(0.1) 
-                    logo_w, logo_h = 35 * mm, 35 * mm
-                    canvas_obj.drawImage(LOGO_PATH, (width - logo_w)/2, (height - logo_h)/2, width=logo_w, height=logo_h, mask='auto')
-                    canvas_obj.restoreState()
+                    try:
+                        canvas_obj.saveState()
+                        canvas_obj.setFillAlpha(0.1) 
+                        logo_w, logo_h = 35 * mm, 35 * mm
+                        canvas_obj.drawImage(LOGO_PATH, (width - logo_w)/2, (height - logo_h)/2, 
+                                             width=logo_w, height=logo_h, mask='auto')
+                        canvas_obj.restoreState()
+                    except Exception as e:
+                        print(f"Error dibujando marca de agua (personal): {e}")
 
             def dibujar_placeholder(canvas_obj):
                 canvas_obj.setFillColorRGB(0.85, 0.85, 0.85)
@@ -5523,11 +5579,17 @@ class VentanaPrincipal(QMainWindow):
                 width, height = GAFETE_W, GAFETE_H 
                 canvas_obj.saveState()
                 canvas_obj.translate(x_offset, y_offset) 
+
+                # Fondo
                 canvas_obj.setFillColorRGB(0.97, 0.97, 0.97)
                 canvas_obj.rect(0, 0, width, height, fill=1, stroke=0)
                 dibujar_marca_agua(canvas_obj, width, height)
-                canvas_obj.setFillColorRGB(0.2, 0.6, 0.2) # (Puedes cambiar este color si quieres)
+
+                # Franja superior verde
+                canvas_obj.setFillColorRGB(0.2, 0.6, 0.2)
                 canvas_obj.rect(0, height - 14*mm, width, 14*mm, fill=1, stroke=0)
+
+                # Logo y textos institucionales
                 if os.path.exists(LOGO_PATH):
                      canvas_obj.drawImage(LOGO_PATH, 2*mm, height - 12*mm, width=10*mm, height=10*mm, mask='auto')
                 canvas_obj.setFillColorRGB(1, 1, 1)
@@ -5536,7 +5598,8 @@ class VentanaPrincipal(QMainWindow):
                 canvas_obj.setFont("Helvetica", 6)
                 canvas_obj.drawString(14*mm, height - 10*mm, "Unidad Profesional de Asesoría y Regularización")
 
-                if not es_reverso: # --- ANVERSO ---
+                if not es_reverso: 
+                    # --- ANVERSO (DATOS DE PERSONAL) ---
                     foto_ruta = datos['foto_ruta']
                     if foto_ruta and os.path.exists(foto_ruta):
                         try:
@@ -5551,23 +5614,24 @@ class VentanaPrincipal(QMainWindow):
                     canvas_obj.setFont("Helvetica-Bold", 7)
                     canvas_obj.drawString(30*mm, 34*mm, "NOMBRE:")
                     canvas_obj.setFont("Helvetica", 9)
-                    nombre_completo = f"{datos['nombre']} {datos['apellido_paterno']} {datos['apellido_materno']}"
+                    nombre_completo = f"{datos['nombre']} {datos['apellido_paterno']} {datos['apellido_materno']}".upper()
                     if len(nombre_completo) > 25: canvas_obj.setFont("Helvetica", 8)
                     canvas_obj.drawString(30*mm, 30*mm, nombre_completo)
 
                     canvas_obj.setFont("Helvetica-Bold", 7)
-                    canvas_obj.drawString(30*mm, 24*mm, "NO. DE EMPLEADO:")
+                    canvas_obj.drawString(30*mm, 24*mm, "NO. DE EMPLEADO:") # <--- CAMBIO
                     canvas_obj.setFont("Helvetica", 10)
                     canvas_obj.setFillColorRGB(0.7, 0, 0)
-                    canvas_obj.drawString(30*mm, 19.5*mm, f"{datos['num_empleado']}")
+                    canvas_obj.drawString(30*mm, 19.5*mm, f"{datos['num_empleado']}") # <--- CAMBIO
 
                     canvas_obj.setFillColorRGB(0.2, 0.2, 0.2)
                     canvas_obj.setFont("Helvetica-Bold", 7)
-                    canvas_obj.drawString(30*mm, 14*mm, "PUESTO:")
+                    canvas_obj.drawString(30*mm, 14*mm, "PUESTO:") # <--- CAMBIO
                     canvas_obj.setFont("Helvetica", 8)
-                    canvas_obj.drawString(30*mm, 10*mm, datos['puesto'])
+                    canvas_obj.drawString(30*mm, 10*mm, datos['puesto']) # <--- CAMBIO
                     # --- FIN DATOS ADAPTADOS ---
 
+                    # Pie de página (Vigencia)
                     canvas_obj.setStrokeColorRGB(0.2, 0.6, 0.2)
                     canvas_obj.line(4*mm, 8*mm, width-4*mm, 8*mm)
                     canvas_obj.setFont("Helvetica", 6)
@@ -5575,37 +5639,53 @@ class VentanaPrincipal(QMainWindow):
                     anio_actual = datetime.date.today().year
                     canvas_obj.drawCentredString(width/2, 5*mm, f"VIGENCIA: {anio_actual} - {anio_actual+1}")
                     
-                else: # --- REVERSO (IDÉNTICO AL DE ALUMNO) ---
-                    director_nombre = "MTRO. JOVANY IVAN CERVANTES CARRERAS"
+                else: 
+                    # --- REVERSO (IDÉNTICO AL DE ALUMNO) ---
+                    director_nombre_completo = "JOVANY IVAN CERVANTES CARRERAS"
+                    
                     canvas_obj.setFillColorRGB(0.2, 0.2, 0.2)
                     canvas_obj.setFont("Helvetica-Bold", 10)
+           
+                    # Línea de firma
                     firma_y = height / 2.0
                     canvas_obj.setStrokeColorRGB(0.5, 0.5, 0.5)
                     canvas_obj.line(width/4, firma_y, width*3/4, firma_y)
+
+                    # Firma del Director
                     canvas_obj.setFont("Helvetica", 7)
                     canvas_obj.setFillColorRGB(0.2, 0.2, 0.2)
-                    canvas_obj.drawCentredString(width/2, firma_y - 4*mm, director_nombre)
+                    canvas_obj.drawCentredString(width/2, firma_y - 4*mm, director_nombre_completo.upper()) # <--- CAMBIO A NOMBRE COMPLETO
                     canvas_obj.setFont("Helvetica-Bold", 6)
                     canvas_obj.drawCentredString(width/2, firma_y - 7*mm, "DIRECTOR DEL PLANTEL")
+
+                    # Leyenda legal
                     canvas_obj.setStrokeColorRGB(0.2, 0.6, 0.2)
                     canvas_obj.line(4*mm, 8*mm, width-4*mm, 8*mm)
                     canvas_obj.setFont("Helvetica", 6)
                     canvas_obj.setFillColorRGB(0.4, 0.4, 0.4)
-                    canvas_obj.drawCentredString(width/2, 5*mm, "Esta credencial es personal e intransferible.")
+                    canvas_obj.drawCentredString(width/2, 5*mm, "Esta credencial es personal e intransferible y debe ser portada obligatoriamente.")
 
                 canvas_obj.restoreState()
             
-            # Dibujar ambas caras
+            # --- 4. GENERAR EL PDF ---
+            temp_pdf = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+            filename = temp_pdf.name
+            temp_pdf.close()
+            
+            c = canvas.Canvas(filename, pagesize=letter)
+            
             dibujar_cara_credencial(c, MARGIN_X, MARGIN_Y, es_reverso=False)
-            dibujar_cara_credencial(c, MARGIN_X + GAFETE_W + 10 * mm, MARGIN_Y, es_reverso=True)
+            dibujar_cara_credencial(c, MARGIN_X + GAFETE_W + 10*mm, MARGIN_Y, es_reverso=True)
             
             c.save()
+
+            # --- 5. ABRIR EL PDF ---
             self._temp_pdf_files.append(filename)
             QDesktopServices.openUrl(QUrl.fromLocalFile(filename))
 
         except Exception as e:
             mostrar_error(f"Error al generar credencial de personal: {e}\n{traceback.format_exc()}")
-
+    
     # --- FIN DE MÉTODOS DE GESTIÓN DE PERSONAL ---
 
 def get_accent_stylesheet(accent_name):
