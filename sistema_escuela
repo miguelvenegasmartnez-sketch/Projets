@@ -70,11 +70,17 @@ DB_NAME = os.path.join(BASE_DIR, "gestion_escolar.db")
 LOGO_PATH = os.path.join(BASE_DIR, "logo.png")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 FOTOS_DIR = os.path.join(BASE_DIR, "fotos_alumnos")
+FOTOS_PERSONAL_DIR = os.path.join(BASE_DIR, "fotos_personal")
 DOCS_DIR = os.path.join(BASE_DIR, "documentos_alumnos")
+DOCS_PERSONAL_DIR = os.path.join(BASE_DIR, "documentos_personal")
 if not os.path.exists(DOCS_DIR):
     os.makedirs(DOCS_DIR)
 if not os.path.exists(FOTOS_DIR):
     os.makedirs(FOTOS_DIR)
+if not os.path.exists(FOTOS_PERSONAL_DIR):
+    os.makedirs(FOTOS_PERSONAL_DIR)
+if not os.path.exists(DOCS_PERSONAL_DIR):
+    os.makedirs(DOCS_PERSONAL_DIR)
 # Si usas background.jpg, añádelo también:
 BACKGROUND_PATH = os.path.join(BASE_DIR, "background.jpg")
 
@@ -250,6 +256,43 @@ def inicializar_db():
             obs_2 TEXT DEFAULT '',
             FOREIGN KEY (inscripcion_id) REFERENCES inscripciones(id) ON DELETE CASCADE,
             FOREIGN KEY (materia_id) REFERENCES materias(id) ON DELETE CASCADE
+        )
+        """)
+        
+        # --- Tabla de Personal (NUEVA) ---
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS personal (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            num_empleado TEXT NOT NULL UNIQUE,
+            nombre TEXT NOT NULL,
+            apellido_paterno TEXT NOT NULL,
+            apellido_materno TEXT,
+            fecha_nacimiento TEXT,
+            curp TEXT,
+            rfc TEXT,
+            nss TEXT,
+            direccion TEXT,
+            estado_civil TEXT,
+            email TEXT,
+            telefono TEXT,
+            escolaridad TEXT,
+            puesto TEXT,
+            foto_ruta TEXT,
+            emerg_1_nombre TEXT,
+            emerg_1_telefono TEXT,
+            emerg_2_nombre TEXT,
+            emerg_2_telefono TEXT
+        )
+        """)
+
+        # --- Tabla de Documentos del Personal (NUEVA) ---
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS documentos_personal (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            personal_id INTEGER NOT NULL,
+            tipo_doc TEXT NOT NULL,
+            ruta_archivo TEXT NOT NULL,
+            FOREIGN KEY (personal_id) REFERENCES personal(id) ON DELETE CASCADE
         )
         """)
         
@@ -516,6 +559,441 @@ class VentanaDocumentos(QDialog):
 
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"No se pudo guardar el documento: {e}")
+
+# --- (Añadir esta clase cerca de VentanaDocumentos) ---
+# (Asegúrate de que esto esté cerca de tu otra clase VentanaDocumentos)
+
+class VentanaDocumentosPersonal(QDialog):
+    def __init__(self, personal_id, nombre_personal, parent=None):
+        super().__init__(parent)
+        self.personal_id = personal_id
+        self.nombre_personal = nombre_personal
+        self.setWindowTitle(f"Expediente Digital - {nombre_personal}")
+        self.setMinimumSize(750, 500)
+        
+        # --- LISTA DE DOCUMENTOS DE PERSONAL ---
+        self.tipos_documentos = [
+            "Acta de Nacimiento", "CURP", "RFC", "Asignación de NSS",
+            "INE (Anverso)", "INE (Reverso)", "Comprobante de Estudios",
+            "Comprobante de Domicilio", "Carta de Recomendación 1", "Carta de Recomendación 2"
+        ]
+        
+        # --- ESTAS LÍNEAS SON CRUCIALES ---
+        self.layout = QVBoxLayout(self)
+        self.init_ui() # Dibuja la ventana
+        self.cargar_estado_documentos() # Carga los datos
+        # ------------------------------------
+
+    def init_ui(self):
+        """ Dibuja los componentes de la ventana (botones, tabla, etc.) """
+        info_label = QLabel("Gestione los documentos digitales del personal. Puede cargarlos desde archivos o escanearlos directamente.")
+        info_label.setStyleSheet("color: gray; margin-bottom: 10px;")
+        self.layout.addWidget(info_label)
+
+        # Ajustamos las columnas: Tipo, Estado, Acciones
+        self.tabla_docs = QTableWidget(len(self.tipos_documentos), 3)
+        self.tabla_docs.setHorizontalHeaderLabels(["Tipo de Documento", "Estado", "Acciones"])
+        self.tabla_docs.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.tabla_docs.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.tabla_docs.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents) 
+        self.tabla_docs.verticalHeader().setVisible(False)
+
+        for i, tipo in enumerate(self.tipos_documentos):
+            self.tabla_docs.setItem(i, 0, QTableWidgetItem(tipo))
+            
+            item_estado = QTableWidgetItem("Pendiente ❌")
+            item_estado.setForeground(QColor("red"))
+            item_estado.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.tabla_docs.setItem(i, 1, item_estado)
+    
+            # --- Widget contenedor para los botones de acción ---
+            widget_acciones = QWidget()
+            layout_acciones = QHBoxLayout(widget_acciones)
+            layout_acciones.setContentsMargins(5, 2, 5, 2)
+            layout_acciones.setSpacing(5)
+
+            btn_cargar = QPushButton("📂 Cargar")
+            btn_cargar.setToolTip("Seleccionar un archivo ya existente en la computadora")
+            btn_cargar.clicked.connect(lambda checked, t=tipo: self.cargar_documento(t))
+            
+            btn_escanear = QPushButton("🖨️ Escanear")
+            btn_escanear.setToolTip("Conectar al escáner para digitalizar ahora")
+            # Deshabilitar si no hay soporte WIA
+            if not WIA_AVAILABLE:
+                btn_escanear.setEnabled(False)
+                btn_escanear.setToolTip("Instale 'pywin32' para habilitar el escaneo")
+            else:
+                btn_escanear.clicked.connect(lambda checked, t=tipo: self.escanear_documento(t))
+
+            layout_acciones.addWidget(btn_cargar)
+            layout_acciones.addWidget(btn_escanear)
+            self.tabla_docs.setCellWidget(i, 2, widget_acciones)
+
+        self.layout.addWidget(self.tabla_docs)
+
+        btn_cerrar = QPushButton("Cerrar Expediente")
+        btn_cerrar.clicked.connect(self.accept)
+        self.layout.addWidget(btn_cerrar)
+
+    def cargar_estado_documentos(self):
+        """ Revisa la BD (tabla documentos_personal) y actualiza la UI. """
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                # --- CAMBIO DE TABLA ---
+                cursor.execute("SELECT tipo_doc, ruta_archivo FROM documentos_personal WHERE personal_id = ?", (self.personal_id,))
+                docs_registrados = {row['tipo_doc']: row['ruta_archivo'] for row in cursor.fetchall()}
+
+            for i, tipo in enumerate(self.tipos_documentos):
+                if tipo in docs_registrados and os.path.exists(docs_registrados[tipo]):
+                    self.tabla_docs.item(i, 1).setText("Cargado ✅")
+                    self.tabla_docs.item(i, 1).setForeground(QColor("green"))
+                    btn_ver = QPushButton("👁️ Ver Documento")
+                    btn_ver.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+                    ruta = docs_registrados[tipo]
+                    btn_ver.clicked.connect(lambda checked, r=ruta: QDesktopServices.openUrl(QUrl.fromLocalFile(r)))
+                    self.tabla_docs.setCellWidget(i, 2, btn_ver)
+                else:
+                    # (Lógica para resetear a "Pendiente" si el archivo fue borrado, si es necesario)
+                    pass 
+        except Exception as e:
+            print(f"Error al cargar estado de docs de personal: {e}")
+
+    def procesar_y_guardar_archivo(self, ruta_origen, tipo_doc, es_escaneo_temporal=False):
+        """ Guarda el archivo en la carpeta correcta (DOCS_PERSONAL_DIR) y en la BD (documentos_personal). """
+        try:
+            # 1. Preparar directorios
+            nombre_seguro = "".join([c for c in self.nombre_personal if c.isalnum() or c in (' ', '-', '_')]).strip()
+            nombre_carpeta = f"P-{self.personal_id}_{nombre_seguro}"
+            
+            # --- CAMBIO DE DIRECTORIO ---
+            carpeta_personal = os.path.join(DOCS_PERSONAL_DIR, nombre_carpeta)
+            if not os.path.exists(carpeta_personal):
+                os.makedirs(carpeta_personal)
+
+            # 2. Definir ruta destino y procesar
+            nombre_base = f"{tipo_doc.replace(' ', '_')}"
+            if es_escaneo_temporal:
+                 ruta_destino = os.path.join(carpeta_personal, nombre_base + ".pdf")
+                 image = PILImage.open(ruta_origen) 
+                 if image.mode == 'RGBA':
+                     image = image.convert('RGB')
+                 image.save(ruta_destino, "PDF", resolution=100.0)
+                 image.close()
+                 try: os.remove(ruta_origen)
+                 except: pass
+            else:
+                extension = os.path.splitext(ruta_origen)[1]
+                ruta_destino = os.path.join(carpeta_personal, nombre_base + extension)
+                shutil.copy2(ruta_origen, ruta_destino)
+
+            # 3. Guardar en BD
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                # --- CAMBIO DE TABLA ---
+                cursor.execute("DELETE FROM documentos_personal WHERE personal_id = ? AND tipo_doc = ?", (self.personal_id, tipo_doc))
+                cursor.execute("INSERT INTO documentos_personal (personal_id, tipo_doc, ruta_archivo) VALUES (?, ?, ?)", 
+                               (self.personal_id, tipo_doc, ruta_destino))
+                conn.commit()
+
+            self.cargar_estado_documentos() # Recargar la tabla
+            QMessageBox.information(self, "Éxito", f"Documento '{tipo_doc}' guardado correctamente.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"No se pudo guardar el documento: {e}\n{traceback.format_exc()}")
+
+    def cargar_documento(self, tipo_doc):
+        """ Carga un archivo existente. """
+        ruta_origen, _ = QFileDialog.getOpenFileName(self, f"Seleccionar {tipo_doc}", "", "Documentos (*.pdf *.jpg *.png *.jpeg)")
+        if ruta_origen:
+            self.procesar_y_guardar_archivo(ruta_origen, tipo_doc, es_escaneo_temporal=False)
+
+    def escanear_documento(self, tipo_doc):
+        """ Inicia el proceso de escaneo WIA. """
+        if not WIA_AVAILABLE:
+            QMessageBox.warning(self, "Error", "Librería 'pywin32' no instalada.")
+            return
+        try:
+            wia_dialog = win32com.client.Dispatch("WIA.CommonDialog")
+            imagen_wia = wia_dialog.ShowAcquireImage(DeviceType=1, Intent=1, FormatID="{B96B3CAE-0728-11D3-9D7B-0000F81EF32E}")
+            if imagen_wia:
+                ruta_temporal = os.path.join(tempfile.gettempdir(), "temp_scan.jpg")
+                if os.path.exists(ruta_temporal):
+                    os.remove(ruta_temporal)
+                imagen_wia.SaveFile(ruta_temporal)
+                # Procesar (convertir a PDF y guardar en carpeta final)
+                self.procesar_y_guardar_archivo(ruta_temporal, tipo_doc, es_escaneo_temporal=True)
+        except Exception as e:
+            if "-2145320959" in str(e): 
+                pass # Usuario canceló
+            else:
+                QMessageBox.critical(self, "Error de Escáner", f"No se pudo conectar al escáner.\nAsegúrese de que está encendido y conectado.\nDetalle: {e}")
+
+# --- (Fin de la clase VentanaDocumentosPersonal) ---
+
+# --- (Añadir esta clase cerca de VentanaDocumentos) ---
+class DialogGestionPersonal(QDialog):
+    """Diálogo para registrar o editar personal."""
+    def __init__(self, personal_id=None, parent=None):
+        super().__init__(parent)
+        self.personal_id = personal_id
+        self.ruta_foto_temporal = None
+        self.setWindowTitle("Gestión de Personal")
+        self.setMinimumSize(800, 600)
+
+        self.layout_principal = QVBoxLayout(self)
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        
+        self.scroll_content = QWidget()
+        self.layout_scroll = QVBoxLayout(self.scroll_content)
+
+        # --- Layout Superior (Foto y Datos Personales) ---
+        layout_superior = QHBoxLayout()
+        
+        # Panel de Foto (Copiado de crear_pagina_nueva_inscripcion)
+        panel_foto = QVBoxLayout()
+        self.lbl_foto_registro = QLabel("Sin Foto")
+        self.lbl_foto_registro.setFixedSize(150, 200)
+        self.lbl_foto_registro.setStyleSheet("background-color: #E0E0E0; border: 1px solid #A0A0A0;")
+        self.lbl_foto_registro.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        btn_tomar_foto = QPushButton("📸 Tomar Foto")
+        btn_tomar_foto.clicked.connect(self.tomar_foto)
+        btn_cargar_foto = QPushButton("📂 Cargar Foto")
+        btn_cargar_foto.clicked.connect(self.cargar_foto)
+        
+        panel_foto.addWidget(self.lbl_foto_registro)
+        panel_foto.addWidget(btn_tomar_foto)
+        panel_foto.addWidget(btn_cargar_foto)
+        panel_foto.addStretch()
+        layout_superior.addLayout(panel_foto)
+
+        # Panel de Datos Personales
+        group_personales = QGroupBox("Datos Personales")
+        form_personales = QFormLayout(group_personales)
+        self.entry_nombre = QLineEdit()
+        self.entry_ap_paterno = QLineEdit()
+        self.entry_ap_materno = QLineEdit()
+        self.entry_fecha_nac = QLineEdit() # Puedes usar QDateEdit si prefieres
+        self.entry_fecha_nac.setPlaceholderText("YYYY-MM-DD")
+        self.entry_curp = QLineEdit()
+        self.entry_rfc = QLineEdit()
+        self.entry_nss = QLineEdit()
+        self.combo_estado_civil = QComboBox()
+        self.combo_estado_civil.addItems(["Soltero(a)", "Casado(a)", "Viudo(a)", "Divorciado(a)", "Unión Libre"])
+        self.combo_escolaridad = QComboBox()
+        self.combo_escolaridad.addItems(["Primaria", "Secundaria", "Bachillerato", "Licenciatura", "Maestría", "Doctorado"])
+        self.combo_puesto = QComboBox()
+        self.combo_puesto.addItems(["Administrativo", "Docente", "Director General", "Intendencia", "Otro"])
+
+        form_personales.addRow("Nombre(s):", self.entry_nombre)
+        form_personales.addRow("Apellido Paterno:", self.entry_ap_paterno)
+        form_personales.addRow("Apellido Materno:", self.entry_ap_materno)
+        form_personales.addRow("Fecha Nacimiento:", self.entry_fecha_nac)
+        form_personales.addRow("CURP:", self.entry_curp)
+        form_personales.addRow("RFC:", self.entry_rfc)
+        form_personales.addRow("NSS:", self.entry_nss)
+        form_personales.addRow("Estado Civil:", self.combo_estado_civil)
+        form_personales.addRow("Escolaridad:", self.combo_escolaridad)
+        form_personales.addRow("Puesto:", self.combo_puesto)
+        
+        layout_superior.addWidget(group_personales)
+        self.layout_scroll.addLayout(layout_superior)
+
+        # --- Grupo Contacto y Domicilio ---
+        group_contacto = QGroupBox("Contacto y Domicilio")
+        form_contacto = QFormLayout(group_contacto)
+        self.entry_direccion = QLineEdit()
+        self.entry_email = QLineEdit()
+        self.entry_telefono = QLineEdit()
+        form_contacto.addRow("Dirección Completa:", self.entry_direccion)
+        form_contacto.addRow("Correo Electrónico:", self.entry_email)
+        form_contacto.addRow("Teléfono:", self.entry_telefono)
+        self.layout_scroll.addWidget(group_contacto)
+
+        # --- Grupo Emergencia (Copiado de crear_pagina_nueva_inscripcion) ---
+        group_emergencia = QGroupBox("Contactos de Emergencia")
+        layout_emergencia = QGridLayout(group_emergencia)
+        self.entry_emerg_1_nombre = QLineEdit()
+        self.entry_emerg_1_telefono = QLineEdit()
+        self.entry_emerg_2_nombre = QLineEdit()
+        self.entry_emerg_2_telefono = QLineEdit()
+        layout_emergencia.addWidget(QLabel("Nombre 1:"), 0, 0)
+        layout_emergencia.addWidget(self.entry_emerg_1_nombre, 0, 1)
+        layout_emergencia.addWidget(QLabel("Teléfono 1:"), 0, 2)
+        layout_emergencia.addWidget(self.entry_emerg_1_telefono, 0, 3)
+        layout_emergencia.addWidget(QLabel("Nombre 2:"), 1, 0)
+        layout_emergencia.addWidget(self.entry_emerg_2_nombre, 1, 1)
+        layout_emergencia.addWidget(QLabel("Teléfono 2:"), 1, 2)
+        layout_emergencia.addWidget(self.entry_emerg_2_telefono, 1, 3)
+        self.layout_scroll.addWidget(group_emergencia)
+
+        self.layout_scroll.addStretch()
+        self.scroll_area.setWidget(self.scroll_content)
+        self.layout_principal.addWidget(self.scroll_area)
+
+        # --- Botones Guardar/Cancelar ---
+        layout_botones = QHBoxLayout()
+        self.btn_guardar = QPushButton("Guardar")
+        self.btn_guardar.setObjectName("primaryButton")
+        self.btn_guardar.clicked.connect(self.guardar_personal)
+        
+        btn_cancelar = QPushButton("Cancelar")
+        btn_cancelar.clicked.connect(self.reject)
+        
+        layout_botones.addStretch()
+        layout_botones.addWidget(btn_cancelar)
+        layout_botones.addWidget(self.btn_guardar)
+        self.layout_principal.addLayout(layout_botones)
+
+        if self.personal_id:
+            self.setWindowTitle("Editar Personal")
+            self.cargar_datos_personal()
+        else:
+            self.setWindowTitle("Registrar Nuevo Personal")
+
+    def tomar_foto(self):
+        # (Reutiliza la lógica de VentanaPrincipal.tomar_foto_webcam)
+        # (Necesitarás pasar self.lbl_foto_registro a esa función o copiarla aquí)
+        # (Por simplicidad, asumiremos que se copia la lógica de la VentanaPrincipal)
+        try:
+            cap = cv2.VideoCapture(0)
+            if not cap.isOpened():
+                mostrar_error("No se pudo acceder a la cámara web.")
+                return
+            while True:
+                ret, frame = cap.read()
+                if not ret: break
+                cv2.imshow('Presione ESPACIO para capturar, ESC para salir', frame)
+                key = cv2.waitKey(1)
+                if key % 256 == 32:
+                    temp_filename = os.path.join(FOTOS_PERSONAL_DIR, "temp_capture.jpg")
+                    cv2.imwrite(temp_filename, frame)
+                    self.ruta_foto_temporal = temp_filename
+                    self.mostrar_foto(temp_filename)
+                    break
+                elif key % 256 == 27:
+                    break
+            cap.release()
+            cv2.destroyAllWindows()
+        except Exception as e:
+             mostrar_error(f"Error con la cámara: {e}")
+
+    def cargar_foto(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Seleccionar Foto", "", "Imágenes (*.png *.jpg *.jpeg)")
+        if file_path:
+            self.ruta_foto_temporal = file_path
+            self.mostrar_foto(file_path)
+
+    def mostrar_foto(self, ruta_imagen):
+        if ruta_imagen and os.path.exists(ruta_imagen):
+            pixmap = QPixmap(ruta_imagen)
+            self.lbl_foto_registro.setPixmap(pixmap.scaled(self.lbl_foto_registro.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        else:
+            self.lbl_foto_registro.setText("Sin Foto")
+
+    def cargar_datos_personal(self):
+        """Carga los datos si estamos en modo EDICIÓN."""
+        try:
+            with get_db_connection() as conn:
+                datos = conn.cursor().execute("SELECT * FROM personal WHERE id = ?", (self.personal_id,)).fetchone()
+            if datos:
+                self.entry_nombre.setText(datos['nombre'])
+                self.entry_ap_paterno.setText(datos['apellido_paterno'])
+                self.entry_ap_materno.setText(datos['apellido_materno'])
+                self.entry_fecha_nac.setText(datos['fecha_nacimiento'])
+                self.entry_curp.setText(datos['curp'])
+                self.entry_rfc.setText(datos['rfc'])
+                self.entry_nss.setText(datos['nss'])
+                self.entry_direccion.setText(datos['direccion'])
+                self.combo_estado_civil.setCurrentText(datos['estado_civil'])
+                self.entry_email.setText(datos['email'])
+                self.entry_telefono.setText(datos['telefono'])
+                self.combo_escolaridad.setCurrentText(datos['escolaridad'])
+                self.combo_puesto.setCurrentText(datos['puesto'])
+                self.entry_emerg_1_nombre.setText(datos['emerg_1_nombre'])
+                self.entry_emerg_1_telefono.setText(datos['emerg_1_telefono'])
+                self.entry_emerg_2_nombre.setText(datos['emerg_2_nombre'])
+                self.entry_emerg_2_telefono.setText(datos['emerg_2_telefono'])
+                
+                self.ruta_foto_temporal = datos['foto_ruta'] # Guardamos la ruta existente
+                self.mostrar_foto(datos['foto_ruta'])
+        except Exception as e:
+            mostrar_error(f"Error al cargar datos del personal: {e}")
+
+    def guardar_personal(self):
+        """Guarda (INSERT o UPDATE) los datos del personal."""
+        # Recolectar datos
+        datos_personales = (
+            self.entry_nombre.text(), self.entry_ap_paterno.text(), self.entry_ap_materno.text(),
+            self.entry_fecha_nac.text(), self.entry_curp.text(), self.entry_rfc.text(), self.entry_nss.text(),
+            self.entry_direccion.text(), self.combo_estado_civil.currentText(), self.entry_email.text(),
+            self.entry_telefono.text(), self.combo_escolaridad.currentText(), self.combo_puesto.currentText(),
+            self.entry_emerg_1_nombre.text(), self.entry_emerg_1_telefono.text(),
+            self.entry_emerg_2_nombre.text(), self.entry_emerg_2_telefono.text()
+        )
+        
+        if not self.entry_nombre.text() or not self.entry_ap_paterno.text() or not self.combo_puesto.currentText():
+            mostrar_error("Nombre, Apellido Paterno y Puesto son obligatorios.")
+            return
+
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                ruta_final_foto = ""
+
+                if self.personal_id is None:
+                    # --- MODO INSERTAR (NUEVO) ---
+                    
+                    # Generar No. Empleado (Ej: P-2023-1, P-2023-2)
+                    año = datetime.date.today().year
+                    cursor.execute("SELECT COUNT(id) FROM personal WHERE num_empleado LIKE ?", (f"P-{año}-%",))
+                    count = cursor.fetchone()[0]
+                    num_empleado = f"P-{año}-{count + 1:03d}"
+
+                    cursor.execute("""
+                        INSERT INTO personal (num_empleado, nombre, apellido_paterno, apellido_materno, fecha_nacimiento, curp, rfc, nss,
+                                            direccion, estado_civil, email, telefono, escolaridad, puesto,
+                                            emerg_1_nombre, emerg_1_telefono, emerg_2_nombre, emerg_2_telefono)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (num_empleado,) + datos_personales)
+                    self.personal_id = cursor.lastrowid
+                    mostrar_info(f"Personal registrado con éxito.\nNúmero de Empleado: {num_empleado}")
+                
+                else:
+                    # --- MODO ACTUALIZAR (EDITAR) ---
+                    cursor.execute("""
+                        UPDATE personal SET
+                            nombre=?, apellido_paterno=?, apellido_materno=?, fecha_nacimiento=?, curp=?, rfc=?, nss=?,
+                            direccion=?, estado_civil=?, email=?, telefono=?, escolaridad=?, puesto=?,
+                            emerg_1_nombre=?, emerg_1_telefono=?, emerg_2_nombre=?, emerg_2_telefono=?
+                        WHERE id = ?
+                    """, datos_personales + (self.personal_id,))
+                    mostrar_info("Personal actualizado con éxito.")
+
+                # --- Lógica de Foto (Común para ambos modos) ---
+                if self.ruta_foto_temporal and os.path.exists(self.ruta_foto_temporal):
+                    # (Copiado de registrar_alumno_e_inscribir)
+                    try:
+                        img = PILImage.open(self.ruta_foto_temporal)
+                        img.thumbnail((400, 400), PILImage.Resampling.LANCZOS)
+                        nombre_foto = f"foto_personal_{self.personal_id}.png"
+                        ruta_final_foto = os.path.abspath(os.path.join(FOTOS_PERSONAL_DIR, nombre_foto))
+                        img.save(ruta_final_foto, "PNG")
+                        
+                        # Actualizar la ruta en la BD
+                        cursor.execute("UPDATE personal SET foto_ruta = ? WHERE id = ?", (ruta_final_foto, self.personal_id))
+                    except Exception as e:
+                        print(f"Error al guardar foto de personal: {e}")
+                
+                conn.commit()
+            self.accept() # Cerrar el diálogo si todo salió bien
+        except sqlite3.IntegrityError as e:
+            mostrar_error(f"Error: El CURP, RFC o NSS ya podrían existir en la base de datos. {e}")
+        except Exception as e:
+            mostrar_error(f"Error al guardar en base de datos: {e}")
+
+# --- (Fin de la clase DialogGestionPersonal) ---
 
 # ---- Ventana de Login ----
 class LoginScreen(QWidget):
@@ -942,7 +1420,8 @@ class VentanaPrincipal(QMainWindow):
         self.pagina_gestion_usuarios = self.crear_pagina_gestion_usuarios()
         self.pagina_gestion_materias = self.crear_pagina_gestion_materias()
         self.pagina_gestion_calificaciones = self.crear_pagina_gestion_calificaciones()
-        self.pagina_configuracion = self.crear_pagina_configuracion() 
+        self.pagina_configuracion = self.crear_pagina_configuracion()
+        self.pagina_gestion_personal = self.crear_pagina_gestion_personal() # NUEVA PÁGINA
 
         # Añadir páginas al StackedWidget 
         self.stacked_widget.addWidget(self.pagina_inicio) 
@@ -954,6 +1433,7 @@ class VentanaPrincipal(QMainWindow):
         self.stacked_widget.addWidget(self.pagina_gestion_materias)
         self.stacked_widget.addWidget(self.pagina_gestion_calificaciones) 
         self.stacked_widget.addWidget(self.pagina_configuracion)
+        self.stacked_widget.addWidget(self.pagina_gestion_personal) # ÍNDICE 9
 
         layout_contenido.addWidget(self.stacked_widget, 1) 
 
@@ -1094,6 +1574,7 @@ class VentanaPrincipal(QMainWindow):
             menu.addSeparator()
             menu.addAction("📚 Gestionar Cursos", lambda: self.cambiar_pagina(4))
             menu.addAction("👤 Gestionar Usuarios", lambda: self.cambiar_pagina(5))
+            menu.addAction("👨‍💼 Gestionar Personal", lambda: self.cambiar_pagina(9))
             menu.addAction("📖 Gestionar Materias", lambda: self.cambiar_pagina(6))
             menu.addAction("📊 Asignar Calificaciones", lambda: self.cambiar_pagina(7))
             menu.addSeparator()
@@ -1146,6 +1627,8 @@ class VentanaPrincipal(QMainWindow):
         if self.permisos.get('can_manage_courses') or self.permisos.get('is_admin'):
             btn_sc_cursos = self.crear_boton_acceso("📚", "Gestionar Cursos", lambda: self.cambiar_pagina(4))
             layout_accesos.addWidget(btn_sc_cursos)
+            btn_sc_personal = self.crear_boton_acceso("👨‍💼", "Gestionar Personal", lambda: self.cambiar_pagina(9))
+            layout_accesos.addWidget(btn_sc_personal)
         if self.permisos.get('can_manage_users') or self.permisos.get('is_admin'):
             btn_sc_usuarios = self.crear_boton_acceso("👤", "Gestionar Usuarios", lambda: self.cambiar_pagina(5))
             layout_accesos.addWidget(btn_sc_usuarios)
@@ -1967,6 +2450,77 @@ class VentanaPrincipal(QMainWindow):
         """Crea la interfaz para la página de configuración."""
         # ... (El código de esta función debe estar aquí) ...
         pass # Reemplaza 'pass' con el código de la función si la borraste
+    
+    # ---- PÁGINA 9: GESTIÓN DE PERSONAL ----
+    def crear_pagina_gestion_personal(self):
+        """Crea la interfaz para la página de gestión de personal."""
+        widget = QWidget()
+        widget.setObjectName("contentPage")
+        layout_principal = QHBoxLayout(widget)
+        layout_principal.setContentsMargins(15, 15, 15, 15)
+        layout_principal.setSpacing(15)
+
+        # Panel Izquierdo: Tabla de Personal
+        group_tabla = QGroupBox("Lista de Personal Registrado")
+        layout_tabla = QVBoxLayout(group_tabla)
+
+        # (Opcional: Añadir filtro por puesto si se desea)
+
+        self.tabla_personal = QTableWidget(0, 5) 
+        self.tabla_personal.setHorizontalHeaderLabels(["ID", "No. Empleado", "Nombre Completo", "Puesto", "Email"])
+        self.tabla_personal.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.tabla_personal.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.tabla_personal.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.tabla_personal.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.tabla_personal.itemSelectionChanged.connect(self.mostrar_expediente_personal)
+        self.tabla_personal.hideColumn(0) # Ocultar ID interno
+
+        layout_tabla.addWidget(self.tabla_personal)
+        
+        btn_registrar_nuevo = QPushButton("Registrar Nuevo Personal")
+        btn_registrar_nuevo.setObjectName("primaryButton")
+        btn_registrar_nuevo.clicked.connect(self.abrir_dialogo_personal)
+        layout_tabla.addWidget(btn_registrar_nuevo)
+
+        layout_principal.addWidget(group_tabla, 2) 
+
+        # Panel Derecho: Expediente y Acciones
+        panel_derecho = QWidget()
+        layout_derecho = QVBoxLayout(panel_derecho)
+        layout_derecho.setContentsMargins(0,0,0,0) 
+
+        group_expediente = QGroupBox("Expediente de Personal")
+        layout_expediente = QVBoxLayout(group_expediente)
+        self.expediente_personal_texto = QTextEdit()
+        self.expediente_personal_texto.setReadOnly(True)
+        self.expediente_personal_texto.setObjectName("expedienteDisplay") 
+        layout_expediente.addWidget(self.expediente_personal_texto)
+
+        self.btn_editar_personal = QPushButton("Editar Personal Seleccionado")
+        self.btn_editar_personal.setObjectName("secondaryButton")
+        self.btn_editar_personal.clicked.connect(lambda: self.abrir_dialogo_personal(editar=True))
+
+        self.btn_abrir_expediente_personal = QPushButton("📂 Gestionar Expediente Digital (Personal)")
+        self.btn_abrir_expediente_personal.setObjectName("secondaryButton")
+        self.btn_abrir_expediente_personal.clicked.connect(self.abrir_expediente_personal_seleccionado)
+
+        self.btn_generar_credencial_personal = QPushButton("🆔 Generar Credencial de Personal")
+        self.btn_generar_credencial_personal.setObjectName("primaryButton")
+        self.btn_generar_credencial_personal.setStyleSheet("background-color: #6f42c1; color: white;")
+        self.btn_generar_credencial_personal.clicked.connect(self.generar_credencial_personal_pdf)
+
+        self.btn_eliminar_personal = QPushButton("Eliminar Personal Seleccionado")
+        self.btn_eliminar_personal.setObjectName("deleteButton") 
+        self.btn_eliminar_personal.clicked.connect(self.eliminar_personal)
+
+        layout_derecho.addWidget(self.btn_editar_personal)
+        layout_derecho.addWidget(self.btn_abrir_expediente_personal)
+        layout_derecho.addWidget(group_expediente)
+        layout_derecho.addWidget(self.btn_generar_credencial_personal)
+        layout_derecho.addWidget(self.btn_eliminar_personal)
+
+        layout_principal.addWidget(panel_derecho, 1) 
+        return widget
 
 
     # --- LÓGICA DE GESTIÓN DE USUARIOS (ACTUALIZADA) ---
@@ -4768,6 +5322,291 @@ class VentanaPrincipal(QMainWindow):
 
 
 # ---- HOJAS DE ESTILO (QSS) ----
+
+# --- INICIO DE MÉTODOS DE GESTIÓN DE PERSONAL ---
+    
+    def cargar_tabla_personal(self):
+        """Carga la lista del personal en la QTableWidget."""
+        try: 
+            if not hasattr(self, 'tabla_personal'): return
+            self.tabla_personal.setRowCount(0)
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT id, num_empleado, nombre, apellido_paterno, apellido_materno, puesto, email FROM personal ORDER BY apellido_paterno")
+                personal = cursor.fetchall()
+
+                self.tabla_personal.setRowCount(len(personal))
+                for row, p in enumerate(personal):
+                    nombre_completo = f"{p['nombre']} {p['apellido_paterno']} {p['apellido_materno']}"
+                    self.tabla_personal.setItem(row, 0, QTableWidgetItem(str(p['id'])))
+                    self.tabla_personal.setItem(row, 1, QTableWidgetItem(p['num_empleado']))
+                    self.tabla_personal.setItem(row, 2, QTableWidgetItem(nombre_completo))
+                    self.tabla_personal.setItem(row, 3, QTableWidgetItem(p['puesto']))
+                    self.tabla_personal.setItem(row, 4, QTableWidgetItem(p['email']))
+        except Exception as e:
+            mostrar_error(f"Error al cargar tabla de personal: {e}")
+
+    def mostrar_expediente_personal(self):
+        """Muestra los detalles del empleado seleccionado en el QTextEdit."""
+        if not hasattr(self, 'expediente_personal_texto'): return
+        
+        selected_items = self.tabla_personal.selectedItems()
+        if not selected_items or self.tabla_personal.currentRow() < 0:
+            self.expediente_personal_texto.clear()
+            return
+        
+        personal_id = int(self.tabla_personal.item(self.tabla_personal.currentRow(), 0).text())
+        
+        try:
+            with get_db_connection() as conn:
+                datos = conn.cursor().execute("SELECT * FROM personal WHERE id = ?", (personal_id,)).fetchone()
+            
+            if datos:
+                # (Lógica de foto copiada de mostrar_expediente_alumno)
+                foto_html = ""
+                ruta_foto_bd = datos['foto_ruta']
+                if ruta_foto_bd and os.path.exists(ruta_foto_bd):
+                    ruta_normalizada = ruta_foto_bd.replace('\\', '/')
+                    foto_html = f'<img src="{ruta_normalizada}" width="150" height="200">'
+                else:
+                    foto_html = '<table width="150" height="200" bgcolor="#cccccc"><tr><td align="center" valign="middle">Sin Foto</td></tr></table>'
+
+                expediente_str = f"""
+                <table width="100%" border="0" cellspacing="0" cellpadding="5">
+                    <tr>
+                        <td valign="top">
+                            <b><u>DATOS DEL PERSONAL</u></b><br>
+                            <b>No. Empleado:</b> {datos['num_empleado']}<br>
+                            <b>Nombre:</b> {datos['nombre']} {datos['apellido_paterno']} {datos['apellido_materno']}<br>
+                            <b>Puesto:</b> {datos['puesto']}<br>
+                            <b>CURP:</b> {datos['curp']} | <b>RFC:</b> {datos['rfc']}<br>
+                            <b>NSS:</b> {datos['nss']}<br>
+                            <b>Fecha Nac:</b> {datos['fecha_nacimiento']} | <b>Edo. Civil:</b> {datos['estado_civil']}<br>
+                            <b>Escolaridad:</b> {datos['escolaridad']}
+                        </td>
+                        <td valign="top" align="right" width="160">{foto_html}</td>
+                    </tr>
+                </table>
+                <hr>
+                <b><u>CONTACTO Y DOMICILIO</u></b><br>
+                <b>Teléfono:</b> {datos['telefono']} | <b>Email:</b> {datos['email']}<br>
+                <b>Dirección:</b> {datos['direccion']}<br>
+                <br>
+                <b><u>CONTACTOS DE EMERGENCIA</u></b><br>
+                <b>1:</b> {datos['emerg_1_nombre']} - Tel: {datos['emerg_1_telefono']}<br>
+                <b>2:</b> {datos['emerg_2_nombre']} - Tel: {datos['emerg_2_telefono']}<br>
+                """
+                self.expediente_personal_texto.setHtml(expediente_str)
+            else:
+                self.expediente_personal_texto.clear()
+        except Exception as e:
+            mostrar_error(f"Error al mostrar expediente de personal: {e}")
+
+    def abrir_dialogo_personal(self, editar=False):
+        """Abre el QDialog para registrar o editar personal."""
+        personal_id = None
+        if editar:
+            selected_items = self.tabla_personal.selectedItems()
+            if not selected_items or self.tabla_personal.currentRow() < 0:
+                mostrar_error("Por favor, seleccione un empleado de la lista para editar.")
+                return
+            personal_id = int(self.tabla_personal.item(self.tabla_personal.currentRow(), 0).text())
+        
+        dialogo = DialogGestionPersonal(personal_id=personal_id, parent=self)
+        # Aplicamos el estilo actual al diálogo
+        self.style().polish(dialogo) 
+        
+        if dialogo.exec():
+            # Si el diálogo se guardó (accept()), recargamos
+            self.cargar_tabla_personal()
+            self.mostrar_expediente_personal()
+
+    def abrir_expediente_personal_seleccionado(self):
+        """Abre la ventana de documentos para el personal seleccionado."""
+        selected_items = self.tabla_personal.selectedItems()
+        if not selected_items or self.tabla_personal.currentRow() < 0:
+            mostrar_error("Por favor, seleccione un empleado de la lista.")
+            return
+        
+        try:
+            row = self.tabla_personal.currentRow()
+            personal_id = int(self.tabla_personal.item(row, 0).text())
+            nombre_completo = self.tabla_personal.item(row, 2).text()
+
+            ventana_docs = VentanaDocumentosPersonal(personal_id, nombre_completo, self)
+            ventana_docs.exec()
+        except Exception as e:
+            mostrar_error(f"Error al abrir expediente de personal: {e}")
+
+    def eliminar_personal(self):
+        """Elimina al empleado seleccionado (con confirmación)."""
+        selected_items = self.tabla_personal.selectedItems()
+        if not selected_items or self.tabla_personal.currentRow() < 0:
+            mostrar_error("Por favor, seleccione un empleado de la lista para eliminar.")
+            return
+        
+        row = self.tabla_personal.currentRow()
+        personal_id = int(self.tabla_personal.item(row, 0).text())
+        nombre_completo = self.tabla_personal.item(row, 2).text()
+        
+        # (Opcional: Verificar si está ligado a un usuario)
+        
+        reply = QMessageBox.question(self, "Confirmar Eliminación",
+                                     f"¿Está seguro que desea eliminar a:\n\n{nombre_completo} (ID: {personal_id})?\n\nEsta acción eliminará sus documentos asociados.",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    # ON DELETE CASCADE se encargará de borrar 'documentos_personal'
+                    cursor.execute("DELETE FROM personal WHERE id = ?", (personal_id,))
+                    conn.commit()
+                
+                mostrar_info(f"Personal '{nombre_completo}' eliminado exitosamente.")
+                self.cargar_tabla_personal()
+                self.expediente_personal_texto.clear()
+            except Exception as e:
+                mostrar_error(f"Error al eliminar personal: {e}")
+
+    def generar_credencial_personal_pdf(self):
+        """Genera la credencial para el personal (copia de la de estudiante)."""
+        # (Lógica copiada de generar_credencial_pdf y adaptada)
+        
+        PAGE_WIDTH, PAGE_HEIGHT = letter 
+        GAFETE_W, GAFETE_H = 85.6 * mm, 53.98 * mm 
+        MARGIN_X = (PAGE_WIDTH - (GAFETE_W * 2 + 10 * mm)) / 2 
+        MARGIN_Y = PAGE_HEIGHT - GAFETE_H - 15 * mm
+        
+        selected_items = self.tabla_personal.selectedItems()
+        if not selected_items or self.tabla_personal.currentRow() < 0:
+            mostrar_error("Por favor, seleccione un empleado de la lista.")
+            return
+        try:
+             personal_id = int(self.tabla_personal.item(self.tabla_personal.currentRow(), 0).text())
+        except Exception:
+            return
+
+        try:
+            with get_db_connection() as conn:
+                # --- CAMBIO: Consultar tabla 'personal' ---
+                datos = conn.cursor().execute("SELECT * FROM personal WHERE id = ?", (personal_id,)).fetchone()
+
+            if not datos:
+                mostrar_error("No se encontraron datos para el empleado.")
+                return
+
+            temp_pdf = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+            filename = temp_pdf.name
+            temp_pdf.close()
+
+            c = canvas.Canvas(filename, pagesize=letter)
+            
+            # (Reutilizamos las funciones auxiliares de la credencial de estudiante)
+            def dibujar_marca_agua(canvas_obj, width, height):
+                if os.path.exists(LOGO_PATH):
+                    canvas_obj.saveState()
+                    canvas_obj.setFillAlpha(0.1) 
+                    logo_w, logo_h = 35 * mm, 35 * mm
+                    canvas_obj.drawImage(LOGO_PATH, (width - logo_w)/2, (height - logo_h)/2, width=logo_w, height=logo_h, mask='auto')
+                    canvas_obj.restoreState()
+
+            def dibujar_placeholder(canvas_obj):
+                canvas_obj.setFillColorRGB(0.85, 0.85, 0.85)
+                canvas_obj.setStrokeColorRGB(0.6, 0.6, 0.6)
+                canvas_obj.rect(4*mm, 12*mm, 22*mm, 26*mm, fill=1, stroke=1)
+                canvas_obj.setFillColorRGB(0.5, 0.5, 0.5)
+                canvas_obj.setFont("Helvetica", 8)
+                canvas_obj.drawCentredString(15*mm, 25*mm, "FOTO")
+            
+            def dibujar_cara_credencial(canvas_obj, x_offset, y_offset, es_reverso=False):
+                width, height = GAFETE_W, GAFETE_H 
+                canvas_obj.saveState()
+                canvas_obj.translate(x_offset, y_offset) 
+                canvas_obj.setFillColorRGB(0.97, 0.97, 0.97)
+                canvas_obj.rect(0, 0, width, height, fill=1, stroke=0)
+                dibujar_marca_agua(canvas_obj, width, height)
+                canvas_obj.setFillColorRGB(0.2, 0.6, 0.2) # (Puedes cambiar este color si quieres)
+                canvas_obj.rect(0, height - 14*mm, width, 14*mm, fill=1, stroke=0)
+                if os.path.exists(LOGO_PATH):
+                     canvas_obj.drawImage(LOGO_PATH, 2*mm, height - 12*mm, width=10*mm, height=10*mm, mask='auto')
+                canvas_obj.setFillColorRGB(1, 1, 1)
+                canvas_obj.setFont("Helvetica-Bold", 11)
+                canvas_obj.drawString(14*mm, height - 6*mm, "UPASER")
+                canvas_obj.setFont("Helvetica", 6)
+                canvas_obj.drawString(14*mm, height - 10*mm, "Unidad Profesional de Asesoría y Regularización")
+
+                if not es_reverso: # --- ANVERSO ---
+                    foto_ruta = datos['foto_ruta']
+                    if foto_ruta and os.path.exists(foto_ruta):
+                        try:
+                            canvas_obj.drawImage(foto_ruta, 4*mm, 12*mm, width=22*mm, height=26*mm, preserveAspectRatio=True, anchor='c')
+                            canvas_obj.setStrokeColorRGB(0, 0, 0)
+                            canvas_obj.rect(4*mm, 12*mm, 22*mm, 26*mm, fill=0, stroke=1)
+                        except Exception: dibujar_placeholder(canvas_obj)
+                    else: dibujar_placeholder(canvas_obj)
+                    
+                    # --- DATOS ADAPTADOS A PERSONAL ---
+                    canvas_obj.setFillColorRGB(0.2, 0.2, 0.2)
+                    canvas_obj.setFont("Helvetica-Bold", 7)
+                    canvas_obj.drawString(30*mm, 34*mm, "NOMBRE:")
+                    canvas_obj.setFont("Helvetica", 9)
+                    nombre_completo = f"{datos['nombre']} {datos['apellido_paterno']} {datos['apellido_materno']}"
+                    if len(nombre_completo) > 25: canvas_obj.setFont("Helvetica", 8)
+                    canvas_obj.drawString(30*mm, 30*mm, nombre_completo)
+
+                    canvas_obj.setFont("Helvetica-Bold", 7)
+                    canvas_obj.drawString(30*mm, 24*mm, "NO. DE EMPLEADO:")
+                    canvas_obj.setFont("Helvetica", 10)
+                    canvas_obj.setFillColorRGB(0.7, 0, 0)
+                    canvas_obj.drawString(30*mm, 19.5*mm, f"{datos['num_empleado']}")
+
+                    canvas_obj.setFillColorRGB(0.2, 0.2, 0.2)
+                    canvas_obj.setFont("Helvetica-Bold", 7)
+                    canvas_obj.drawString(30*mm, 14*mm, "PUESTO:")
+                    canvas_obj.setFont("Helvetica", 8)
+                    canvas_obj.drawString(30*mm, 10*mm, datos['puesto'])
+                    # --- FIN DATOS ADAPTADOS ---
+
+                    canvas_obj.setStrokeColorRGB(0.2, 0.6, 0.2)
+                    canvas_obj.line(4*mm, 8*mm, width-4*mm, 8*mm)
+                    canvas_obj.setFont("Helvetica", 6)
+                    canvas_obj.setFillColorRGB(0.4, 0.4, 0.4)
+                    anio_actual = datetime.date.today().year
+                    canvas_obj.drawCentredString(width/2, 5*mm, f"VIGENCIA: {anio_actual} - {anio_actual+1}")
+                    
+                else: # --- REVERSO (IDÉNTICO AL DE ALUMNO) ---
+                    director_nombre = "MTRO. JOVANY IVAN CERVANTES CARRERAS"
+                    canvas_obj.setFillColorRGB(0.2, 0.2, 0.2)
+                    canvas_obj.setFont("Helvetica-Bold", 10)
+                    firma_y = height / 2.0
+                    canvas_obj.setStrokeColorRGB(0.5, 0.5, 0.5)
+                    canvas_obj.line(width/4, firma_y, width*3/4, firma_y)
+                    canvas_obj.setFont("Helvetica", 7)
+                    canvas_obj.setFillColorRGB(0.2, 0.2, 0.2)
+                    canvas_obj.drawCentredString(width/2, firma_y - 4*mm, director_nombre)
+                    canvas_obj.setFont("Helvetica-Bold", 6)
+                    canvas_obj.drawCentredString(width/2, firma_y - 7*mm, "DIRECTOR DEL PLANTEL")
+                    canvas_obj.setStrokeColorRGB(0.2, 0.6, 0.2)
+                    canvas_obj.line(4*mm, 8*mm, width-4*mm, 8*mm)
+                    canvas_obj.setFont("Helvetica", 6)
+                    canvas_obj.setFillColorRGB(0.4, 0.4, 0.4)
+                    canvas_obj.drawCentredString(width/2, 5*mm, "Esta credencial es personal e intransferible.")
+
+                canvas_obj.restoreState()
+            
+            # Dibujar ambas caras
+            dibujar_cara_credencial(c, MARGIN_X, MARGIN_Y, es_reverso=False)
+            dibujar_cara_credencial(c, MARGIN_X + GAFETE_W + 10 * mm, MARGIN_Y, es_reverso=True)
+            
+            c.save()
+            self._temp_pdf_files.append(filename)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(filename))
+
+        except Exception as e:
+            mostrar_error(f"Error al generar credencial de personal: {e}\n{traceback.format_exc()}")
+
+    # --- FIN DE MÉTODOS DE GESTIÓN DE PERSONAL ---
 
 def get_accent_stylesheet(accent_name):
     """Retorna el QSS para un color de acento específico."""
