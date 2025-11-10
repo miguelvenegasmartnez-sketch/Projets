@@ -9,6 +9,17 @@ import secrets
 import json 
 from PIL import Image as PILImage, ImageOps, ImageDraw
 
+def resource_path(relative_path):
+    """ Obtiene la ruta absoluta al recurso, funciona para desarrollo y para PyInstaller """
+    try:
+        # PyInstaller crea una carpeta temporal y guarda la ruta en _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        # Si no se está ejecutando como .exe, usa la ruta normal
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    
+    return os.path.join(base_path, relative_path)
+
 # --- Importar bibliotecas de PyQt6 (Fusionadas) ---
 try:
     from PyQt6.QtWidgets import (
@@ -28,9 +39,6 @@ except ImportError as e:
 
 # --- Importar ReportLab para PDF ---
 try:
-    from reportlab.graphics.barcode import code128
-    from reportlab.graphics.shapes import Drawing
-    from reportlab.graphics import renderPDF
     from reportlab.pdfgen import canvas
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.units import inch, mm # Asegúrate de tener 'mm' aquí también
@@ -68,6 +76,13 @@ except ImportError:
 # ---- Configuración de Rutas Absolutas ----
 # Obtiene la ruta donde está guardado este archivo .py
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+if getattr(sys, 'frozen', False):
+    # Corriendo como .EXE: El directorio base es donde está el .exe
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    # Corriendo como .PY: El directorio base es donde está el script
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Usa esa ruta para encontrar siempre los archivos correctos
 DB_NAME = os.path.join(BASE_DIR, "gestion_escolar.db")
@@ -180,6 +195,8 @@ def inicializar_db():
             alumno_id INTEGER NOT NULL,
             curso_id INTEGER NOT NULL,
             fecha_inscripcion TEXT NOT NULL,
+            monto_original REAL DEFAULT 0.0,
+            descuento_aplicado_pct REAL DEFAULT 0.0,
             monto_total REAL NOT NULL,
             monto_pagado REAL DEFAULT 0.0,
             estado TEXT DEFAULT 'Pendiente',
@@ -188,6 +205,13 @@ def inicializar_db():
             FOREIGN KEY (curso_id) REFERENCES cursos(id) ON DELETE RESTRICT
         )
         """)
+        
+        try:
+             cursor.execute("ALTER TABLE inscripciones ADD COLUMN IF NOT EXISTS monto_original REAL DEFAULT 0.0")
+             cursor.execute("ALTER TABLE inscripciones ADD COLUMN IF NOT EXISTS descuento_aplicado_pct REAL DEFAULT 0.0")
+             conn.commit()
+        except sqlite3.OperationalError:
+            pass
         
         # --- Tabla de Pagos ---
         cursor.execute("""
@@ -1001,6 +1025,480 @@ class DialogGestionPersonal(QDialog):
 
 # --- (Fin de la clase DialogGestionPersonal) ---
 
+# --- (PEGAR ESTA NUEVA CLASE COMPLETA) ---
+
+class DialogoInscribirCurso(QDialog):
+    """
+    Un nuevo diálogo para inscribir a un ALUMNO EXISTENTE en un NUEVO CURSO.
+    """
+    def __init__(self, alumno_id, nombre_alumno, parent=None):
+        super().__init__(parent)
+        self.alumno_id = alumno_id
+        self.parent_window = parent # Guardamos la VentanaPrincipal
+        self.setWindowTitle("Inscribir a Nuevo Curso")
+        self.setMinimumWidth(500)
+
+        self.layout = QFormLayout(self)
+        
+        self.lbl_nombre = QLabel(f"{nombre_alumno} (ID: {self.alumno_id})")
+        self.lbl_nombre.setStyleSheet("font-weight: bold;")
+        
+        self.combo_curso = QComboBox()
+        self.combo_plan_pago = QComboBox()
+        self.lbl_costo_total = QLabel("$ 0.00")
+        self.lbl_costo_total.setStyleSheet("font-weight: bold; color: #4CAF50; font-size: 11pt;")
+        
+        self.layout.addRow("Alumno:", self.lbl_nombre)
+        self.layout.addRow("Seleccionar Curso:", self.combo_curso)
+        self.layout.addRow("Seleccionar Plan de Pago:", self.combo_plan_pago)
+        self.layout.addRow("Costo de Inscripción:", self.lbl_costo_total)
+
+        # Botones
+        layout_botones = QHBoxLayout()
+        self.btn_guardar = QPushButton("Inscribir")
+        self.btn_guardar.setObjectName("primaryButton")
+        btn_cancelar = QPushButton("Cancelar")
+        
+        layout_botones.addStretch()
+        layout_botones.addWidget(btn_cancelar)
+        layout_botones.addWidget(self.btn_guardar)
+        self.layout.addRow(layout_botones)
+
+        # Conexiones
+        btn_cancelar.clicked.connect(self.reject)
+        self.btn_guardar.clicked.connect(self.guardar_inscripcion)
+        self.combo_curso.currentIndexChanged.connect(self.actualizar_planes_pago)
+        self.combo_plan_pago.currentIndexChanged.connect(self.actualizar_costo_label)
+
+        self.cargar_cursos_disponibles()
+
+    def cargar_cursos_disponibles(self):
+        """Carga solo los cursos en los que el alumno NO está inscrito."""
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                # 1. Obtener cursos en los que el alumno YA está
+                cursor.execute("SELECT curso_id FROM inscripciones WHERE alumno_id = ?", (self.alumno_id,))
+                cursos_actuales = [row['curso_id'] for row in cursor.fetchall()]
+                
+                # 2. Obtener TODOS los cursos
+                cursor.execute("SELECT * FROM cursos ORDER BY nombre_curso")
+                todos_cursos = cursor.fetchall()
+
+            self.combo_curso.addItem("--- Seleccione un curso ---", userData=None)
+            count = 0
+            for curso in todos_cursos:
+                if curso['id'] not in cursos_actuales:
+                    # Guardamos el objeto Fila completo (sqlite3.Row)
+                    self.combo_curso.addItem(curso['nombre_curso'], userData=curso)
+                    count += 1
+            
+            if count == 0:
+                self.combo_curso.clear()
+                self.combo_curso.addItem("Este alumno ya está en todos los cursos")
+                self.btn_guardar.setEnabled(False)
+                
+        except Exception as e:
+            mostrar_error(f"Error al cargar cursos disponibles: {e}")
+
+    def actualizar_planes_pago(self):
+        """
+        Copia la lógica de 'actualizar_opciones_pago' de la VentanaPrincipal,
+        pero usa los controles de este diálogo.
+        """
+        try:
+            self.combo_plan_pago.clear()
+            self.lbl_costo_total.setText("$ 0.00")
+            
+            curso = self.combo_curso.currentData() # Obtenemos la Fila completa
+            if not curso:
+                self.combo_plan_pago.addItem("---", userData=None)
+                return
+            
+            self.combo_plan_pago.addItem("--- Seleccione un plan ---", userData=None)
+            quantizer = Decimal('0.01')
+            
+            # (Revisamos todos los planes igual que en la función original)
+            if curso['costo_exhibicion'] > 0:
+                costo = Decimal(curso['costo_exhibicion']).quantize(quantizer)
+                texto = f"Una Sola Exhibición (${costo})"
+                self.combo_plan_pago.addItem(texto, userData=("Exhibición Única", float(costo), 1))
+
+            if curso['costo_sem_15'] > 0:
+                costo = Decimal(curso['costo_sem_15']).quantize(quantizer)
+                pago = (costo / 15).quantize(quantizer, rounding=ROUND_HALF_UP)
+                texto = f"Semanal (15 pagos de ${pago})"
+                self.combo_plan_pago.addItem(texto, userData=("Semanal (15)", float(costo), 15))
+              
+            if curso['costo_sem_12'] > 0: 
+                costo = Decimal(curso['costo_sem_12']).quantize(quantizer)
+                pago = (costo / 12).quantize(quantizer, rounding=ROUND_HALF_UP) 
+                texto = f"Semanal (12 pagos de ${pago})" 
+                self.combo_plan_pago.addItem(texto, userData=("Semanal (12)", float(costo), 12))
+            
+            if curso['costo_mensual_3'] > 0: 
+                costo = Decimal(curso['costo_mensual_3']).quantize(quantizer)
+                pago = (costo / 3).quantize(quantizer, rounding=ROUND_HALF_UP) 
+                texto = f"Mensual (3 pagos de ${pago})" 
+                self.combo_plan_pago.addItem(texto, userData=("Mensual (3)", float(costo), 3))
+
+            if curso['costo_bi_semanal'] > 0:
+                costo = Decimal(curso['costo_bi_semanal']).quantize(quantizer)
+                pago = (costo / 2).quantize(quantizer, rounding=ROUND_HALF_UP)
+                texto = f"Bisemanal (2 pagos de ${pago})"
+                self.combo_plan_pago.addItem(texto, userData=("Bisemanal (2)", float(costo), 2)) 
+
+            if curso['costo_mensual_4'] > 0:
+                costo = Decimal(curso['costo_mensual_4']).quantize(quantizer)
+                pago = (costo / 4).quantize(quantizer, rounding=ROUND_HALF_UP)
+                texto = f"Mensual (4 pagos de ${pago})"
+                self.combo_plan_pago.addItem(texto, userData=("Mensual (4)", float(costo), 4))
+            
+            # (Incluimos la lógica de mensualidad que ya existe en el archivo base)
+            if 'costo_mensualidad' in curso.keys() and curso['costo_mensualidad'] > 0:
+                costo = Decimal(curso['costo_mensualidad']).quantize(quantizer)
+                texto = f"Colegiatura Mensual (${costo})"
+                self.combo_plan_pago.addItem(texto, userData=("Mensualidad", float(costo), 1))
+        
+        except Exception as e:
+            mostrar_error(f"Error al actualizar planes de pago: {e}")
+
+    def actualizar_costo_label(self):
+        """Actualiza el label de costo total."""
+        try:
+            data = self.combo_plan_pago.currentData()
+            if data:
+                plan, costo_total, num_pagos = data
+                self.lbl_costo_total.setText(f"$ {costo_total:.2f}")
+            else:
+                self.lbl_costo_total.setText("$ 0.00")
+        except:
+            pass # Ignorar error si está vacío
+
+    def guardar_inscripcion(self):
+        """Guarda la nueva inscripción en la BD."""
+        curso_data = self.combo_curso.currentData()
+        plan_data = self.combo_plan_pago.currentData()
+        
+        if not curso_data or not plan_data:
+            mostrar_error("Debe seleccionar un curso y un plan de pago válidos.")
+            return
+
+        try:
+            curso_id = curso_data['id']
+            plan_nombre, monto_total, num_pagos = plan_data
+            fecha_insc = datetime.date.today().isoformat()
+            
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                INSERT INTO inscripciones (alumno_id, curso_id, fecha_inscripcion, monto_total, estado, tipo_pago_seleccionado)
+                VALUES (?, ?, ?, ?, 'Pendiente', ?)
+                """, (self.alumno_id, curso_id, fecha_insc, monto_total, plan_nombre))
+                
+                inscripcion_id = cursor.lastrowid
+                conn.commit()
+            
+            # Preguntar para generar PDF (opcional, pero recomendado)
+            reply = QMessageBox.question(self, "Generar PDF",
+                                         "Inscripción exitosa.\n¿Desea generar la ficha de inscripción y el calendario de pagos para este nuevo curso?",
+                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                # Usamos la función de la VentanaPrincipal
+                self.parent_window.generar_ficha_completa_pdf(inscripcion_id, imprimir_poliza=False)
+
+            self.accept() # Cierra el diálogo
+
+        except Exception as e:
+            mostrar_error(f"Error al guardar la inscripción: {e}\n{traceback.format_exc()}")
+
+# --- (PEGAR ESTA NUEVA CLASE COMPLETA) ---
+
+class DialogoEditarAlumno(QDialog):
+    """
+    Un diálogo para editar los datos de un ALUMNO EXISTENTE.
+    (Basado en el formulario de crear_pagina_nueva_inscripcion)
+    """
+    def __init__(self, alumno_id, parent=None):
+        super().__init__(parent)
+        self.alumno_id = alumno_id
+        self.parent_window = parent # Guardamos la VentanaPrincipal
+        self.setWindowTitle(f"Editar Expediente - Alumno ID: {self.alumno_id}")
+        self.setMinimumSize(800, 600)
+        self.ruta_foto_temporal = None # Para manejar cambios de foto
+
+        # --- Layout Principal (con Scroll) ---
+        self.layout_principal = QVBoxLayout(self)
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        
+        self.scroll_content = QWidget()
+        self.layout_scroll = QVBoxLayout(self.scroll_content)
+
+        # --- 1. Layout Superior (Foto y Datos Alumno) ---
+        layout_superior = QHBoxLayout()
+        
+        # Panel de Foto
+        panel_foto = QVBoxLayout()
+        self.lbl_foto_registro = QLabel("Sin Foto")
+        self.lbl_foto_registro.setFixedSize(150, 200)
+        self.lbl_foto_registro.setStyleSheet("background-color: #E0E0E0; border: 1px solid #A0A0A0;")
+        self.lbl_foto_registro.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        btn_tomar_foto = QPushButton("📸 Tomar Foto")
+        btn_tomar_foto.clicked.connect(self.tomar_foto_webcam)
+        btn_cargar_foto = QPushButton("📂 Cargar Foto")
+        btn_cargar_foto.clicked.connect(self.cargar_foto_desde_archivo)
+        
+        panel_foto.addWidget(self.lbl_foto_registro)
+        panel_foto.addWidget(btn_tomar_foto)
+        panel_foto.addWidget(btn_cargar_foto)
+        panel_foto.addStretch()
+        layout_superior.addLayout(panel_foto)
+
+        # Panel de Datos Alumno
+        group_alumno = QGroupBox("Datos del Alumno")
+        form_alumno = QFormLayout(group_alumno)
+        self.entry_al_ap_paterno = QLineEdit()
+        self.entry_al_ap_materno = QLineEdit()
+        self.entry_al_nombres = QLineEdit()
+        self.entry_al_escuela_procedencia = QLineEdit()
+        self.entry_al_escuela_ingresar = QLineEdit()
+        self.entry_al_edad = QLineEdit() 
+        self.entry_al_telefono = QLineEdit()
+        self.entry_al_email = QLineEdit()
+        self.combo_al_turno = QComboBox()
+        self.combo_al_turno.addItems(["Matutino", "Vespertino"])
+        self.check_autoriza_salida = QCheckBox("Autoriza que el alumno se retire solo del plantel")
+
+        form_alumno.addRow("Apellido Paterno:", self.entry_al_ap_paterno)
+        form_alumno.addRow("Apellido Materno:", self.entry_al_ap_materno)
+        form_alumno.addRow("Nombre(s):", self.entry_al_nombres)
+        form_alumno.addRow("Escuela de Procedencia:", self.entry_al_escuela_procedencia)
+        form_alumno.addRow("Escuela a Ingresar:", self.entry_al_escuela_ingresar)
+        form_alumno.addRow("Edad:", self.entry_al_edad)
+        form_alumno.addRow("Teléfono (Alumno):", self.entry_al_telefono)
+        form_alumno.addRow("Correo Electrónico:", self.entry_al_email)
+        form_alumno.addRow("Turno:", self.combo_al_turno)
+        form_alumno.addRow("", self.check_autoriza_salida) 
+        
+        layout_superior.addWidget(group_alumno)
+        self.layout_scroll.addLayout(layout_superior)
+
+        # --- 2. Grupo Datos del Tutor ---
+        group_tutor = QGroupBox("Datos del Padre o Tutor")
+        form_tutor = QFormLayout(group_tutor)
+        self.entry_tutor_ap_paterno = QLineEdit()
+        self.entry_tutor_ap_materno = QLineEdit()
+        self.entry_tutor_nombres = QLineEdit()
+        self.entry_tutor_telefono = QLineEdit()
+        form_tutor.addRow("Apellido Paterno:", self.entry_tutor_ap_paterno)
+        form_tutor.addRow("Apellido Materno:", self.entry_tutor_ap_materno)
+        form_tutor.addRow("Nombre(s):", self.entry_tutor_nombres)
+        form_tutor.addRow("Teléfono (Tutor):", self.entry_tutor_telefono)
+        self.layout_scroll.addWidget(group_tutor)
+
+        # --- 3. Grupo Domicilio del Tutor ---
+        group_domicilio = QGroupBox("Domicilio del Tutor")
+        form_domicilio = QFormLayout(group_domicilio)
+        self.entry_dom_calle = QLineEdit()
+        self.entry_dom_num_ext = QLineEdit()
+        self.entry_dom_num_int = QLineEdit()
+        self.entry_dom_colonia = QLineEdit()
+        self.entry_dom_municipio = QLineEdit()
+        self.entry_dom_estado = QLineEdit()
+        self.entry_dom_cp = QLineEdit()
+        form_domicilio.addRow("Calle:", self.entry_dom_calle)
+        form_domicilio.addRow("Número Exterior:", self.entry_dom_num_ext)
+        form_domicilio.addRow("Número Interior:", self.entry_dom_num_int)
+        form_domicilio.addRow("Colonia:", self.entry_dom_colonia)
+        form_domicilio.addRow("Municipio:", self.entry_dom_municipio)
+        form_domicilio.addRow("Estado:", self.entry_dom_estado)
+        form_domicilio.addRow("Código Postal:", self.entry_dom_cp)
+        self.layout_scroll.addWidget(group_domicilio)
+
+        # --- 4. Grupo Contactos de Emergencia ---
+        group_emergencia = QGroupBox("Contactos de Emergencia")
+        layout_emergencia = QFormLayout(group_emergencia)
+        self.entry_emerg_1_nombre = QLineEdit()
+        self.entry_emerg_1_telefono = QLineEdit()
+        self.entry_emerg_1_parentesco = QLineEdit()
+        self.entry_emerg_2_nombre = QLineEdit()
+        self.entry_emerg_2_telefono = QLineEdit()
+        self.entry_emerg_2_parentesco = QLineEdit()
+        layout_emergencia.addRow("Nombre Completo 1:", self.entry_emerg_1_nombre)
+        layout_emergencia.addRow("Teléfono 1:", self.entry_emerg_1_telefono)
+        layout_emergencia.addRow("Parentesco 1:", self.entry_emerg_1_parentesco)
+        layout_emergencia.addRow("Nombre Completo 2:", self.entry_emerg_2_nombre)
+        layout_emergencia.addRow("Teléfono 2:", self.entry_emerg_2_telefono)
+        layout_emergencia.addRow("Parentesco 2:", self.entry_emerg_2_parentesco)
+        self.layout_scroll.addWidget(group_emergencia)
+
+        # --- 5. Configuración del Scroll y Botones ---
+        self.layout_scroll.addStretch()
+        self.scroll_area.setWidget(self.scroll_content)
+        self.layout_principal.addWidget(self.scroll_area)
+
+        layout_botones = QHBoxLayout()
+        self.btn_guardar = QPushButton("Guardar Cambios")
+        self.btn_guardar.setObjectName("primaryButton")
+        self.btn_guardar.clicked.connect(self.guardar_cambios_alumno)
+        btn_cancelar = QPushButton("Cancelar")
+        btn_cancelar.clicked.connect(self.reject)
+        layout_botones.addStretch()
+        layout_botones.addWidget(btn_cancelar)
+        layout_botones.addWidget(self.btn_guardar)
+        self.layout_principal.addLayout(layout_botones)
+
+        # Cargar los datos existentes
+        self.cargar_datos_alumno()
+
+    def cargar_datos_alumno(self):
+        """Carga los datos del alumno_id en los campos del formulario."""
+        try:
+            with get_db_connection() as conn:
+                datos = conn.cursor().execute("SELECT * FROM alumnos WHERE id = ?", (self.alumno_id,)).fetchone()
+            
+            if datos:
+                self.entry_al_ap_paterno.setText(datos['apellido_paterno'])
+                self.entry_al_ap_materno.setText(datos['apellido_materno'])
+                self.entry_al_nombres.setText(datos['nombres'])
+                self.entry_al_escuela_procedencia.setText(datos['escuela_procedencia'])
+                self.entry_al_escuela_ingresar.setText(datos['escuela_ingresar'])
+                self.entry_al_edad.setText(str(datos['edad']))
+                self.entry_al_telefono.setText(datos['telefono'])
+                self.entry_al_email.setText(datos['email'])
+                self.combo_al_turno.setCurrentText(datos['turno'])
+                self.check_autoriza_salida.setChecked(bool(datos['autoriza_salida_solo']))
+                
+                self.entry_tutor_ap_paterno.setText(datos['tutor_ap_paterno'])
+                self.entry_tutor_ap_materno.setText(datos['tutor_ap_materno'])
+                self.entry_tutor_nombres.setText(datos['tutor_nombres'])
+                self.entry_tutor_telefono.setText(datos['tutor_telefono'])
+                
+                self.entry_dom_calle.setText(datos['dom_calle'])
+                self.entry_dom_num_ext.setText(datos['dom_num_ext'])
+                self.entry_dom_num_int.setText(datos['dom_num_int'])
+                self.entry_dom_colonia.setText(datos['dom_colonia'])
+                self.entry_dom_municipio.setText(datos['dom_municipio'])
+                self.entry_dom_estado.setText(datos['dom_estado'])
+                self.entry_dom_cp.setText(datos['dom_cp'])
+                
+                self.entry_emerg_1_nombre.setText(datos['emerg_1_nombre'])
+                self.entry_emerg_1_telefono.setText(datos['emerg_1_telefono'])
+                self.entry_emerg_1_parentesco.setText(datos['emerg_1_parentesco'])
+                self.entry_emerg_2_nombre.setText(datos['emerg_2_nombre'])
+                self.entry_emerg_2_telefono.setText(datos['emerg_2_telefono'])
+                self.entry_emerg_2_parentesco.setText(datos['emerg_2_parentesco'])
+                
+                self.ruta_foto_temporal = datos['foto_ruta'] # Guardamos la ruta existente
+                self.mostrar_foto(datos['foto_ruta'])
+        except Exception as e:
+            mostrar_error(f"Error al cargar datos del alumno: {e}")
+
+    def guardar_cambios_alumno(self):
+        """Guarda los datos modificados en la BD usando UPDATE."""
+        try:
+            # Recolectar todos los datos (similar a registrar_alumno_e_inscribir)
+            edad = int(self.entry_al_edad.text().strip()) if self.entry_al_edad.text().strip().isdigit() else 0
+            autoriza_salida = 1 if self.check_autoriza_salida.isChecked() else 0
+
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                
+                # 1. Actualizar datos de texto
+                cursor.execute("""
+                    UPDATE alumnos SET
+                        apellido_paterno = ?, apellido_materno = ?, nombres = ?, escuela_procedencia = ?,
+                        escuela_ingresar = ?, edad = ?, telefono = ?, email = ?, turno = ?,
+                        tutor_ap_paterno = ?, tutor_ap_materno = ?, tutor_nombres = ?, tutor_telefono = ?,
+                        dom_calle = ?, dom_num_int = ?, dom_num_ext = ?, dom_colonia = ?, dom_municipio = ?,
+                        dom_estado = ?, dom_cp = ?,
+                        emerg_1_nombre = ?, emerg_1_telefono = ?, emerg_1_parentesco = ?,
+                        emerg_2_nombre = ?, emerg_2_telefono = ?, emerg_2_parentesco = ?,
+                        autoriza_salida_solo = ?
+                    WHERE id = ?
+                """, (
+                    self.entry_al_ap_paterno.text().strip(), self.entry_al_ap_materno.text().strip(), self.entry_al_nombres.text().strip(), self.entry_al_escuela_procedencia.text().strip(),
+                    self.entry_al_escuela_ingresar.text().strip(), edad, self.entry_al_telefono.text().strip(), self.entry_al_email.text().strip(), self.combo_al_turno.currentText(),
+                    self.entry_tutor_ap_paterno.text().strip(), self.entry_tutor_ap_materno.text().strip(), self.entry_tutor_nombres.text().strip(), self.entry_tutor_telefono.text().strip(),
+                    self.entry_dom_calle.text().strip(), self.entry_dom_num_int.text().strip(), self.entry_dom_num_ext.text().strip(), self.entry_dom_colonia.text().strip(), self.entry_dom_municipio.text().strip(),
+                    self.entry_dom_estado.text().strip(), self.entry_dom_cp.text().strip(),
+                    self.entry_emerg_1_nombre.text().strip(), self.entry_emerg_1_telefono.text().strip(), self.entry_emerg_1_parentesco.text().strip(),
+                    self.entry_emerg_2_nombre.text().strip(), self.entry_emerg_2_telefono.text().strip(), self.entry_emerg_2_parentesco.text().strip(),
+                    autoriza_salida,
+                    self.alumno_id
+                ))
+                
+                # 2. Actualizar la foto (solo si se cambió)
+                # La ruta guardada en self.ruta_foto_temporal puede ser la original o una nueva
+                if self.ruta_foto_temporal and os.path.exists(self.ruta_foto_temporal):
+                    # Verificamos si la ruta es la misma que ya está en la BD
+                    datos_actuales = conn.cursor().execute("SELECT foto_ruta FROM alumnos WHERE id = ?", (self.alumno_id,)).fetchone()
+                    
+                    # Si la ruta es DIFERENTE a la guardada, la procesamos
+                    if self.ruta_foto_temporal != datos_actuales['foto_ruta']:
+                        img = PILImage.open(self.ruta_foto_temporal)
+                        img.thumbnail((400, 400), PILImage.Resampling.LANCZOS)
+                        nombre_foto = f"foto_{self.alumno_id}.png"
+                        ruta_final_foto = os.path.abspath(os.path.join(FOTOS_DIR, nombre_foto))
+                        img.save(ruta_final_foto, "PNG")
+                        cursor.execute("UPDATE alumnos SET foto_ruta = ? WHERE id = ?", (ruta_final_foto, self.alumno_id))
+
+                conn.commit()
+            
+            mostrar_info("Expediente del alumno actualizado correctamente.")
+            self.accept() # Cerrar el diálogo
+
+        except sqlite3.IntegrityError:
+            mostrar_error("Error: El correo electrónico ya existe para otro alumno.")
+        except Exception as e:
+            mostrar_error(f"Error al guardar cambios: {e}\n{traceback.format_exc()}")
+    
+    # --- Métodos de Foto (Copiados de VentanaPrincipal) ---
+    def tomar_foto_webcam(self):
+        try:
+            cap = cv2.VideoCapture(0) 
+            if not cap.isOpened():
+                mostrar_error("No se pudo acceder a la cámara web.")
+                return
+            while True:
+                ret, frame = cap.read()
+                if not ret: break
+                cv2.imshow('Presione ESPACIO para capturar, ESC para salir', frame)
+                key = cv2.waitKey(1)
+                if key % 256 == 32: 
+                    temp_filename = os.path.join(FOTOS_DIR, "temp_capture.jpg")
+                    cv2.imwrite(temp_filename, frame)
+                    self.ruta_foto_temporal = temp_filename # Guardamos la nueva ruta
+                    self.mostrar_foto(temp_filename)
+                    break
+                elif key % 256 == 27: 
+                    break
+            cap.release()
+            cv2.destroyAllWindows()
+        except Exception as e:
+             mostrar_error(f"Error con la cámara: {e}")
+
+    def cargar_foto_desde_archivo(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Seleccionar Foto", "", "Imágenes (*.png *.jpg *.jpeg)")
+        if file_path:
+            self.ruta_foto_temporal = file_path # Guardamos la nueva ruta
+            self.mostrar_foto(file_path)
+
+    def mostrar_foto(self, ruta_imagen):
+        if ruta_imagen and os.path.exists(ruta_imagen):
+            pixmap = QPixmap(ruta_imagen)
+            if not pixmap.isNull():
+                self.lbl_foto_registro.setPixmap(pixmap.scaled(self.lbl_foto_registro.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+                self.lbl_foto_registro.setText("")
+        else:
+            self.lbl_foto_registro.clear()
+            self.lbl_foto_registro.setText("Sin Foto")
+
+# --- (Fin de la clase DialogoEditarAlumno) ---
+
 # ---- Ventana de Login ----
 class LoginScreen(QWidget):
     def __init__(self):
@@ -1299,6 +1797,8 @@ class VentanaPrincipal(QMainWindow):
         
         # Almacenamiento local de inscripciones para el filtro de pagos
         self._inscripciones_cache = [] 
+        self.descuento_actual_pct = 0.0
+        self.costo_original_actual = 0.0
 
         self.spin_costo_sem_2 = None 
         self.spin_costo_mensual_3 = None
@@ -1827,7 +2327,10 @@ class VentanaPrincipal(QMainWindow):
         self.lbl_costo_total_registro.setStyleSheet("font-weight: bold; color: #4CAF50; font-size: 11pt;")
 
         self.check_autoriza_salida = QCheckBox("Autoriza que el alumno se retire solo del plantel")
-        self.check_imprimir_poliza = QCheckBox("Imprimir Póliza de Garantía y Términos y Condiciones") 
+        self.check_imprimir_poliza = QCheckBox("Imprimir Póliza de Garantía y Términos y Condiciones")
+        self.check_aplicar_descuento = QCheckBox("Aplicar Descuento Personalizado")
+        self.lbl_descuento_info = QLabel("")
+        self.lbl_descuento_info.setStyleSheet("color: gray; font-style: italic;")
 
         form_alumno.addRow("Apellido Paterno:", self.entry_al_ap_paterno)
         form_alumno.addRow("Apellido Materno:", self.entry_al_ap_materno)
@@ -1843,10 +2346,13 @@ class VentanaPrincipal(QMainWindow):
         form_alumno.addRow("Costo Total:", self.lbl_costo_total_registro)
         form_alumno.addRow("", self.check_autoriza_salida) 
         form_alumno.addRow("", self.check_imprimir_poliza)
+        form_alumno.addRow("", self.check_aplicar_descuento)
+        form_alumno.addRow("", self.lbl_descuento_info)
 
         # Conectar señales
         self.combo_curso_registro.currentIndexChanged.connect(self.actualizar_opciones_pago)
         self.combo_tipo_pago_registro.currentIndexChanged.connect(self.actualizar_costo_total_label)
+        self.check_aplicar_descuento.toggled.connect(self.solicitar_y_aplicar_descuento)
 
         # --- 4. Añadir los paneles al layout superior ---
         # AHORA SÍ funcionará porque 'panel_foto' ya fue creado en el paso 1
@@ -2109,6 +2615,18 @@ class VentanaPrincipal(QMainWindow):
         panel_derecho = QWidget()
         layout_derecho = QVBoxLayout(panel_derecho)
         layout_derecho.setContentsMargins(0,0,0,0) 
+        
+        self.btn_inscribir_a_curso = QPushButton("➕ Inscribir a Nuevo Curso")
+        self.btn_inscribir_a_curso.setObjectName("primaryButton")
+        self.btn_inscribir_a_curso.setToolTip("Inscribe al alumno seleccionado en un curso adicional")
+        self.btn_inscribir_a_curso.clicked.connect(self.abrir_dialogo_nueva_inscripcion)
+        layout_derecho.addWidget(self.btn_inscribir_a_curso)
+        
+        self.btn_editar_alumno = QPushButton("✏️ Editar Alumno Seleccionado")
+        self.btn_editar_alumno.setObjectName("secondaryButton") # Botón de color gris/secundario
+        self.btn_editar_alumno.setToolTip("Modifica los datos personales del alumno seleccionado")
+        self.btn_editar_alumno.clicked.connect(self.abrir_dialogo_editar_alumno)
+        layout_derecho.addWidget(self.btn_editar_alumno)
 
         group_expediente = QGroupBox("Expediente del Alumno")
         layout_expediente = QVBoxLayout(group_expediente)
@@ -2288,6 +2806,7 @@ class VentanaPrincipal(QMainWindow):
         self.spin_costo_mensual_4.setRange(0.0, 100000.0)
         self.spin_costo_mensual_4.setPrefix("$ ")
         
+        # Mensualidad
         self.spin_costo_mensualidad = QDoubleSpinBox()
         self.spin_costo_mensualidad.setRange(0.0, 100000.0)
         self.spin_costo_mensualidad.setPrefix("$ ")
@@ -3543,24 +4062,29 @@ class VentanaPrincipal(QMainWindow):
                 # Cargar historial de pagos
                 self.cargar_historial_pagos(insc_id)
         except AttributeError:
-             pass 
-
+             pass
+    
     def cargar_historial_pagos(self, inscripcion_id):
         """Rellena la tabla con el historial de pagos de una inscripción."""
         try: 
+            # 1. Limpiar la tabla si existe
             if hasattr(self, 'tabla_historial_pagos'):
                 self.tabla_historial_pagos.setRowCount(0)
-                with get_db_connection() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                    SELECT fecha_pago, monto, metodo_pago
-                    FROM pagos
-                    WHERE inscripcion_id = ?
-                    ORDER BY fecha_pago DESC
-                    """, (inscripcion_id,))
+            
+            # 2. Conectar a la BD y cargar datos
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                SELECT fecha_pago, monto, metodo_pago
+                FROM pagos
+                WHERE inscripcion_id = ?
+                ORDER BY fecha_pago DESC
+                """, (inscripcion_id,))
 
-                    pagos = cursor.fetchall()
+                pagos = cursor.fetchall()
 
+                # 3. Rellenar la tabla (solo si existe)
+                if hasattr(self, 'tabla_historial_pagos'):
                     self.tabla_historial_pagos.setRowCount(len(pagos))
                     for row, pago in enumerate(pagos): 
                         self.tabla_historial_pagos.setItem(row, 0, QTableWidgetItem(pago['fecha_pago']))
@@ -3572,23 +4096,24 @@ class VentanaPrincipal(QMainWindow):
         except sqlite3.Error as e:
             mostrar_error(f"Error al cargar historial de pagos: {e}")
         except AttributeError:
-            pass 
+            pass # Ignorar si el widget no existe
 
     def registrar_pago(self):
-        """Registra un nuevo pago en la BD."""
+        """Registra un nuevo pago en la BD y genera la siguiente mensualidad si aplica."""
+        
         data = self.combo_inscripcion_pago.currentData()
         if not data:
             mostrar_error("Debe seleccionar una inscripción.")
             return
 
-        insc_id, monto_total, monto_pagado_actual = data
+        insc_id, monto_total_actual, monto_pagado_actual = data
         monto_a_pagar = self.spin_monto_pago.value()
 
         if monto_a_pagar <= 0:
             mostrar_error("El monto a pagar debe ser mayor a cero.")
             return
 
-        saldo_pendiente = monto_total - monto_pagado_actual
+        saldo_pendiente = monto_total_actual - monto_pagado_actual
         if monto_a_pagar > saldo_pendiente + 0.001: 
              reply = QMessageBox.question(self, "Confirmar Sobrepago",
                                          f"El monto a pagar (${monto_a_pagar:.2f}) es mayor al saldo pendiente (${saldo_pendiente:.2f}).\n¿Desea continuar?",
@@ -3596,47 +4121,117 @@ class VentanaPrincipal(QMainWindow):
              if reply == QMessageBox.StandardButton.No:
                  return
 
-
         fecha_pago = datetime.date.today().isoformat()
         metodo_pago = self.combo_metodo_pago.currentText()
-
         nuevo_monto_pagado = monto_pagado_actual + monto_a_pagar
         
-        # Lógica para determinar el nuevo estado
-        if nuevo_monto_pagado >= monto_total - 0.001:
-            nuevo_estado = 'Pagado'
-        elif nuevo_monto_pagado > 0:
-            nuevo_estado = 'Parcial'
-        else:
-            nuevo_estado = 'Pendiente'
-
-
         try:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
 
-                # 1. Insertar en la tabla de pagos
+                # --- NUEVO: Obtener el tipo de plan y curso_id de la inscripción ---
+                cursor.execute("SELECT tipo_pago_seleccionado, curso_id FROM inscripciones WHERE id = ?", (insc_id,))
+                insc_data = cursor.fetchone()
+                plan_tipo = insc_data['tipo_pago_seleccionado']
+                curso_id = insc_data['curso_id']
+                # --- FIN NUEVO ---
+
+                # 1. Insertar en la tabla de pagos (Esto no cambia)
                 cursor.execute("""
                 INSERT INTO pagos (inscripcion_id, monto, fecha_pago, metodo_pago)
                 VALUES (?, ?, ?, ?)
                 """, (insc_id, monto_a_pagar, fecha_pago, metodo_pago))
 
-                # 2. Actualizar la tabla de inscripciones
+                # --- INICIO DE LÓGICA DE ACTUALIZACIÓN MODIFICADA ---
+                
+                nuevo_monto_total = monto_total_actual
+                
+                if plan_tipo == "Mensualidad":
+                    # --- ES UNA COLEGIATURA MENSUAL ---
+                    
+                    # Comprobamos si el pago actual cubre la deuda actual
+                    if nuevo_monto_pagado >= (monto_total_actual - 0.001):
+                        # 1. Sí cubre, así que generamos la deuda del siguiente mes.
+                        #    Obtenemos el costo base de la mensualidad
+                        cursor.execute("SELECT costo_mensualidad FROM cursos WHERE id = ?", (curso_id,))
+                        curso_data = cursor.fetchone()
+                        costo_base_mensual = curso_data['costo_mensualidad']
+                        
+                        # 2. El nuevo total adeudado es el total anterior + un mes más
+                        nuevo_monto_total = monto_total_actual + costo_base_mensual
+                    
+                    # 3. Determinamos el nuevo estado (nunca será 'Pagado' a menos que pague por adelantado)
+                    if nuevo_monto_pagado >= (nuevo_monto_total - 0.001):
+                        nuevo_estado = 'Pagado' # Pagó este mes Y el siguiente
+                    elif nuevo_monto_pagado > 0:
+                        nuevo_estado = 'Parcial' # (Estado normal: debe el siguiente mes)
+                    else:
+                        nuevo_estado = 'Pendiente'
+                        
+                else:
+                    # --- LÓGICA ORIGINAL (Para cursos fijos) ---
+                    nuevo_monto_total = monto_total_actual # El total no cambia
+                    if nuevo_monto_pagado >= (monto_total_actual - 0.001):
+                        nuevo_estado = 'Pagado'
+                    elif nuevo_monto_pagado > 0:
+                        nuevo_estado = 'Parcial'
+                    else:
+                        nuevo_estado = 'Pendiente'
+
+                # 2. Actualizar la tabla de inscripciones (Unificado)
                 cursor.execute("""
                 UPDATE inscripciones
-                SET monto_pagado = ?, estado = ?
+                SET monto_pagado = ?, monto_total = ?, estado = ?
                 WHERE id = ?
-                """, (nuevo_monto_pagado, nuevo_estado, insc_id))
+                """, (nuevo_monto_pagado, nuevo_monto_total, nuevo_estado, insc_id))
+                # --- FIN DE LÓGICA DE ACTUALIZACIÓN ---
 
                 conn.commit()
 
-                mostrar_info("Pago registrado exitosamente.")
+            mostrar_info("Pago registrado exitosamente.")
 
-                # Recargar todo
-                self.cargar_tabla_inscripciones_pagos() 
+            # (Preguntar por el recibo)
+            opciones_recibo = ["No generar recibo", "Ticket (Impresora Térmica)", "Recibo PDF (Completo)"]
+            opcion_elegida, ok = QInputDialog.getItem(self, "Generar Recibo",
+                                                      "¿Qué tipo de recibo desea generar?",
+                                                      opciones_recibo, 0, False)
+            
+            if ok and opcion_elegida != "No generar recibo":
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        SELECT a.nombres, a.apellido_paterno, a.apellido_materno, c.nombre_curso
+                        FROM inscripciones i
+                        JOIN alumnos a ON i.alumno_id = a.id
+                        JOIN cursos c ON i.curso_id = c.id
+                        WHERE i.id = ?
+                    """, (insc_id,))
+                    datos_extra = cursor.fetchone()
+
+                pago_info = {
+                    "inscripcion_id": insc_id,
+                    "fecha_pago": fecha_pago,
+                    "monto_pagado_recibo": monto_a_pagar,
+                    "metodo_pago": metodo_pago,
+                    "nombre_alumno": f"{datos_extra['nombres']} {datos_extra['apellido_paterno']} {datos_extra['apellido_materno']}",
+                    "nombre_curso": datos_extra['nombre_curso'],
+                    "monto_total_curso": nuevo_monto_total, # Usamos el total actualizado
+                    "monto_pagado_total": nuevo_monto_pagado, 
+                    "saldo_pendiente": nuevo_monto_total - nuevo_monto_pagado
+                }
+                
+                if opcion_elegida == "Recibo PDF (Completo)":
+                    self.generar_ticket_pago_pdf(pago_info)
+                elif opcion_elegida == "Ticket (Impresora Térmica)":
+                    self.generar_ticket_termico_pdf(pago_info)
+
+            # Recargar todo
+            self.cargar_tabla_inscripciones_pagos() 
 
         except sqlite3.Error as e:
             mostrar_error(f"Error al registrar el pago: {e}")
+        except Exception as e:
+            mostrar_error(f"Error inesperado al generar recibo: {e}\n{traceback.format_exc()}")
 
     # --- FUNCIÓN NUEVA ---
     def actualizar_opciones_pago(self):
@@ -3659,55 +4254,124 @@ class VentanaPrincipal(QMainWindow):
                 
             if not curso:
                 return
-                
-            self.combo_tipo_pago_registro.addItem("--- Seleccione un plan de pago ---", userData=None)
             
-            # Usar Decimal para cálculos monetarios precisos
+            # --- INICIO DE LÓGICA DE DESCUENTO (CORREGIDA) ---
             quantizer = Decimal('0.01')
             
+            # --- CORRECCIÓN: Usar .keys() y ['...'] en lugar de .get() ---
+            descuento_pct = curso['descuento_porcentaje'] if 'descuento_porcentaje' in curso.keys() else 0.0
+            descuento_factor = Decimal(str(1.0 - (descuento_pct / 100.0)))
+            
+            # Función auxiliar para crear el texto del plan
+            def crear_texto_plan(nombre, costo_original, costo_final, num_pagos, pago_individual):
+                texto = f"{nombre} (${costo_final})"
+                if num_pagos > 1:
+                    texto = f"{nombre} ({num_pagos} pagos de ${pago_individual})"
+                
+                if descuento_pct > 0:
+                    texto += f" (Orig: ${costo_original}) - {descuento_pct}% Dto."
+                return texto
+            # --- FIN DE LÓGICA DE DESCUENTO ---
+
+            self.combo_tipo_pago_registro.addItem("--- Seleccione un plan de pago ---", userData=None)
+            
             if curso['costo_exhibicion'] > 0:
-                costo = Decimal(curso['costo_exhibicion']).quantize(quantizer)
-                texto = f"Una Sola Exhibición (${costo})"
-                self.combo_tipo_pago_registro.addItem(texto, userData=("Exhibición Única", float(costo), 1))
+                costo_orig = Decimal(curso['costo_exhibicion']).quantize(quantizer)
+                costo_final = (costo_orig * descuento_factor).quantize(quantizer)
+                texto = crear_texto_plan("Una Sola Exhibición", costo_orig, costo_final, 1, costo_final)
+                self.combo_tipo_pago_registro.addItem(texto, userData=("Exhibición Única", float(costo_final), 1))
 
             if curso['costo_sem_15'] > 0:
-                costo = Decimal(curso['costo_sem_15']).quantize(quantizer)
-                pago = (costo / 15).quantize(quantizer, rounding=ROUND_HALF_UP)
-                texto = f"Semanal (15 pagos de ${pago})"
-                self.combo_tipo_pago_registro.addItem(texto, userData=("Semanal (15)", float(costo), 15))
+                costo_orig = Decimal(curso['costo_sem_15']).quantize(quantizer)
+                costo_final = (costo_orig * descuento_factor).quantize(quantizer)
+                pago = (costo_final / 15).quantize(quantizer, rounding=ROUND_HALF_UP)
+                texto = crear_texto_plan("Semanal (15)", costo_orig, costo_final, 15, pago)
+                self.combo_tipo_pago_registro.addItem(texto, userData=("Semanal (15)", float(costo_final), 15))
               
             if curso['costo_sem_12'] > 0: 
-                costo = Decimal(curso['costo_sem_12']).quantize(quantizer)
-                pago = (costo / 12).quantize(quantizer, rounding=ROUND_HALF_UP) 
-                texto = f"Semanal (12 pagos de ${pago})" 
-                self.combo_tipo_pago_registro.addItem(texto, userData=("Semanal (12)", float(costo), 12))
+                costo_orig = Decimal(curso['costo_sem_12']).quantize(quantizer)
+                costo_final = (costo_orig * descuento_factor).quantize(quantizer)
+                pago = (costo_final / 12).quantize(quantizer, rounding=ROUND_HALF_UP) 
+                texto = crear_texto_plan("Semanal (12)", costo_orig, costo_final, 12, pago)
+                self.combo_tipo_pago_registro.addItem(texto, userData=("Semanal (12)", float(costo_final), 12))
             
             if curso['costo_mensual_3'] > 0: 
-                costo = Decimal(curso['costo_mensual_3']).quantize(quantizer)
-                pago = (costo / 3).quantize(quantizer, rounding=ROUND_HALF_UP) 
-                texto = f"Mensual (3 pagos de ${pago})" 
-                self.combo_tipo_pago_registro.addItem(texto, userData=("Mensual (3)", float(costo), 3))
+                costo_orig = Decimal(curso['costo_mensual_3']).quantize(quantizer)
+                costo_final = (costo_orig * descuento_factor).quantize(quantizer)
+                pago = (costo_final / 3).quantize(quantizer, rounding=ROUND_HALF_UP) 
+                texto = crear_texto_plan("Mensual (3)", costo_orig, costo_final, 3, pago)
+                self.combo_tipo_pago_registro.addItem(texto, userData=("Mensual (3)", float(costo_final), 3))
 
-            if curso['costo_bi_Semanal'] > 0:
-                costo = Decimal(curso['costo_bi_semanal']).quantize(quantizer)
-                pago = (costo / 2).quantize(quantizer, rounding=ROUND_HALF_UP)
-                texto = f"Bisemanal (2 pagos de ${pago})"
-                self.combo_tipo_pago_registro.addItem(texto, userData=("Bisemanal (2)", float(costo), 2)) 
+            if curso['costo_bi_semanal'] > 0:
+                costo_orig = Decimal(curso['costo_bi_semanal']).quantize(quantizer)
+                costo_final = (costo_orig * descuento_factor).quantize(quantizer)
+                pago = (costo_final / 2).quantize(quantizer, rounding=ROUND_HALF_UP)
+                texto = crear_texto_plan("Bisemanal (2)", costo_orig, costo_final, 2, pago)
+                self.combo_tipo_pago_registro.addItem(texto, userData=("Bisemanal (2)", float(costo_final), 2)) 
 
             if curso['costo_mensual_4'] > 0:
-                costo = Decimal(curso['costo_mensual_4']).quantize(quantizer)
-                pago = (costo / 4).quantize(quantizer, rounding=ROUND_HALF_UP)
-                texto = f"Mensual (4 pagos de ${pago})"
-                self.combo_tipo_pago_registro.addItem(texto, userData=("Mensual (4)", float(costo), 4))
-                
-            if 'costo_mensualidad' in curso.keys() and curso['costo_mensualidad'] > 0:
-                costo = Decimal(curso['costo_mensualidad']).quantize(quantizer)
-                texto = f"Colegiatura Mensual (${costo})"
-                
-                self.combo_tipo_pago_registro.addItem(texto, userData=("Mensualidad", float(costo), 1))
-
+                costo_orig = Decimal(curso['costo_mensual_4']).quantize(quantizer)
+                costo_final = (costo_orig * descuento_factor).quantize(quantizer)
+                pago = (costo_final / 4).quantize(quantizer, rounding=ROUND_HALF_UP)
+                texto = crear_texto_plan("Mensual (4)", costo_orig, costo_final, 4, pago)
+                self.combo_tipo_pago_registro.addItem(texto, userData=("Mensual (4)", float(costo_final), 4))
+            
         except sqlite3.Error as e:
-            mostrar_error(f"Error al cargar planes de pago: {e}")
+             mostrar_error(f"Error al cargar planes de pago: {e}")
+        except Exception as e:
+             mostrar_error(f"Error inesperado al calcular descuentos: {e}\n{traceback.format_exc()}")
+    
+    def solicitar_y_aplicar_descuento(self, checked):
+        """
+        Se activa con el checkbox de descuento. Pide un porcentaje
+        y actualiza el costo total.
+        """
+        if checked:
+            porcentaje, ok = QInputDialog.getDouble(self, "Aplicar Descuento",
+                                                    "Ingrese el porcentaje de descuento a aplicar (ej. 10, 15.5):",
+                                                    0.0, 0.0, 100.0, 1)
+            if ok:
+                self.descuento_actual_pct = porcentaje
+                self.lbl_descuento_info.setText(f"Descuento aplicado: {self.descuento_actual_pct}%")
+            else:
+                # Si el usuario cancela, desmarca el checkbox
+                self.check_aplicar_descuento.setChecked(False)
+        else:
+            self.descuento_actual_pct = 0.0
+            self.lbl_descuento_info.setText("")
+        
+        # Recalcular el costo total
+        self.actualizar_costo_total_label()
+
+    def actualizar_costo_total_label(self):
+        """
+        Actualiza el label de costo total, APLICANDO el descuento si existe.
+        """
+        try:
+            if not hasattr(self, 'combo_tipo_pago_registro'): return
+            
+            data = self.combo_tipo_pago_registro.currentData()
+            if data:
+                plan, costo_original, num_pagos = data
+                
+                # Guardar el costo original
+                self.costo_original_actual = costo_original
+                
+                # Calcular el costo final con descuento
+                descuento_factor = Decimal(str(1.0 - (self.descuento_actual_pct / 100.0)))
+                costo_final = (Decimal(str(costo_original)) * descuento_factor).quantize(Decimal('0.01'))
+                
+                # Mostrar el costo final
+                self.lbl_costo_total_registro.setText(f"$ {float(costo_final):.2f}")
+                
+                if self.descuento_actual_pct > 0:
+                    self.lbl_costo_total_registro.setText(f"$ {float(costo_final):.2f} (Orig: ${costo_original:.2f})")
+                
+            else:
+                self.costo_original_actual = 0.0
+                self.lbl_costo_total_registro.setText("$ 0.00")
+        except AttributeError:
+             pass
             
     # --- FUNCIÓN NUEVA ---
     def actualizar_costo_total_label(self):
@@ -3840,6 +4504,13 @@ class VentanaPrincipal(QMainWindow):
                     autoriza_salida
                 ))
                 alumno_id = cursor.lastrowid
+                
+                plan_data = self.combo_tipo_pago_registro.currentData()
+                plan_nombre, monto_original, num_pagos = plan_data
+                descuento_factor = Decimal(str(1.0 - (self.descuento_actual_pct / 100.0)))
+                monto_final_decimal = (Decimal(str(monto_original)) * descuento_factor).quantize(Decimal('0.01'))
+                monto_final = float(monto_final_decimal)
+                descuento_guardar = self.descuento_actual_pct
 
                 ruta_final_foto = ""
                 if self.ruta_foto_temporal and os.path.exists(self.ruta_foto_temporal):
@@ -3880,11 +4551,17 @@ class VentanaPrincipal(QMainWindow):
 
                 # 2. Insertar Inscripción
                 cursor.execute("""
-                INSERT INTO inscripciones (alumno_id, curso_id, fecha_inscripcion, monto_total, estado, tipo_pago_seleccionado)
-                VALUES (?, ?, ?, ?, 'Pendiente', ?)
-                """, (alumno_id, curso_id, fecha_insc, monto_total, plan_nombre))
+                INSERT INTO inscripciones (
+                    alumno_id, curso_id, fecha_inscripcion, 
+                    monto_original, descuento_aplicado_pct, monto_total, 
+                    estado, tipo_pago_seleccionado
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 'Pendiente', ?)
+                """, (alumno_id, curso_id, fecha_insc, 
+                      monto_original, descuento_guardar, monto_final, 
+                      plan_nombre))
+                
                 inscripcion_id = cursor.lastrowid
-
                 conn.commit()
 
                 mostrar_info("Alumno registrado e inscrito al curso exitosamente.")
@@ -3921,16 +4598,18 @@ class VentanaPrincipal(QMainWindow):
             with get_db_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT
-                        a.*,
-                        i.id as inscripcion_id, i.fecha_inscripcion, i.monto_total, i.tipo_pago_seleccionado,
-                        c.nombre_curso
-                    FROM alumnos a
-                    JOIN inscripciones i ON a.id = i.alumno_id
-                    JOIN cursos c ON i.curso_id = c.id
-                    WHERE i.id = ?
-                """, (inscripcion_id,))
-                datos = cursor.fetchone()
+                SELECT
+                    a.*,
+                    i.id as inscripcion_id, i.fecha_inscripcion, 
+                    i.monto_total, i.tipo_pago_seleccionado,
+                    i.monto_original, i.descuento_aplicado_pct,
+                    c.nombre_curso
+                FROM alumnos a
+                JOIN inscripciones i ON a.id = i.alumno_id
+                JOIN cursos c ON i.curso_id = c.id
+                WHERE i.id = ?
+            """, (inscripcion_id,))
+            datos = cursor.fetchone()
 
             if not datos:
                 mostrar_error("No se encontraron datos completos para la ficha.")
@@ -4007,7 +4686,15 @@ class VentanaPrincipal(QMainWindow):
             current_y = self.draw_text_pdf(c, current_y, f"Folio Inscripción a Curso: {datos['inscripcion_id']}", inch, styleN)
             current_y = self.draw_text_pdf(c, current_y, f"Nombre del Curso: {datos['nombre_curso']}", inch, styleN)
             current_y = self.draw_text_pdf(c, current_y, f"Plan de Pago: {datos['tipo_pago_seleccionado']}", inch, styleN)
-            current_y = self.draw_text_pdf(c, current_y, f"Costo Total: $ {datos['monto_total']:.2f}", inch, styleCosto)
+            
+            if datos['descuento_aplicado_pct'] > 0:
+                # Añadimos 'inch' como cuarto argumento
+                current_y = self.draw_text_pdf(c, current_y, f"Costo Original: $ {datos['monto_original']:.2f}", inch, styleN)
+                current_y = self.draw_text_pdf(c, current_y, f"Descuento Aplicado: {datos['descuento_aplicado_pct']}%", inch, styleN)
+                current_y = self.draw_text_pdf(c, current_y, f"Costo Final (con Dto.): $ {datos['monto_total']:.2f}", inch, styleCosto)
+            else:
+                # Añadimos 'inch' como cuarto argumento
+                current_y = self.draw_text_pdf(c, current_y, f"Costo Total: $ {datos['monto_total']:.2f}", inch, styleCosto)
             
             # --- CORRECCIÓN: Separar Leyenda y Firma ---
             current_y = 2.5 * inch 
@@ -4226,6 +4913,167 @@ class VentanaPrincipal(QMainWindow):
 
         except Exception as e:
             mostrar_error(f"Error al generar o abrir PDF completo: {e}\n{traceback.format_exc()}")
+    
+    def generar_ticket_pago_pdf(self, pago_info):
+        """Genera un PDF simple para un recibo de pago."""
+        try:
+            temp_pdf = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+            filename = temp_pdf.name
+            temp_pdf.close() 
+
+            c = canvas.Canvas(filename, pagesize=letter)
+            width, height = letter
+            
+            # --- Estilos ---
+            styles = getSampleStyleSheet()
+            styleN = ParagraphStyle(name='Normal_Arial', parent=styles['Normal'], fontName=FONT_NAME, fontSize=12, leading=14)
+            styleH_centered = ParagraphStyle(name='Heading_Arial_Centered', parent=styles['Heading3'], fontName=FONT_BOLD_NAME, fontSize=12, alignment=TA_CENTER, spaceAfter=8)
+            styleTitle = ParagraphStyle(name='Title_Arial', parent=styles['h1'], fontName=FONT_BOLD_NAME, fontSize=14, alignment=TA_CENTER, spaceAfter=16)
+            
+            # Estilos específicos para el recibo
+            styleRecibo = ParagraphStyle(name='Recibo_Arial', parent=styleN, fontName=FONT_BOLD_NAME, fontSize=14, textColor=colors.HexColor("#4CAF50"))
+            stylePendiente = ParagraphStyle(name='Pendiente_Arial', parent=styleN, fontName=FONT_BOLD_NAME, fontSize=12, textColor=colors.HexColor("#D32F2F"))
+            
+            # Dibujar logo y marca de agua
+            self.draw_watermark(c, width, height)
+            self.draw_logo(c, width, height)
+
+            # --- Título ---
+            titulo_texto = "<b>Unidad Profesional de Asesorías y Regularización (UPASER)<br/>Recibo de Pago</b>"
+            title_p = Paragraph(titulo_texto, styleTitle)
+            title_w, title_h = title_p.wrapOn(c, width - 2*inch, height)
+            title_p.drawOn(c, inch, height - 0.75 * inch - title_h)
+            current_y = height - 0.75 * inch - title_h - 24
+
+            # --- Contenido ---
+            current_y = self.draw_text_pdf(c, current_y, "Detalles del Pago", inch, styleH_centered)
+            current_y = self.draw_text_pdf(c, current_y, f"<b>Fecha de Pago:</b> {pago_info['fecha_pago']}", inch, styleN)
+            current_y = self.draw_text_pdf(c, current_y, f"<b>Alumno:</b> {pago_info['nombre_alumno']}", inch, styleN)
+            current_y = self.draw_text_pdf(c, current_y, f"<b>Curso:</b> {pago_info['nombre_curso']}", inch, styleN)
+            current_y = self.draw_text_pdf(c, current_y, f"<b>Inscripción ID:</b> {pago_info['inscripcion_id']}", inch, styleN)
+
+            current_y -= 0.25 * inch # Espacio
+            
+            current_y = self.draw_text_pdf(c, current_y, f"<b>Monto Recibido:</b> ${pago_info['monto_pagado_recibo']:.2f}", inch, styleRecibo)
+            current_y = self.draw_text_pdf(c, current_y, f"<b>Método de Pago:</b> {pago_info['metodo_pago']}", inch, styleN)
+            
+            current_y -= 0.25 * inch # Espacio
+            
+            current_y = self.draw_text_pdf(c, current_y, "Estado de Cuenta de la Inscripción", inch, styleH_centered)
+            current_y = self.draw_text_pdf(c, current_y, f"<b>Costo Total del Curso:</b> ${pago_info['monto_total_curso']:.2f}", inch, styleN)
+            current_y = self.draw_text_pdf(c, current_y, f"<b>Total Pagado (a la fecha):</b> ${pago_info['monto_pagado_total']:.2f}", inch, styleN)
+            
+            # Mostrar el saldo pendiente solo si es mayor que cero
+            if pago_info['saldo_pendiente'] > 0.01:
+                current_y = self.draw_text_pdf(c, current_y, f"<b>Saldo Pendiente:</b> ${pago_info['saldo_pendiente']:.2f}", inch, stylePendiente)
+            else:
+                current_y = self.draw_text_pdf(c, current_y, "<b>¡CURSO LIQUIDADO!</b>", inch, styleRecibo)
+
+
+            # --- Firma (simple) ---
+            firma_y_base = 2 * inch
+            c.line(inch * 2.5, firma_y_base, width - (inch * 2.5), firma_y_base)
+            c.setFont(FONT_NAME, 10)
+            c.drawCentredString(width / 2, firma_y_base - 0.2 * inch, "Control Escolar UPASER")
+            
+            c.save()
+
+            # --- Abrir el PDF ---
+            self._temp_pdf_files.append(filename)
+            url = QUrl.fromLocalFile(filename)
+            QDesktopServices.openUrl(url)
+            
+            mostrar_info("Recibo PDF generado y abierto.")
+
+        except Exception as e:
+            mostrar_error(f"Error al generar o abrir el recibo PDF: {e}\n{traceback.format_exc()}")
+    
+    def generar_ticket_termico_pdf(self, pago_info):
+        """Genera un PDF del tamaño de un ticket térmico (80mm)."""
+        
+        # Ancho estándar de impresora térmica
+        TICKET_WIDTH = 80 * mm
+        # Altura inicial (crecerá si es necesario)
+        TICKET_HEIGHT = 120 * mm 
+        
+        try:
+            temp_pdf = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+            filename = temp_pdf.name
+            temp_pdf.close() 
+
+            # Usamos un tamaño de página personalizado
+            c = canvas.Canvas(filename, pagesize=(TICKET_WIDTH, TICKET_HEIGHT))
+            
+            # --- Estilos para el Ticket (Fuente monoespaciada) ---
+            FONT_TICKET = "Courier"
+            FONT_TICKET_BOLD = "Courier-Bold"
+            
+            styles = getSampleStyleSheet()
+            styleHeader = ParagraphStyle(name='Header', parent=styles['Normal'], fontName=FONT_TICKET_BOLD, fontSize=10, alignment=TA_CENTER, spaceAfter=6)
+            styleNormal = ParagraphStyle(name='Normal', parent=styles['Normal'], fontName=FONT_TICKET, fontSize=8, leading=10, alignment=TA_LEFT)
+            styleNormalCenter = ParagraphStyle(name='NormalCenter', parent=styleNormal, alignment=TA_CENTER)
+            styleTotal = ParagraphStyle(name='Total', parent=styles['Normal'], fontName=FONT_TICKET_BOLD, fontSize=11, alignment=TA_CENTER, spaceAfter=8)
+
+            # --- Contenido del Ticket (Usando Platypus para que fluya) ---
+            story = []
+            
+            # Margen
+            margin = 3 * mm
+            
+            # 1. Logo (pequeño)
+            if os.path.exists(LOGO_PATH):
+                try:
+                    story.append(Image(LOGO_PATH, width=25*mm, height=25*mm))
+                except Exception as e:
+                    print(f"Error al añadir logo al ticket: {e}")
+            
+            # 2. Encabezado
+            story.append(Paragraph("Unidad Profesional de Asesorías y Regularización (UPASER)", styleHeader))
+            story.append(Paragraph("--- RECIBO DE PAGO ---", styleNormalCenter))
+            story.append(Spacer(1, 4 * mm))
+            
+            # 3. Detalles del Pago
+            story.append(Paragraph(f"Fecha: {pago_info['fecha_pago']}", styleNormal))
+            story.append(Paragraph(f"Alumno: {pago_info['nombre_alumno']}", styleNormal))
+            story.append(Paragraph(f"Curso: {pago_info['nombre_curso']}", styleNormal))
+            story.append(Paragraph(f"ID Inscripción: {pago_info['inscripcion_id']}", styleNormal))
+            story.append(Paragraph("-" * 46, styleNormalCenter))
+            
+            # 4. Montos
+            story.append(Paragraph(f"Monto Recibido: ${pago_info['monto_pagado_recibo']:.2f}", styleTotal))
+            story.append(Paragraph(f"Método de Pago: {pago_info['metodo_pago']}", styleNormalCenter))
+            story.append(Paragraph("-" * 46, styleNormalCenter))
+            
+            # 5. Estado de Cuenta
+            story.append(Paragraph(f"Total del Curso: ${pago_info['monto_total_curso']:.2f}", styleNormal))
+            story.append(Paragraph(f"Total Pagado: ${pago_info['monto_pagado_total']:.2f}", styleNormal))
+            
+            if pago_info['saldo_pendiente'] > 0.01:
+                story.append(Paragraph(f"Saldo Pendiente: ${pago_info['saldo_pendiente']:.2f}", styleNormal))
+            else:
+                story.append(Spacer(1, 4 * mm))
+                story.append(Paragraph("¡CURSO LIQUIDADO!", styleHeader))
+
+            story.append(Spacer(1, 5 * mm))
+            story.append(Paragraph("Gracias por su pago", styleNormalCenter))
+
+            # --- Construir el PDF ---
+            # Definir el Frame (el área donde fluye el texto)
+            frame = Frame(margin, margin, TICKET_WIDTH - (2*margin), TICKET_HEIGHT - (2*margin), id='ticket_frame')
+            
+            # Construir la historia en el canvas
+            frame.addFromList(story, c)
+            c.save()
+
+            # --- Abrir el PDF ---
+            self._temp_pdf_files.append(filename)
+            url = QUrl.fromLocalFile(filename)
+            QDesktopServices.openUrl(url)
+            
+            mostrar_info("Ticket (80mm) generado y abierto.")
+
+        except Exception as e:
+            mostrar_error(f"Error al generar el ticket térmico PDF: {e}\n{traceback.format_exc()}")
     
     def generar_boleta_pdf(self):
         """Genera la boleta de calificaciones en PDF para el alumno seleccionado."""
@@ -4799,6 +5647,63 @@ class VentanaPrincipal(QMainWindow):
             mostrar_error(f"Error al cargar tabla de alumnos: {e}")
         except AttributeError:
             pass 
+    
+    def abrir_dialogo_nueva_inscripcion(self):
+        """
+        Abre el diálogo para inscribir a un alumno existente en un nuevo curso.
+        """
+        selected_items = self.tabla_alumnos.selectedItems()
+        if not selected_items or self.tabla_alumnos.currentRow() < 0:
+            mostrar_error("Por favor, seleccione un alumno de la lista.")
+            return
+        
+        try:
+            row = self.tabla_alumnos.currentRow()
+            alumno_id = int(self.tabla_alumnos.item(row, 0).text())
+            # Construir nombre completo desde la tabla
+            nombre = self.tabla_alumnos.item(row, 1).text()
+            ap_paterno = self.tabla_alumnos.item(row, 2).text()
+            ap_materno = self.tabla_alumnos.item(row, 3).text()
+            nombre_completo = f"{nombre} {ap_paterno} {ap_materno}"
+            
+            # Llamar al nuevo QDialog
+            dialogo = DialogoInscribirCurso(alumno_id, nombre_completo, self)
+            
+            if dialogo.exec(): # Si el diálogo se acepta (si se guardó)
+                mostrar_info("Alumno inscrito a nuevo curso exitosamente.")
+                # Recargamos la lista de alumnos (para actualizar el filtro)
+                # y el combo de pagos (para que aparezca la nueva inscripción)
+                self.cargar_tabla_alumnos()
+                self.cargar_cache_inscripciones() # Recarga el combo de la pág de pagos
+                
+        except Exception as e:
+            mostrar_error(f"Error al abrir diálogo de inscripción: {e}")
+    
+    def abrir_dialogo_editar_alumno(self):
+        """
+        Abre el diálogo para editar un alumno existente.
+        """
+        selected_items = self.tabla_alumnos.selectedItems()
+        if not selected_items or self.tabla_alumnos.currentRow() < 0:
+            mostrar_error("Por favor, seleccione un alumno de la lista para editar.")
+            return
+        
+        try:
+            row = self.tabla_alumnos.currentRow()
+            alumno_id = int(self.tabla_alumnos.item(row, 0).text())
+            
+            # Llamar al nuevo QDialog
+            dialogo = DialogoEditarAlumno(alumno_id, self)
+            
+            if dialogo.exec(): # Si el diálogo se acepta (si se guardó)
+                # Recargamos la tabla y el expediente para ver los cambios
+                self.cargar_tabla_alumnos()
+                # Volvemos a seleccionar la fila que estaba editada (opcional)
+                self.tabla_alumnos.selectRow(row) 
+                self.mostrar_expediente_alumno()
+                
+        except Exception as e:
+            mostrar_error(f"Error al abrir diálogo de edición: {e}")
 
     def registrar_curso(self):
         """DEPRECADO: Usar guardar_curso."""
@@ -4817,12 +5722,15 @@ class VentanaPrincipal(QMainWindow):
         costo_bi_semanal = self.spin_costo_bi_semanal.value()
         costo_mensual_4 = self.spin_costo_mensual_4.value()
         costo_mensualidad = self.spin_costo_mensualidad.value()
-
         if not nombre:
             mostrar_error("El nombre del curso es obligatorio.")
             return
         if costo_exhibicion == 0 and costo_sem_15 == 0 and costo_sem_12 == 0 and costo_mensual_3 == 0 and costo_bi_semanal == 0 and costo_mensual_4 == 0 and costo_mensualidad == 0:
             mostrar_error("Debe definir al menos un plan de costo para el curso.")
+            return
+
+        if costo_exhibicion == 0 and costo_sem_15 == 0 and costo_sem_12 == 0 and costo_mensual_3 == 0 and costo_bi_semanal == 0 and costo_mensual_4 == 0 and costo_mensualidad == 0:
+            mostrar_error("Debe definir al menos un plan de costo o un descuento para el curso.")
             return
 
         try:
@@ -4902,6 +5810,7 @@ class VentanaPrincipal(QMainWindow):
                 self.spin_costo_bi_semanal.setValue(datos['costo_bi_semanal'])
                 self.spin_costo_mensual_4.setValue(datos['costo_mensual_4'])
                 self.spin_costo_mensualidad.setValue(datos['costo_mensualidad'] if 'costo_mensualidad' in datos.keys() else 0.0)
+                # --- FIN ---
                 
                 self.btn_guardar_curso.setText("Actualizar Curso")
 
@@ -5619,19 +6528,19 @@ class VentanaPrincipal(QMainWindow):
                     canvas_obj.drawString(30*mm, 30*mm, nombre_completo)
 
                     canvas_obj.setFont("Helvetica-Bold", 7)
-                    canvas_obj.drawString(30*mm, 24*mm, "NO. DE EMPLEADO:") # <--- CAMBIO
+                    canvas_obj.drawString(30*mm, 24*mm, "NO. DE EMPLEADO:")
                     canvas_obj.setFont("Helvetica", 10)
                     canvas_obj.setFillColorRGB(0.7, 0, 0)
-                    canvas_obj.drawString(30*mm, 19.5*mm, f"{datos['num_empleado']}") # <--- CAMBIO
+                    canvas_obj.drawString(30*mm, 19.5*mm, f"{datos['num_empleado']}")
 
                     canvas_obj.setFillColorRGB(0.2, 0.2, 0.2)
                     canvas_obj.setFont("Helvetica-Bold", 7)
-                    canvas_obj.drawString(30*mm, 14*mm, "PUESTO:") # <--- CAMBIO
+                    canvas_obj.drawString(30*mm, 14*mm, "PUESTO:")
                     canvas_obj.setFont("Helvetica", 8)
-                    canvas_obj.drawString(30*mm, 10*mm, datos['puesto']) # <--- CAMBIO
-                    # --- FIN DATOS ADAPTADOS ---
-
-                    # Pie de página (Vigencia)
+                    canvas_obj.drawString(30*mm, 10*mm, datos['puesto'])
+                    
+                    # --- Pie de página (Vigencia) ---
+                    # (Este bloque debe estar al mismo nivel que "CÓDIGO DE BARRAS")
                     canvas_obj.setStrokeColorRGB(0.2, 0.6, 0.2)
                     canvas_obj.line(4*mm, 8*mm, width-4*mm, 8*mm)
                     canvas_obj.setFont("Helvetica", 6)
@@ -5641,24 +6550,22 @@ class VentanaPrincipal(QMainWindow):
                     
                 else: 
                     # --- REVERSO (IDÉNTICO AL DE ALUMNO) ---
+                    # (Todo este bloque 'else' debe estar alineado con el 'if not es_reverso:')
                     director_nombre_completo = "JOVANY IVAN CERVANTES CARRERAS"
                     
                     canvas_obj.setFillColorRGB(0.2, 0.2, 0.2)
                     canvas_obj.setFont("Helvetica-Bold", 10)
            
-                    # Línea de firma
                     firma_y = height / 2.0
                     canvas_obj.setStrokeColorRGB(0.5, 0.5, 0.5)
                     canvas_obj.line(width/4, firma_y, width*3/4, firma_y)
 
-                    # Firma del Director
                     canvas_obj.setFont("Helvetica", 7)
                     canvas_obj.setFillColorRGB(0.2, 0.2, 0.2)
-                    canvas_obj.drawCentredString(width/2, firma_y - 4*mm, director_nombre_completo.upper()) # <--- CAMBIO A NOMBRE COMPLETO
+                    canvas_obj.drawCentredString(width/2, firma_y - 4*mm, director_nombre_completo.upper())
                     canvas_obj.setFont("Helvetica-Bold", 6)
                     canvas_obj.drawCentredString(width/2, firma_y - 7*mm, "DIRECTOR DEL PLANTEL")
 
-                    # Leyenda legal
                     canvas_obj.setStrokeColorRGB(0.2, 0.6, 0.2)
                     canvas_obj.line(4*mm, 8*mm, width-4*mm, 8*mm)
                     canvas_obj.setFont("Helvetica", 6)
