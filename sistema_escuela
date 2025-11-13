@@ -5460,7 +5460,7 @@ class VentanaPrincipal(QMainWindow):
                 dibujar_marca_agua(canvas_obj, width, height)
 
                 # Franja superior verde
-                canvas_obj.setFillColorRGB(0.2, 0.6, 0.2)
+                canvas_obj.setFillColorRGB(0, 0.2, 0.4)
                 canvas_obj.rect(0, height - 14*mm, width, 14*mm, fill=1, stroke=0)
 
                 # Logo y textos institucionales
@@ -5522,7 +5522,7 @@ class VentanaPrincipal(QMainWindow):
                     canvas_obj.drawText(textobject)
 
                     # Pie de página (Vigencia)
-                    canvas_obj.setStrokeColorRGB(0.2, 0.6, 0.2)
+                    canvas_obj.setStrokeColorRGB(0, 0.2, 0.4)
                     canvas_obj.line(4*mm, 8*mm, width-4*mm, 8*mm)
                     canvas_obj.setFont("Helvetica", 6)
                     canvas_obj.setFillColorRGB(0.4, 0.4, 0.4)
@@ -5549,7 +5549,7 @@ class VentanaPrincipal(QMainWindow):
                     canvas_obj.drawCentredString(width/2, firma_y - 7*mm, "DIRECTOR DEL PLANTEL")
 
                     # Leyenda legal
-                    canvas_obj.setStrokeColorRGB(0.2, 0.6, 0.2)
+                    canvas_obj.setStrokeColorRGB(0, 0.2, 0.4)
                     canvas_obj.line(4*mm, 8*mm, width-4*mm, 8*mm)
                     canvas_obj.setFont("Helvetica", 6)
                     canvas_obj.setFillColorRGB(0.4, 0.4, 0.4)
