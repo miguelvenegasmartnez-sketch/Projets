@@ -3,7 +3,8 @@ import sqlite3
 import datetime
 import traceback
 import os 
-import tempfile 
+import tempfile
+import requests
 from decimal import Decimal, ROUND_HALF_UP 
 import secrets 
 import json 
@@ -36,6 +37,13 @@ try:
 except ImportError as e:
     print(f"Error: Faltan bibliotecas de PyQt6. Ejecuta: pip install PyQt6\nDetalle: {e}")
     sys.exit(1)
+
+# Esta es la versión de tu .exe actual. DEBES incrementarla cada vez que compiles.
+APP_CURRENT_VERSION = "1.0.0" 
+
+# Esta es la URL RAW (cruda) de tu archivo version_escuela.json en GitHub
+# ¡DEBES REEMPLAZAR ESTA URL POR LA TUYA!
+APP_VERSION_URL = "https://raw.githubusercontent.com/miguelvenegasmartnez-sketch/Projets/main/version_escuela.json"
 
 # --- Importar ReportLab para PDF ---
 try:
@@ -3737,6 +3745,30 @@ class VentanaPrincipal(QMainWindow):
         layout_db.addWidget(btn_restore)
 
         layout_content.addWidget(group_db)
+        
+        group_updates = QGroupBox("Actualizaciones del Sistema")
+        group_updates.setMaximumWidth(450)
+        layout_updates = QVBoxLayout(group_updates)
+
+        # (Asegúrate de tener la variable APP_CURRENT_VERSION definida al inicio de tu script)
+        try:
+            version_actual = APP_CURRENT_VERSION
+        except NameError:
+            version_actual = "No definida"
+
+        lbl_info_updates = QLabel(f"Versión actual: {version_actual}\nBusque nuevas versiones en el repositorio.")
+        lbl_info_updates.setWordWrap(True)
+        lbl_info_updates.setStyleSheet("opacity: 0.7; font-size: 9pt; margin-bottom: 10px;")
+
+        self.btn_check_updates = QPushButton("🛰️ Buscar Actualizaciones")
+        self.btn_check_updates.setObjectName("primaryButton") # Estilo azul
+        self.btn_check_updates.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_check_updates.clicked.connect(self.on_check_for_updates_button_click)
+
+        layout_updates.addWidget(lbl_info_updates)
+        layout_updates.addWidget(self.btn_check_updates)
+        
+        layout_content.addWidget(group_updates)
 
         # Empujar todo hacia arriba
         layout_content.addStretch()
@@ -6282,6 +6314,48 @@ class VentanaPrincipal(QMainWindow):
 
                  except Exception as e:
                      mostrar_error(f"Error al restaurar la base de datos:\n{e}\n\nAsegúrese de que el archivo seleccionado sea un respaldo válido y que el sistema tenga permisos de escritura.")
+    
+    def on_check_for_updates_button_click(self):
+        """
+        Se ejecuta al presionar el botón "Buscar Actualizaciones" en Configuración.
+        Realiza una comprobación síncrona.
+        """
+        try:
+            # Deshabilitar el botón para evitar clics dobles
+            self.btn_check_updates.setEnabled(False)
+            self.btn_check_updates.setText("Buscando...")
+            QApplication.processEvents() # Actualizar UI
+
+            # (Asegúrate de tener requests y APP_VERSION_URL definidos al inicio de tu script)
+            response = requests.get(APP_VERSION_URL, timeout=5)
+            response.raise_for_status()
+            
+            data = response.json()
+            latest_version = data.get("version")
+            download_url = data.get("url")
+
+            if latest_version and download_url:
+                # (Asegúrate de tener APP_CURRENT_VERSION definida)
+                if latest_version != APP_CURRENT_VERSION:
+                    print(f"¡Nueva versión encontrada! {latest_version}")
+                    # Llamar a la función que pregunta al usuario (ya existe)
+                    prompt_update(self, latest_version, download_url)
+                else:
+                    print("El sistema ya está actualizado.")
+                    mostrar_info("El sistema ya está actualizado a la última versión.")
+            else:
+                mostrar_error("El archivo de versión en el servidor tiene un formato incorrecto.")
+
+        except requests.exceptions.RequestException as e:
+            mostrar_error(f"Error al buscar actualizaciones:\nNo se pudo conectar al servidor.\n\n{e}")
+        except NameError as e:
+            mostrar_error(f"Error de configuración: Faltan variables de actualización (APP_VERSION_URL o APP_CURRENT_VERSION) en el script.\n\n{e}")
+        except Exception as e:
+            mostrar_error(f"Error desconocido al procesar actualizaciones: {e}")
+        finally:
+            # Reactivar el botón
+            self.btn_check_updates.setEnabled(True)
+            self.btn_check_updates.setText("🛰️ Buscar Actualizaciones")
 
 
 # ---- HOJAS DE ESTILO (QSS) ----
