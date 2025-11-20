@@ -4287,23 +4287,19 @@ class VentanaPrincipal(QMainWindow):
             if not curso:
                 return
             
-            # --- INICIO DE LÓGICA DE DESCUENTO (CORREGIDA) ---
+            # --- LÓGICA DE DESCUENTO ---
             quantizer = Decimal('0.01')
-            
-            # --- CORRECCIÓN: Usar .keys() y ['...'] en lugar de .get() ---
+            # Usar .keys() para asegurar que la columna existe
             descuento_pct = curso['descuento_porcentaje'] if 'descuento_porcentaje' in curso.keys() else 0.0
             descuento_factor = Decimal(str(1.0 - (descuento_pct / 100.0)))
             
-            # Función auxiliar para crear el texto del plan
             def crear_texto_plan(nombre, costo_original, costo_final, num_pagos, pago_individual):
                 texto = f"{nombre} (${costo_final})"
                 if num_pagos > 1:
                     texto = f"{nombre} ({num_pagos} pagos de ${pago_individual})"
-                
                 if descuento_pct > 0:
                     texto += f" (Orig: ${costo_original}) - {descuento_pct}% Dto."
                 return texto
-            # --- FIN DE LÓGICA DE DESCUENTO ---
 
             self.combo_tipo_pago_registro.addItem("--- Seleccione un plan de pago ---", userData=None)
             
@@ -4348,6 +4344,22 @@ class VentanaPrincipal(QMainWindow):
                 texto = crear_texto_plan("Mensual (4)", costo_orig, costo_final, 4, pago)
                 self.combo_tipo_pago_registro.addItem(texto, userData=("Mensual (4)", float(costo_final), 4))
             
+            # --- ESTA ES LA PARTE QUE FALTABA ---
+            # Verificar si existe la columna y si tiene precio mayor a 0
+            val_mensualidad = curso['costo_mensualidad'] if 'costo_mensualidad' in curso.keys() else 0.0
+            
+            if val_mensualidad > 0:
+                costo_orig = Decimal(str(val_mensualidad)).quantize(quantizer)
+                costo_final = (costo_orig * descuento_factor).quantize(quantizer)
+                
+                texto = f"Colegiatura Mensual (${costo_final})"
+                if descuento_pct > 0:
+                    texto += f" (Orig: ${costo_orig}) - {descuento_pct}% Dto."
+                
+                # userData = ("Mensualidad", Costo de 1 Mes, 1 pago inicial)
+                self.combo_tipo_pago_registro.addItem(texto, userData=("Mensualidad", float(costo_final), 1))
+            # -------------------------------------
+
         except sqlite3.Error as e:
              mostrar_error(f"Error al cargar planes de pago: {e}")
         except Exception as e:
