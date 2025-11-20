@@ -39,7 +39,7 @@ except ImportError as e:
     sys.exit(1)
 
 # Esta es la versión de tu .exe actual. DEBES incrementarla cada vez que compiles.
-APP_CURRENT_VERSION = "1.0.0" 
+APP_CURRENT_VERSION = "1.0.3" 
 
 # Esta es la URL RAW (cruda) de tu archivo version_escuela.json en GitHub
 # ¡DEBES REEMPLAZAR ESTA URL POR LA TUYA!
@@ -4287,23 +4287,19 @@ class VentanaPrincipal(QMainWindow):
             if not curso:
                 return
             
-            # --- INICIO DE LÓGICA DE DESCUENTO (CORREGIDA) ---
+            # --- LÓGICA DE DESCUENTO ---
             quantizer = Decimal('0.01')
-            
-            # --- CORRECCIÓN: Usar .keys() y ['...'] en lugar de .get() ---
+            # Usar .keys() para asegurar que la columna existe
             descuento_pct = curso['descuento_porcentaje'] if 'descuento_porcentaje' in curso.keys() else 0.0
             descuento_factor = Decimal(str(1.0 - (descuento_pct / 100.0)))
             
-            # Función auxiliar para crear el texto del plan
             def crear_texto_plan(nombre, costo_original, costo_final, num_pagos, pago_individual):
                 texto = f"{nombre} (${costo_final})"
                 if num_pagos > 1:
                     texto = f"{nombre} ({num_pagos} pagos de ${pago_individual})"
-                
                 if descuento_pct > 0:
                     texto += f" (Orig: ${costo_original}) - {descuento_pct}% Dto."
                 return texto
-            # --- FIN DE LÓGICA DE DESCUENTO ---
 
             self.combo_tipo_pago_registro.addItem("--- Seleccione un plan de pago ---", userData=None)
             
@@ -4348,6 +4344,22 @@ class VentanaPrincipal(QMainWindow):
                 texto = crear_texto_plan("Mensual (4)", costo_orig, costo_final, 4, pago)
                 self.combo_tipo_pago_registro.addItem(texto, userData=("Mensual (4)", float(costo_final), 4))
             
+            # --- ESTA ES LA PARTE QUE FALTABA ---
+            # Verificar si existe la columna y si tiene precio mayor a 0
+            val_mensualidad = curso['costo_mensualidad'] if 'costo_mensualidad' in curso.keys() else 0.0
+            
+            if val_mensualidad > 0:
+                costo_orig = Decimal(str(val_mensualidad)).quantize(quantizer)
+                costo_final = (costo_orig * descuento_factor).quantize(quantizer)
+                
+                texto = f"Colegiatura Mensual (${costo_final})"
+                if descuento_pct > 0:
+                    texto += f" (Orig: ${costo_orig}) - {descuento_pct}% Dto."
+                
+                # userData = ("Mensualidad", Costo de 1 Mes, 1 pago inicial)
+                self.combo_tipo_pago_registro.addItem(texto, userData=("Mensualidad", float(costo_final), 1))
+            # -------------------------------------
+
         except sqlite3.Error as e:
              mostrar_error(f"Error al cargar planes de pago: {e}")
         except Exception as e:
@@ -5524,10 +5536,16 @@ class VentanaPrincipal(QMainWindow):
                     # Pie de página (Vigencia)
                     canvas_obj.setStrokeColorRGB(0, 0.2, 0.4)
                     canvas_obj.line(4*mm, 8*mm, width-4*mm, 8*mm)
-                    canvas_obj.setFont("Helvetica", 6)
+                    canvas_obj.setFont("Helvetica", 7) # Ajusté un poco el tamaño para que se vea bien
                     canvas_obj.setFillColorRGB(0.4, 0.4, 0.4)
-                    anio_actual = datetime.date.today().year
-                    canvas_obj.drawCentredString(width/2, 5*mm, f"VIGENCIA: CICLO ESCOLAR {anio_actual} - {anio_actual+1}")
+                    
+                    hoy = datetime.date.today()
+                    if hoy.month < 8: 
+                        anio_inicio = hoy.year - 1
+                    else:
+                        anio_inicio = hoy.year
+                    
+                    canvas_obj.drawCentredString(width/2, 5*mm, f"VIGENCIA: {anio_inicio} - {anio_inicio+1}")
                     
                 else: # --- REVERSO ---
                     director_nombre = "MTRO. JOVANY IVAN CERVANTES CARRERAS"
@@ -6617,10 +6635,16 @@ class VentanaPrincipal(QMainWindow):
                     # (Este bloque debe estar al mismo nivel que "CÓDIGO DE BARRAS")
                     canvas_obj.setStrokeColorRGB(0.2, 0.6, 0.2)
                     canvas_obj.line(4*mm, 8*mm, width-4*mm, 8*mm)
-                    canvas_obj.setFont("Helvetica", 6)
+                    canvas_obj.setFont("Helvetica", 7)
                     canvas_obj.setFillColorRGB(0.4, 0.4, 0.4)
-                    anio_actual = datetime.date.today().year
-                    canvas_obj.drawCentredString(width/2, 5*mm, f"VIGENCIA: {anio_actual} - {anio_actual+1}")
+                    
+                    hoy = datetime.date.today()
+                    if hoy.month < 8: 
+                        anio_inicio = hoy.year - 1
+                    else:
+                        anio_inicio = hoy.year
+
+                    canvas_obj.drawCentredString(width/2, 5*mm, f"VIGENCIA: {anio_inicio} - {anio_inicio+1}")
                     
                 else: 
                     # --- REVERSO (IDÉNTICO AL DE ALUMNO) ---
