@@ -7,8 +7,20 @@ import tempfile
 import requests
 from decimal import Decimal, ROUND_HALF_UP 
 import secrets 
-import json 
+import json
+import qtawesome as qta 
+import webbrowser
+import pythoncom
 from PIL import Image as PILImage, ImageOps, ImageDraw
+
+# --- Importaciones para Biometría (Windows Hello) ---
+try:
+    import asyncio
+    from winsdk.windows.security.credentials.ui import UserConsentVerifier, UserConsentVerifierAvailability
+    WINSDEK_AVAILABLE = True
+except ImportError:
+    WINSDEK_AVAILABLE = False
+    print("Advertencia: 'winsdk' no instalado. Funciones biométricas deshabilitadas.")
 
 def resource_path(relative_path):
     """ Obtiene la ruta absoluta al recurso, funciona para desarrollo y para PyInstaller """
@@ -32,18 +44,18 @@ try:
         QMenu, QSizePolicy, QSpacerItem, QListWidget, QListWidgetItem, QDialog # Necesario para el nuevo menú
     )
     # --- AÑADIDO QLocale ---
-    from PyQt6.QtCore import Qt, QDate, QTimer, QDateTime, QSize, QUrl, QLocale, QPoint, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup # Necesario para QPoint
+    from PyQt6.QtCore import Qt, QDate, QTimer, QDateTime, QSize, QUrl, QLocale, QPoint, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup, pyqtSignal, QThread# Necesario para QPoint
     from PyQt6.QtGui import QFont, QIcon, QPixmap, QColor, QDesktopServices
 except ImportError as e:
     print(f"Error: Faltan bibliotecas de PyQt6. Ejecuta: pip install PyQt6\nDetalle: {e}")
     sys.exit(1)
 
 # Esta es la versión de tu .exe actual. DEBES incrementarla cada vez que compiles.
-APP_CURRENT_VERSION = "1.0.3" 
+APP_CURRENT_VERSION = "1.1.0" 
 
 # Esta es la URL RAW (cruda) de tu archivo version_escuela.json en GitHub
 # ¡DEBES REEMPLAZAR ESTA URL POR LA TUYA!
-APP_VERSION_URL = "https://raw.githubusercontent.com/miguelvenegasmartnez-sketch/Projets/main/version_escuela.json"
+APP_VERSION_URL = "https://raw.githubusercontent.com/miguelvenegasmartnez-sketch/Projets/refs/heads/main/version_escuela.json"
 
 # --- Importar ReportLab para PDF ---
 try:
@@ -111,6 +123,71 @@ if not os.path.exists(DOCS_PERSONAL_DIR):
 # Si usas background.jpg, añádelo también:
 BACKGROUND_PATH = os.path.join(BASE_DIR, "background.jpg")
 
+# --- Importaciones para Biometría (Windows Hello) ---
+try:
+    import asyncio
+    from winsdk.windows.security.credentials.ui import UserConsentVerifier, UserConsentVerifierAvailability
+    WINSDEK_AVAILABLE = True
+except ImportError:
+    WINSDEK_AVAILABLE = False
+    print("Advertencia: 'winsdk' no instalado. Funciones biométricas deshabilitadas.")
+
+# --- CLASES BIOMÉTRICAS (Windows Hello) ---
+
+class BiometricService:
+    """Servicio para invocar la ventana de Windows Hello."""
+    
+    @staticmethod
+    async def _request_verification_async(message):
+        # Verificación de seguridad
+        if not globals().get('WINSDEK_AVAILABLE', False): 
+            return False
+        try:
+            # Esta es la línea que abre la ventana azul de Windows
+            result = await UserConsentVerifier.request_verification_async(message)
+            return result == 0 # 0 significa "Verified"
+        except Exception as e:
+            print(f"Error interno biométrico: {e}")
+            return False
+
+    @staticmethod
+    def verificar_huella(mensaje="Verificar identidad"):
+        """Método puente síncrono. Devuelve (Éxito, Mensaje)."""
+        if not globals().get('WINSDEK_AVAILABLE', False):
+            return False, "Librería winsdk no instalada."
+        try:
+            # Creamos un bucle de eventos aislado para la biometría
+            exito = asyncio.run(BiometricService._request_verification_async(mensaje))
+            if exito:
+                return True, "Huella verificada."
+            else:
+                return False, "No se reconoció la huella o se canceló."
+        except Exception as e:
+            return False, f"Error técnico: {e}"
+class BiometricWorker(QThread):
+    """Hilo en segundo plano para no congelar la ventana."""
+    finished = pyqtSignal(bool, str) 
+
+    def run(self):
+        print("--- [DEBUG] Hilo de biometría INICIADO ---")
+        try:
+            # 1. INICIALIZAR COMUNICACIÓN CON WINDOWS (Vital para hilos)
+            pythoncom.CoInitialize() 
+            
+            # 2. Ejecutar la verificación
+            exito, mensaje = BiometricService.verificar_huella("Escanee su huella para continuar")
+            
+            print(f"--- [DEBUG] Hilo terminado. Resultado: {exito} ---")
+            self.finished.emit(exito, mensaje)
+            
+        except Exception as e:
+            print(f"--- [DEBUG] ERROR CRÍTICO EN HILO: {e} ---")
+            self.finished.emit(False, f"Error técnico: {e}")
+            
+        finally:
+            # 3. CERRAR COMUNICACIÓN
+            pythoncom.CoUninitialize()
+
 # --- FUNCIÓN DE CONEXIÓN GLOBAL ---
 def get_db_connection():
     """Establece conexión a la BD y activa las claves foráneas."""
@@ -121,14 +198,14 @@ def get_db_connection():
     return conn
 
 def inicializar_db():
-    """Crea las tablas de la base de datos si no existen."""
+    """Crea las tablas de la base de datos si no existen y aplica actualizaciones."""
     conn = None
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("PRAGMA foreign_keys = ON")
 
-        # --- Tabla de Alumnos ---
+        # --- 1. Tabla de Alumnos ---
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS alumnos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -163,15 +240,13 @@ def inicializar_db():
         )
         """)
         
-        # --- Alteraciones (Para que las bases de datos viejas funcionen sin borrar) ---
+        # Actualizaciones de Alumnos
         try:
              cursor.execute("ALTER TABLE alumnos ADD COLUMN IF NOT EXISTS autoriza_salida_solo INTEGER DEFAULT 0")
              cursor.execute("ALTER TABLE alumnos ADD COLUMN IF NOT EXISTS foto_ruta TEXT")
-             conn.commit()
-        except sqlite3.OperationalError:
-            pass # Ignorar si la columna ya existe
+        except sqlite3.OperationalError: pass
 
-        # --- Tabla de Cursos (Incluyendo costos Bisemanal y Mensual 4) ---
+        # --- 2. Tabla de Cursos ---
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS cursos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -186,17 +261,15 @@ def inicializar_db():
         )
         """)
         
-        # --- Alteraciones para Cursos (Si la tabla ya existía sin los nuevos campos) ---
+        # Actualizaciones de Cursos
         try:
              cursor.execute("ALTER TABLE cursos ADD COLUMN IF NOT EXISTS costo_bi_semanal REAL DEFAULT 0.0")
              cursor.execute("ALTER TABLE cursos ADD COLUMN IF NOT EXISTS costo_mensual_4 REAL DEFAULT 0.0")
              cursor.execute("ALTER TABLE cursos ADD COLUMN IF NOT EXISTS costo_mensualidad REAL DEFAULT 0.0")
-             conn.commit()
-        except sqlite3.OperationalError:
-            pass 
-        # ---------------------------------------------------------------------------------
+             cursor.execute("ALTER TABLE cursos ADD COLUMN IF NOT EXISTS descuento_porcentaje REAL DEFAULT 0.0")
+        except sqlite3.OperationalError: pass
 
-        # --- Tabla de Inscripciones ---
+        # --- 3. Tabla de Inscripciones ---
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS inscripciones (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -214,14 +287,13 @@ def inicializar_db():
         )
         """)
         
+        # Actualizaciones de Inscripciones
         try:
              cursor.execute("ALTER TABLE inscripciones ADD COLUMN IF NOT EXISTS monto_original REAL DEFAULT 0.0")
              cursor.execute("ALTER TABLE inscripciones ADD COLUMN IF NOT EXISTS descuento_aplicado_pct REAL DEFAULT 0.0")
-             conn.commit()
-        except sqlite3.OperationalError:
-            pass
-        
-        # --- Tabla de Pagos ---
+        except sqlite3.OperationalError: pass
+
+        # --- 4. Tabla de Pagos ---
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS pagos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -232,8 +304,9 @@ def inicializar_db():
             FOREIGN KEY (inscripcion_id) REFERENCES inscripciones(id) ON DELETE CASCADE
         )
         """)
-        
-        # --- Tabla de Usuarios ---
+
+        # --- 5. Tabla de Usuarios (Login) ---
+        # Aquí agregamos la columna tiene_huella por defecto
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS usuarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -241,11 +314,17 @@ def inicializar_db():
             telefono TEXT,
             email TEXT NOT NULL UNIQUE,
             permisos TEXT NOT NULL,
-            password TEXT NOT NULL
+            password TEXT NOT NULL,
+            tiene_huella INTEGER DEFAULT 0
         )
         """)
+        
+        # Actualización crítica para Usuarios: Agregar columna de huella si no existe
+        try:
+             cursor.execute("ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS tiene_huella INTEGER DEFAULT 0")
+        except sqlite3.OperationalError: pass
 
-        # --- Tabla de Documentos (LA QUE ESTABA FALTANDO) ---
+        # --- 6. Tabla de Documentos (Alumnos) ---
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS documentos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -255,10 +334,9 @@ def inicializar_db():
             FOREIGN KEY (alumno_id) REFERENCES alumnos(id) ON DELETE CASCADE
         )
         """)
-        
-        # --- Insertar usuario admin por defecto ---
+
+        # --- 7. Insertar Usuario Admin por defecto ---
         try:
-            # ... (código para insertar admin) ...
             admin_permissions = {
                 "is_admin": True, "can_register_students": True, "can_register_payments": True,
                 "can_view_all_students": True, "can_manage_courses": True, "can_manage_users": True,
@@ -266,14 +344,14 @@ def inicializar_db():
             }
             admin_permisos_json = json.dumps(admin_permissions)
             
+            # Insertamos con tiene_huella = 0 por defecto
             cursor.execute("""
-            INSERT OR IGNORE INTO usuarios (id, nombre_completo, email, permisos, password)
-            VALUES (1, 'Administrador', 'admin@sistema.com', ?, 'admin123')
+            INSERT OR IGNORE INTO usuarios (id, nombre_completo, email, permisos, password, tiene_huella)
+            VALUES (1, 'Administrador', 'admin@sistema.com', ?, 'admin123', 0)
             """, (admin_permisos_json,))
-        except Exception:
-             pass 
+        except Exception: pass 
 
-        # --- Tablas de Materias y Calificaciones ---
+        # --- 8. Tablas Académicas (Materias y Calificaciones) ---
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS materias (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -296,8 +374,8 @@ def inicializar_db():
             FOREIGN KEY (materia_id) REFERENCES materias(id) ON DELETE CASCADE
         )
         """)
-        
-        # --- Tabla de Personal (NUEVA) ---
+
+        # --- 9. Tabla de Personal (Empleados/RRHH) ---
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS personal (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -323,7 +401,7 @@ def inicializar_db():
         )
         """)
 
-        # --- Tabla de Documentos del Personal (NUEVA) ---
+        # --- 10. Tabla de Documentos del Personal ---
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS documentos_personal (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -334,19 +412,21 @@ def inicializar_db():
         )
         """)
         
+        # Confirmar todos los cambios
         conn.commit()
+
     except sqlite3.Error as e:
-        # Si falla algo crítico, mostrarlo
         err_msg = f"CRITICAL: Error al inicializar la base de datos: {e}"
         print(err_msg)
+        # Intentamos mostrar alerta solo si la app ya existe (para evitar crash)
         try:
-             QMessageBox.critical(None, "Error Fatal de Base de Datos", err_msg)
-        except:
-             pass
+             if QApplication.instance():
+                 QMessageBox.critical(None, "Error Fatal de Base de Datos", err_msg)
+        except: pass
     finally:
         if conn:
-            conn.close()
-
+            conn.close() 
+            
 # Funciones globales de mensajes (deben estar definidas antes de usarse)
 def mostrar_error(mensaje):
     """Muestra un diálogo de error crítico."""
@@ -788,7 +868,7 @@ class DialogGestionPersonal(QDialog):
         # --- Layout Superior (Foto y Datos Personales) ---
         layout_superior = QHBoxLayout()
         
-        # Panel de Foto (Copiado de crear_pagina_nueva_inscripcion)
+        #Foto
         panel_foto = QVBoxLayout()
         self.lbl_foto_registro = QLabel("Sin Foto")
         self.lbl_foto_registro.setFixedSize(150, 200)
@@ -803,6 +883,7 @@ class DialogGestionPersonal(QDialog):
         panel_foto.addWidget(self.lbl_foto_registro)
         panel_foto.addWidget(btn_tomar_foto)
         panel_foto.addWidget(btn_cargar_foto)
+        
         panel_foto.addStretch()
         layout_superior.addLayout(panel_foto)
 
@@ -958,6 +1039,50 @@ class DialogGestionPersonal(QDialog):
                 self.mostrar_foto(datos['foto_ruta'])
         except Exception as e:
             mostrar_error(f"Error al cargar datos del personal: {e}")
+    
+    def registrar_huella(self):
+        """Simula el registro vinculando la cuenta de Windows Hello."""
+        if not WINSDEK_AVAILABLE:
+            mostrar_error("El soporte biométrico no está instalado.")
+            return
+
+        # Windows Hello no "guarda" la huella en nuestra BD (por seguridad),
+        # sino que verifica que el usuario actual de Windows sea el dueño.
+        # Aquí validamos que el hardware funcione y marcamos al empleado como "con huella".
+        
+        exito = BiometricService.verificar_huella("Coloque su dedo en el lector para registrar")
+        
+        if exito:
+            self.lbl_status_huella.setText("Huella: Vinculada ✅")
+            self.lbl_status_huella.setStyleSheet("color: green; font-weight: bold;")
+            self.huella_vinculada = True # Variable temporal
+            QMessageBox.information(self, "Éxito", "Huella digital vinculada correctamente.")
+        else:
+            QMessageBox.warning(self, "Falló", "No se pudo verificar la huella o el usuario canceló.")
+
+    # --- IMPORTANTE: Modificar cargar_datos_personal para mostrar si ya tiene huella ---
+    def cargar_datos_personal(self):
+        # ... (código existente de carga) ...
+        # Añadir al final:
+        try:
+             if 'tiene_huella' in datos.keys() and datos['tiene_huella'] == 1:
+                 self.lbl_status_huella.setText("Huella: Vinculada ✅")
+                 self.lbl_status_huella.setStyleSheet("color: green; font-weight: bold;")
+                 self.huella_vinculada = True
+             else:
+                 self.huella_vinculada = False
+        except: pass
+
+    # --- IMPORTANTE: Modificar guardar_personal para guardar el estado ---
+    def guardar_personal(self):
+        # ... (al momento de hacer el INSERT o UPDATE) ...
+        # Debes incluir el campo 'tiene_huella'
+        
+        tiene_huella = 1 if hasattr(self, 'huella_vinculada') and self.huella_vinculada else 0
+        
+        # Ejemplo conceptual (tienes que adaptar tu query SQL real):
+        # cursor.execute("INSERT INTO personal (..., tiene_huella) VALUES (..., ?)", (..., tiene_huella))
+        # O en el UPDATE: "UPDATE personal SET ..., tiene_huella=? WHERE id=?"
 
     def guardar_personal(self):
         """Guarda (INSERT o UPDATE) los datos del personal."""
@@ -1508,186 +1633,168 @@ class DialogoEditarAlumno(QDialog):
 # --- (Fin de la clase DialogoEditarAlumno) ---
 
 # ---- Ventana de Login ----
-class LoginScreen(QWidget):
-    def __init__(self):
-        super().__init__()
+class LoginScreen(QFrame):
+    login_successful = pyqtSignal(dict, str)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("LoginScreen")
         self.setWindowTitle("Sistema de Gestión Escolar - Login")
-        self.resize(800, 500)
+        self.resize(800, 550)
+        
         self.username = "" 
         self.full_username = "" 
         self.user_role = "" 
         self.accept_login = False 
+        self.permisos_dict = {}
 
         self.setup_ui()
         self.apply_styles()
         self.start_time_update()
 
     def setup_ui(self):
-        main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0) 
-        main_layout.setSpacing(0)
+        main_layout = QVBoxLayout(self)
+        main_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        # Tarjeta Central
+        self.login_card = QFrame()
+        self.login_card.setObjectName("loginCard")
+        self.login_card.setFixedSize(400, 600)
+        
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(50)
+        shadow.setColor(QColor(0, 0, 0, 80))
+        shadow.setOffset(0, 10)
+        self.login_card.setGraphicsEffect(shadow)
 
-        # Panel Izquierdo: Login Form
-        login_panel = QWidget()
-        login_panel.setObjectName("loginPanel")
-        login_layout = QVBoxLayout(login_panel)
-        login_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        login_layout.setSpacing(20)
-        login_layout.setContentsMargins(50, 50, 50, 50)
+        card_layout = QVBoxLayout(self.login_card)
+        card_layout.setSpacing(15)
+        card_layout.setContentsMargins(40, 40, 40, 40)
 
-        # Logo Placeholder
+        # 1. Logo
         self.logo_label = QLabel()
-        try:
-            pixmap = QPixmap(LOGO_PATH) 
-            if pixmap.isNull():
-                raise FileNotFoundError 
+        if os.path.exists(LOGO_PATH):
+            pixmap = QPixmap(LOGO_PATH)
+            self.logo_label.setPixmap(pixmap.scaled(90, 90, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        else:
+            self.logo_label.setText("")
+            self.logo_label.setFont(QFont("Arial", 50))
+        self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(self.logo_label)
 
-            self.logo_label.setPixmap(pixmap.scaledToHeight(150, Qt.TransformationMode.SmoothTransformation))
-            self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # 2. Saludo
+        self.time_of_day_label = QLabel("Bienvenido")
+        self.time_of_day_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.time_of_day_label.setStyleSheet("color: #1D1D1F; font-size: 20px; font-weight: bold; margin-bottom: 5px;")
+        card_layout.addWidget(self.time_of_day_label)
 
-        except FileNotFoundError:
-            self.logo_label.setText("LOGO ESCUELA")
-            self.logo_label.setFont(QFont("Arial", 24, QFont.Weight.Bold))
-            self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.logo_label.setStyleSheet("color: #FFFFFF;")
+        # 3. Título
+        title = QLabel("Iniciar Sesión")
+        title.setObjectName("loginTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(title)
 
-        login_layout.addWidget(self.logo_label)
-
-        # Campos de Usuario
-        user_label = QLabel("Correo Electrónico:") 
-        user_label.setObjectName("inputLabel")
+        # 4. Inputs
         self.username_input = QLineEdit()
-        self.username_input.setPlaceholderText("admin@sistema.com") 
-        self.username_input.setObjectName("textInput")
-        login_layout.addWidget(user_label)
-        login_layout.addWidget(self.username_input)
-
-        # Campos de Contraseña
-        password_label = QLabel("Contraseña:")
-        password_label.setObjectName("inputLabel")
+        self.username_input.setPlaceholderText("Correo Electrónico")
+        self.username_input.setFixedHeight(38)
+        
         self.password_input = QLineEdit()
         self.password_input.setPlaceholderText("Contraseña")
         self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.password_input.setObjectName("textInput")
-        login_layout.addWidget(password_label)
-        login_layout.addWidget(self.password_input)
+        self.password_input.setFixedHeight(38)
 
-        # Botones
-        self.login_button = QPushButton("INICIAR SESIÓN")
+        card_layout.addWidget(self.username_input)
+        card_layout.addWidget(self.password_input)
+
+        # 5. Botón Entrar
+        self.login_button = QPushButton("Entrar")
         self.login_button.setObjectName("primaryButton")
+        self.login_button.setFixedHeight(38)
+        self.login_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.login_button.clicked.connect(self.handle_login)
-        login_layout.addWidget(self.login_button)
+        card_layout.addWidget(self.login_button)
 
-        self.forgot_password_button = QPushButton("RECUPERAR CONTRASEÑA")
-        self.forgot_password_button.setObjectName("secondaryButton")
-        self.forgot_password_button.clicked.connect(self.show_forgot_password_message) 
-        login_layout.addWidget(self.forgot_password_button)
+        # 6. Recuperar contraseña
+        self.forgot_password_button = QPushButton("¿Olvidaste tu contraseña?")
+        self.forgot_password_button.setObjectName("linkButton")
+        self.forgot_password_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.forgot_password_button.clicked.connect(self.show_forgot_password_message)
+        card_layout.addWidget(self.forgot_password_button)
 
-        login_layout.addStretch() 
+        # 7. Botón Huella Digital
+        self.btn_fingerprint = QPushButton()
+        # Intentar usar icono si qtawesome está disponible
+        try:
+            import qtawesome as qta
+            self.btn_fingerprint.setIcon(qta.icon('fa5s.fingerprint', color='#1D1D1F'))
+            self.btn_fingerprint.setIconSize(QSize(40, 40))
+        except ImportError:
+            self.btn_fingerprint.setText("Huella")
+            
+        self.btn_fingerprint.setFixedSize(60, 60)
+        self.btn_fingerprint.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: 1px solid #D1D1D6;
+                border-radius: 30px;
+                margin-top: 10px;
+            }
+            QPushButton:hover {
+                background-color: #F0F0F5;
+                border: 1px solid #007AFF;
+            }
+        """)
+        self.btn_fingerprint.setToolTip("Iniciar sesión con Huella Digital")
+        self.btn_fingerprint.setCursor(Qt.CursorShape.PointingHandCursor)
+        
+        # --- CONEXIÓN CRÍTICA AL HILO ---
+        self.btn_fingerprint.clicked.connect(self.iniciar_login_huella) 
+        
+        if not globals().get('WINSDEK_AVAILABLE', False):
+             self.btn_fingerprint.setEnabled(False)
+             self.btn_fingerprint.setToolTip("Biometría no disponible")
 
-        main_layout.addWidget(login_panel, 2)
+        card_layout.addWidget(self.btn_fingerprint, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        main_layout.addWidget(self.login_card)
+        
         self.username_input.returnPressed.connect(self.password_input.setFocus)
         self.password_input.returnPressed.connect(self.handle_login)
 
-        # Panel Derecho: Mensaje de Bienvenida y Fondo
-        self.welcome_panel = QWidget()
-        self.welcome_panel.setObjectName("welcomePanel")
-        welcome_layout = QVBoxLayout(self.welcome_panel)
-        welcome_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        self.time_of_day_label = QLabel()
-        self.time_of_day_label.setFont(QFont("Arial", 28, QFont.Weight.Bold))
-        self.time_of_day_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.time_of_day_label.setStyleSheet("color: white; background-color: rgba(0,0,0,0.6); padding: 15px; border-radius: 10px;")
-
-        # Efecto de sombra para el label de bienvenida
-        shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(20)
-        shadow.setColor(QColor(0, 0, 0, 150))
-        shadow.setXOffset(0)
-        shadow.setYOffset(0)
-        self.time_of_day_label.setGraphicsEffect(shadow)
-
-        welcome_layout.addWidget(self.time_of_day_label)
-        welcome_layout.addStretch() 
-
-        # Texto inferior
-        bottom_text_label = QLabel("Unidad Profesional de Asesoría y Regularización")
-        bottom_text_label.setObjectName("bottomText")
-        bottom_text_label.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter)
-        bottom_text_label.setStyleSheet("color: white; background-color: rgba(0,0,0,0.5); padding: 5px;")
-        welcome_layout.addWidget(bottom_text_label)
-
-        main_layout.addWidget(self.welcome_panel, 3) 
-
     def apply_styles(self):
-        # Estilos inspirados en tu imagen de ejemplo
-        self.setStyleSheet("""
-            QWidget {
-                font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Roboto", "Segoe UI", sans-serif;
-                font-size: 10pt;
-            }
-            #loginPanel {
-                background-color: #3C3C3C; 
-                color: #E0E0E0;
-            }
-            #welcomePanel {
-                background-image: url(background.jpg);
-                background-repeat: no-repeat;
-                background-position: center;
-                background-size: cover; 
-                background-color: #F0F0F0;
-            }
-            #inputLabel {
-                color: #E0E0E0;
-                font-weight: bold;
-                margin-top: 10px;
-                background: transparent;
-            }
-            #textInput {
-                background-color: #4A4A4A;
-                color: #E0E0E0;
-                border: 1px solid #5C5C5C;
-                border-radius: 4px;
-                padding: 8px;
-            }
-            #textInput:focus {
-                border: 1px solid #007ACC;
-            }
-            #primaryButton {
-                background-color: #4CAF50; 
-                color: #FFFFFF;
-                border: none;
-                border-radius: 6px;
-                padding: 10px 20px;
-                font-weight: bold;
-                font-size: 11pt;
-                margin-top: 20px;
-            }
-            #primaryButton:hover {
-                background-color: #45A049;
-            }
-            #primaryButton:pressed {
-                background-color: #397D3D;
-            }
-            #secondaryButton {
-                background-color: #607D8B; 
-                color: #FFFFFF;
-                border: none;
-                border-radius: 6px;
-                padding: 10px 20px;
-                font-weight: bold;
-                font-size: 11pt;
-            }
-            #secondaryButton:hover {
-                background-color: #546E7A;
-            }
-            #secondaryButton:pressed {
-                background-color: #455A64;
-            }
-            #bottomText {
-                font-size: 9pt;
-            }
+        bg_path = BACKGROUND_PATH.replace("\\", "/")
+        if os.path.exists(BACKGROUND_PATH):
+            bg_style = f"border-image: url('{bg_path}') 0 0 0 0 stretch stretch;"
+        else:
+            bg_style = "background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #E0C3FC, stop:1 #8EC5FC);"
+
+        self.setStyleSheet(f"""
+            LoginScreen {{
+                {bg_style}
+                font-family: -apple-system, "SF Pro Display", "Helvetica Neue", sans-serif;
+            }}
+            #loginCard {{
+                background-color: rgba(255, 255, 255, 0.90);
+                border-radius: 20px;
+                border: 1px solid rgba(255, 255, 255, 0.6);
+            }}
+            #loginTitle {{
+                font-size: 22px; font-weight: 700; color: #1D1D1F; background: transparent; margin-bottom: 5px;
+            }}
+            QLineEdit {{
+                background-color: #F5F5F7; border: 1px solid #D1D1D6; border-radius: 8px; padding-left: 12px; font-size: 13px; color: #1D1D1F;
+            }}
+            QLineEdit:focus {{ background-color: #FFFFFF; border: 2px solid #007AFF; }}
+            QPushButton#primaryButton {{
+                background-color: #007AFF; color: white; font-weight: 600; font-size: 14px; border-radius: 8px; border: none;
+            }}
+            QPushButton#primaryButton:hover {{ background-color: #0062CC; }}
+            QPushButton#linkButton {{
+                background-color: transparent; color: #007AFF; border: none; font-size: 12px;
+            }}
+            QPushButton#linkButton:hover {{ text-decoration: underline; }}
+            QLabel {{ background: transparent; }}
         """)
 
     def start_time_update(self):
@@ -1698,91 +1805,121 @@ class LoginScreen(QWidget):
 
     def update_time_of_day_message(self):
         current_hour = QDateTime.currentDateTime().time().hour()
-        if 5 <= current_hour < 12:
-            message = "¡Buenos días!\nBienvenido(a)"
-        elif 12 <= current_hour < 19:
-            message = "¡Buenas tardes!\nBienvenido(a)"
-        else:
-            message = "¡Buenas noches!\nBienvenido(a)"
+        if 5 <= current_hour < 12: message = "¡Buenos días!"
+        elif 12 <= current_hour < 19: message = "¡Buenas tardes!"
+        else: message = "¡Buenas noches!"
         self.time_of_day_label.setText(message)
 
-    def handle_login(self):
-        """Maneja el inicio de sesión consultando la base de datos."""
-        email = self.username_input.text().strip()
-        password = self.password_input.text()
-
-        if not email or not password:
-            QMessageBox.warning(self, "Error de Login", "Email y contraseña no pueden estar vacíos.")
+    # --- MÉTODOS BIOMÉTRICOS ASÍNCRONOS ---
+    
+    def iniciar_login_huella(self):
+        """Inicia el hilo de trabajo para leer la huella SIN CONGELAR."""
+        if not globals().get('WINSDEK_AVAILABLE', False):
             return
 
+        self.btn_fingerprint.setEnabled(False)
+        self.btn_fingerprint.setToolTip("Escaneando... Coloque su dedo en el lector")
+        
+        # Lanzamos el hilo
+        self.login_thread = BiometricWorker()
+        self.login_thread.finished.connect(self.on_huella_login_finished)
+        self.login_thread.start()
+
+    def on_huella_login_finished(self, exito, mensaje):
+        """Recibe el resultado del hilo cuando termina."""
+        self.btn_fingerprint.setEnabled(True)
+        self.btn_fingerprint.setToolTip("Iniciar sesión con Huella Digital")
+
+        if exito:
+            email_objetivo = self.username_input.text().strip()
+            if not email_objetivo:
+                email_objetivo = "admin@sistema.com"
+            
+            self.iniciar_sesion_directa(email_objetivo)
+        else:
+            # No mostramos alerta crítica si solo canceló, para no interrumpir
+            if "Error técnico" in mensaje:
+                 QMessageBox.warning(self, "Error", f"Fallo biométrico: {mensaje}")
+
+    def iniciar_sesion_directa(self, email):
+        """Loguea al usuario validado."""
         try:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
-                # --- INICIO DE MODIFICACIÓN: Seleccionar 'permisos' en lugar de 'rol' ---
+                cursor.execute("SELECT * FROM usuarios WHERE email = ?", (email,))
+                usuario = cursor.fetchone()
+            
+            if usuario:
+                # Verificar permiso de huella
+                tiene_huella = usuario['tiene_huella'] if 'tiene_huella' in usuario.keys() else 0
+                
+                if tiene_huella == 1:
+                    self.accept_login = True
+                    self.username = usuario['email'] 
+                    self.full_username = usuario['nombre_completo']
+                    try:
+                        self.permisos_dict = json.loads(usuario['permisos'])
+                    except:
+                        self.permisos_dict = {"is_admin": False}
+                    self.user_role = "Administrador" if self.permisos_dict.get("is_admin") else "Asesor"
+                    self.close()
+                else:
+                    QMessageBox.warning(self, "Acceso Denegado", 
+                        f"El usuario '{email}' no tiene una huella vinculada.\nEntre con contraseña y regístrela en 'Usuarios'.")
+            else:
+                QMessageBox.warning(self, "Usuario No Encontrado", 
+                    f"No existe el usuario '{email}'.")
+        except Exception as e:
+            print(f"Error login: {e}")
+
+    def handle_login(self):
+        email = self.username_input.text().strip()
+        password = self.password_input.text()
+        if not email or not password:
+            QMessageBox.warning(self, "Error", "Ingrese correo y contraseña.")
+            return
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
                 cursor.execute("SELECT * FROM usuarios WHERE email = ? AND password = ?", (email, password))
                 usuario = cursor.fetchone()
-                
             if usuario:
                 self.accept_login = True
                 self.username = usuario['email'] 
                 self.full_username = usuario['nombre_completo']
-                
-                # Cargar el string JSON de la DB y convertirlo a un diccionario Python
                 try:
                     self.permisos_dict = json.loads(usuario['permisos'])
-                except json.JSONDecodeError:
-                    # Fallback por si el JSON está corrupto
+                except:
                     self.permisos_dict = {"is_admin": False} 
-                
-                # Guardar el rol anterior por compatibilidad (aunque usaremos el dict)
                 self.user_role = "Administrador" if self.permisos_dict.get("is_admin") else "Asesor"
-                # --- FIN DE MODIFICACIÓN ---
-                
                 self.close() 
             else:
-                QMessageBox.warning(self, "Error de Login", "Email o contraseña incorrectos.")
+                QMessageBox.warning(self, "Error", "Credenciales incorrectas.")
                 self.password_input.clear()
-                self.username_input.setFocus() 
-
         except sqlite3.Error as e:
-            mostrar_error(f"Error en la base de datos al iniciar sesión: {e}")
+            mostrar_error(f"Error BD: {e}")
 
     def show_forgot_password_message(self):
-        """Muestra un diálogo para resetear la contraseña de un usuario."""
-        email, ok = QInputDialog.getText(self, "Recuperar Contraseña",
-                                           "Ingrese su correo electrónico para resetear la contraseña:")
-        
+        email, ok = QInputDialog.getText(self, "Recuperar Contraseña", "Ingrese su correo:")
         if ok and email:
             try:
                 with get_db_connection() as conn:
                     cursor = conn.cursor()
-                    cursor.execute("SELECT id, rol FROM usuarios WHERE email = ?", (email,))
+                    cursor.execute("SELECT id FROM usuarios WHERE email = ?", (email,))
                     usuario = cursor.fetchone()
-                    
                 if usuario:
-                    # Protección para el admin ID 1
                     if usuario['id'] == 1:
-                        mostrar_error("No se puede resetear la contraseña del Administrador principal. Contacte al soporte.")
+                        mostrar_error("No se puede resetear al Administrador principal.")
                         return
-
-                    # Generar nueva contraseña
-                    nueva_password = secrets.token_hex(4) 
-                    
+                    nueva_pass = secrets.token_hex(4)
                     with get_db_connection() as conn:
-                        cursor = conn.cursor()
-                        cursor.execute("UPDATE usuarios SET password = ? WHERE email = ?", (nueva_password, email))
-                        conn.commit()
-                    
-                    mostrar_info(f"La contraseña para {email} ha sido reseteada.\n\n"
-                                 f"Su nueva contraseña es: {nueva_password}\n\n"
-                                 "Por favor, úsela para iniciar sesión y cámbiela si es necesario.")
+                         conn.cursor().execute("UPDATE usuarios SET password = ? WHERE email = ?", (nueva_pass, email))
+                         conn.commit()
+                    mostrar_info(f"Nueva contraseña: {nueva_pass}")
                 else:
-                    mostrar_error("No se encontró ningún usuario con ese correo electrónico.")
-                    
-            except sqlite3.Error as e:
-                mostrar_error(f"Error en la base de datos al iniciar sesión: {e}")
+                    mostrar_error("Correo no encontrado.")
             except Exception as e:
-                 mostrar_error(f"Error inesperado: {e}")
+                 mostrar_error(f"Error: {e}")
 
     def closeEvent(self, event):
         if not self.accept_login:
@@ -1975,35 +2112,47 @@ class VentanaPrincipal(QMainWindow):
         self.cambiar_pagina(0)
 
     def crear_barra_superior(self):
-        """Crea la barra de información superior."""
+        """Crea la barra de información superior con iconos reales."""
         widget = QWidget()
         widget.setObjectName("topBar")
-        widget.setFixedHeight(50)
+        widget.setFixedHeight(60) # Un poco más alta para estilo Mac
         layout = QHBoxLayout(widget)
-        layout.setContentsMargins(15, 5, 15, 5)
+        layout.setContentsMargins(20, 0, 20, 0)
 
-        icon_usuario = QLabel("👤")
-        icon_usuario.setFont(QFont("Helvetica Neue", 16))
-        icon_usuario.setObjectName("topBarIcon") 
+        # Icono de Usuario (Círculo)
+        # Usamos un botón sin borde para el icono de usuario
+        btn_user_icon = QPushButton()
+        btn_user_icon.setIcon(qta.icon('fa5s.user-circle', color='#007AFF'))
+        btn_user_icon.setIconSize(QSize(32, 32))
+        btn_user_icon.setStyleSheet("border: none; background: transparent;")
 
         info_layout = QVBoxLayout()
-        info_layout.setSpacing(0)
-        self.lbl_usuario_top = QLabel(f"Usuario: {self.full_username} ({self.user_role})") 
-        self.lbl_usuario_top.setObjectName("topBarUser")
-
-        # ELIMINADAS LAS ETIQUETAS DE FECHA Y HORA
+        info_layout.setSpacing(2)
+        info_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        
+        # Nombre de usuario con fuente SF Pro/Helvetica
+        self.lbl_usuario_top = QLabel(f"{self.full_username}")
+        self.lbl_usuario_top.setStyleSheet("font-weight: bold; font-size: 14px; color: #1D1D1F;")
+        
+        # Rol debajo, más pequeño y gris
+        lbl_rol = QLabel(f"{self.user_role}")
+        lbl_rol.setStyleSheet("font-size: 11px; color: #86868B;")
         
         info_layout.addWidget(self.lbl_usuario_top)
+        info_layout.addWidget(lbl_rol)
 
-        layout.addWidget(icon_usuario)
+        layout.addWidget(btn_user_icon)
+        layout.addSpacing(10)
         layout.addLayout(info_layout)
-
         layout.addStretch()
 
-        # Icono de logout 
-        self.btn_logout = QPushButton("🚪")
-        self.btn_logout.setObjectName("topBarButton")
+        # Botón de Logout con icono de "Puerta/Salida"
+        self.btn_logout = QPushButton()
+        self.btn_logout.setIcon(qta.icon('fa5s.sign-out-alt', color='#FF3B30')) # Rojo Apple para salir
+        self.btn_logout.setIconSize(QSize(20, 20))
         self.btn_logout.setToolTip("Cerrar Sesión")
+        self.btn_logout.setObjectName("secondaryButton") # Usamos el estilo secundario (gris suave)
+        self.btn_logout.setFixedSize(40, 40) # Botón cuadrado redondeado
 
         layout.addWidget(self.btn_logout)
 
@@ -2011,168 +2160,301 @@ class VentanaPrincipal(QMainWindow):
 
 
     def crear_panel_navegacion(self):
-        """Crea el panel de navegación izquierdo."""
-        panel = QWidget()
+        """Crea el panel de navegación izquierdo con iconos qtawesome."""
+        panel = QFrame()
         panel.setObjectName("navBar")
-        panel.setFixedWidth(200)
+        panel.setFixedWidth(220) # Un poco más ancho para elegancia
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 10, 0, 10)
-        layout.setSpacing(5)
+        layout.setContentsMargins(10, 20, 10, 20)
+        layout.setSpacing(8)
 
-        # Contenedor para el botón de Menú
-        menu_frame = QFrame()
-        menu_layout = QVBoxLayout(menu_frame)
-        menu_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Botón de Inicio (siempre visible)
-        self.btn_nav_inicio = QPushButton("🏠  Inicio")
+        # Definir color de iconos (Gris oscuro mac)
+        icon_color = "#1D1D1F"
+
+        # Botón de Inicio
+        self.btn_nav_inicio = QPushButton("  Inicio")
+        self.btn_nav_inicio.setIcon(qta.icon('fa5s.home', color=icon_color))
+        self.btn_nav_inicio.setIconSize(QSize(18, 18))
         self.btn_nav_inicio.setObjectName("navButton")
-        menu_layout.addWidget(self.btn_nav_inicio)
+        self.btn_nav_inicio.setCursor(Qt.CursorShape.PointingHandCursor)
+        layout.addWidget(self.btn_nav_inicio)
         
-        # Botón Menú que abrirá el QMenu
-        self.btn_menu = QPushButton("☰ Menú")
+        # Botón Menú
+        self.btn_menu = QPushButton("  Menú General")
+        self.btn_menu.setIcon(qta.icon('fa5s.th-large', color=icon_color))
+        self.btn_menu.setIconSize(QSize(18, 18))
         self.btn_menu.setObjectName("navButton")
+        self.btn_menu.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_menu.clicked.connect(self.show_navigation_menu)
-        menu_layout.addWidget(self.btn_menu)
+        layout.addWidget(self.btn_menu)
         
-        layout.addWidget(menu_frame)
-        
-        # Spacer para empujar el menú hacia arriba y el de Configuración hacia abajo
+        # Spacer
         spacer = QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
         layout.addItem(spacer)
 
-        # Lista completa de botones (solo se usan para el QMenu y el QStackedWidget)
-        self.btn_nav_inscripcion = QPushButton("📝  Nueva Inscripción")
-        self.btn_nav_pagos = QPushButton("💵  Registro de Pagos")
-        self.btn_nav_lista_alumnos = QPushButton("👥  Lista de Alumnos") 
-        self.btn_nav_gestion_cursos = QPushButton("📚  Gestionar Cursos")
-        self.btn_nav_gestion_usuarios = QPushButton("👤  Gestionar Usuarios")
-        self.btn_nav_config = QPushButton("⚙️  Configuración")
+        # Botón Configuración (al fondo)
+        self.btn_nav_config = QPushButton("  Configuración")
+        self.btn_nav_config.setIcon(qta.icon('fa5s.cog', color=icon_color))
+        self.btn_nav_config.setIconSize(QSize(18, 18))
+        self.btn_nav_config.setObjectName("navButton") # Ojo: Asegúrate de tener estilos para navButton
+        self.btn_nav_config.setCursor(Qt.CursorShape.PointingHandCursor)
         
-        self.nav_buttons = [
-            self.btn_nav_inicio, 
-            self.btn_nav_inscripcion, 
-            self.btn_nav_pagos,
-            self.btn_nav_lista_alumnos,
-            self.btn_nav_gestion_cursos,
-            self.btn_nav_gestion_usuarios,
-            self.btn_nav_config
-        ]
+        # Solo mostrar si es admin (lógica original)
+        if self.permisos.get('can_access_settings') or self.permisos.get('is_admin'):
+             layout.addWidget(self.btn_nav_config)
+             
+        # Lista de botones para gestión de estilo
+        self.nav_buttons = [self.btn_nav_inicio, self.btn_menu, self.btn_nav_config]
         
-        # Asegurarse de que solo se muestren Inicio y Menú
-        self.btn_nav_inscripcion.setVisible(False)
-        self.btn_nav_pagos.setVisible(False)
-        self.btn_nav_lista_alumnos.setVisible(False)
-        self.btn_nav_gestion_cursos.setVisible(False)
-        self.btn_nav_gestion_usuarios.setVisible(False)
-        self.btn_nav_config.setVisible(False)
-        
-        # Aplicar el mismo ObjectName a todos los botones para el estilo
-        for btn in self.nav_buttons:
-            if btn: 
-                btn.setObjectName("navButton")
+        # Inicializar los botones ocultos (para el StackedWidget lógica original)
+        self.btn_nav_inscripcion = QPushButton()
+        self.btn_nav_pagos = QPushButton()
+        self.btn_nav_lista_alumnos = QPushButton()
+        self.btn_nav_gestion_cursos = QPushButton()
+        self.btn_nav_gestion_usuarios = QPushButton()
 
         return panel
 
     def show_navigation_menu(self):
-        """Muestra el menú contextual con las opciones de navegación."""
+        """Muestra el menú contextual con iconos."""
         menu = QMenu(self)
+        # Estilo del menú (opcional, para hacerlo blanco y limpio)
+        menu.setStyleSheet("""
+            QMenu { background-color: #FFFFFF; border: 1px solid #E5E5E5; border-radius: 10px; padding: 5px; }
+            QMenu::item { padding: 8px 20px; border-radius: 6px; color: #1D1D1F; }
+            QMenu::item:selected { background-color: #007AFF; color: white; }
+            QMenu::separator { height: 1px; background: #E5E5E5; margin: 5px 10px; }
+        """)
         
-        # Acciones principales
-        menu.addAction("📝 Nueva Inscripción", lambda: self.cambiar_pagina(1))
-        menu.addAction("💵 Registro de Pagos", lambda: self.cambiar_pagina(2))
-        menu.addAction("👥 Lista de Alumnos", lambda: self.cambiar_pagina(3))
+        # Helper para añadir acción con icono
+        def add_action(text, icon_name, callback):
+            icon = qta.icon(icon_name, color="#1D1D1F")
+            action = menu.addAction(icon, text)
+            action.triggered.connect(callback)
+
+        # Acciones
+        add_action("Nueva Inscripción", 'fa5s.user-plus', lambda: self.cambiar_pagina(1))
+        add_action("Registro de Pagos", 'fa5s.credit-card', lambda: self.cambiar_pagina(2))
+        add_action("Lista de Alumnos", 'fa5s.users', lambda: self.cambiar_pagina(3))
         
-        # Sección de Administración (solo si es Admin)
-        if self.permisos.get('is_admin'): # O usar permisos específicos
+        if self.permisos.get('is_admin'):
             menu.addSeparator()
-            menu.addAction("📚 Gestionar Cursos", lambda: self.cambiar_pagina(4))
-            menu.addAction("👤 Gestionar Usuarios", lambda: self.cambiar_pagina(5))
-            menu.addAction("👨‍💼 Gestionar Personal", lambda: self.cambiar_pagina(9))
-            menu.addAction("📖 Gestionar Materias", lambda: self.cambiar_pagina(6))
-            menu.addAction("📊 Asignar Calificaciones", lambda: self.cambiar_pagina(7))
-            menu.addSeparator()
-            menu.addAction("⚙️ Configuración", lambda: self.cambiar_pagina(8))
-            
-        # Mostrar el menú justo debajo del botón "Menú"
-        # Usamos mapToGlobal para obtener la posición global del botón
-        # Nota: Necesitas importar QPoint
+            add_action("Gestionar Cursos", 'fa5s.book', lambda: self.cambiar_pagina(4))
+            add_action("Gestionar Usuarios", 'fa5s.user-shield', lambda: self.cambiar_pagina(5))
+            add_action("Gestionar Personal", 'fa5s.id-badge', lambda: self.cambiar_pagina(9))
+            add_action("Gestionar Materias", 'fa5s.layer-group', lambda: self.cambiar_pagina(6))
+            add_action("Calificaciones", 'fa5s.graduation-cap', lambda: self.cambiar_pagina(7))
+
+        # Mostrar menú
         try:
-            point = self.btn_menu.mapToGlobal(QPoint(0, self.btn_menu.height()))
+            point = self.btn_menu.mapToGlobal(QPoint(0, self.btn_menu.height() + 5))
             menu.exec(point)
         except AttributeError:
-             # Fallback si QPoint no está definido o hay error de widget
-             menu.exec(self.mapToGlobal(QPoint(0, self.height() / 2)))
+            menu.exec(self.mapToGlobal(QPoint(0, 0)))
 
 
     def crear_pagina_inicio(self):
-        """Crea la página de bienvenida con accesos directos."""
+        """Crea la página de bienvenida guardando referencias a los contadores."""
         widget = QWidget()
         widget.setObjectName("contentPage")
-        layout = QVBoxLayout(widget)
-        layout.setContentsMargins(25, 25, 25, 25)
-        layout.setSpacing(20)
+        
+        layout_principal = QVBoxLayout(widget)
+        layout_principal.setContentsMargins(0,0,0,0)
+        
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
+        layout.setContentsMargins(40, 40, 40, 40)
+        layout.setSpacing(30)
 
-        lbl_bienvenida = QLabel(f"¡¡BIENVENIDO(A), {self.full_username}!!")
+        # Encabezado
+        header_layout = QHBoxLayout()
+        lbl_bienvenida = QLabel(f"Panel de Control")
         lbl_bienvenida.setObjectName("welcomeTitle")
-        lbl_bienvenida.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(lbl_bienvenida)
+        lbl_bienvenida.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        header_layout.addWidget(lbl_bienvenida)
+        
+        fecha_hoy = datetime.date.today().strftime("%d de %B, %Y")
+        lbl_fecha = QLabel(fecha_hoy)
+        lbl_fecha.setStyleSheet("color: #86868B; font-size: 14px; font-weight: 500;")
+        header_layout.addStretch()
+        header_layout.addWidget(lbl_fecha)
+        layout.addLayout(header_layout)
 
-        lbl_accesos = QLabel("Accesos directos")
+        # Estadísticas
+        num_alumnos, dinero_mes, num_deudores = self.obtener_resumen_estadisticas()
+        
+        stats_layout = QHBoxLayout()
+        stats_layout.setSpacing(20)
+        
+        # CAMBIO CLAVE: Guardamos las etiquetas en variables 'self'
+        card_alumnos, self.lbl_stat_alumnos = self.crear_tarjeta_estadistica("Total Alumnos", num_alumnos, "fa5s.user-graduate", "#007AFF")
+        card_dinero, self.lbl_stat_dinero = self.crear_tarjeta_estadistica("Ingresos (Mes)", f"$ {dinero_mes:,.2f}", "fa5s.dollar-sign", "#34C759")
+        card_deuda, self.lbl_stat_deuda = self.crear_tarjeta_estadistica("Inscrip. con Adeudo", num_deudores, "fa5s.exclamation-circle", "#FF9500")
+        
+        stats_layout.addWidget(card_alumnos)
+        stats_layout.addWidget(card_dinero)
+        stats_layout.addWidget(card_deuda)
+        
+        layout.addLayout(stats_layout)
+
+        # Accesos Directos
+        lbl_accesos = QLabel("Accesos Rápidos")
         lbl_accesos.setObjectName("shortcutsTitle")
         layout.addWidget(lbl_accesos)
 
-        # Contenedor de accesos directos
         layout_accesos = QHBoxLayout()
-        layout_accesos.setSpacing(30)
+        layout_accesos.setSpacing(20)
+        layout_accesos.setAlignment(Qt.AlignmentFlag.AlignLeft)
 
-        # "Nueva Inscripción" va a página 1 (formulario)
-        btn_sc_inscribir = self.crear_boton_acceso("📝", "Nueva Inscripción", lambda: self.cambiar_pagina(1))
-        # "Registrar Pago" va a página 2
-        btn_sc_pagar = self.crear_boton_acceso("💵", "Registrar Pago", lambda: self.cambiar_pagina(2))
-        # "Consultar Alumnos" va a página 3 (lista alumnos)
-        btn_sc_gestionar = self.crear_boton_acceso("👥", "Consultar Alumnos", lambda: self.cambiar_pagina(3))
+        btn_sc_inscribir = self.crear_boton_acceso('fa5s.user-plus', "Nueva Inscripción", lambda: self.cambiar_pagina(1))
+        btn_sc_pagar = self.crear_boton_acceso('fa5s.credit-card', "Registrar Pago", lambda: self.cambiar_pagina(2))
+        btn_sc_gestionar = self.crear_boton_acceso('fa5s.users', "Consultar Alumnos", lambda: self.cambiar_pagina(3))
         
         layout_accesos.addWidget(btn_sc_inscribir)
         layout_accesos.addWidget(btn_sc_pagar)
         layout_accesos.addWidget(btn_sc_gestionar)
         
-        # --- AÑADIR ACCESOS DE ADMIN ---
         if self.permisos.get('can_manage_courses') or self.permisos.get('is_admin'):
-            btn_sc_cursos = self.crear_boton_acceso("📚", "Gestionar Cursos", lambda: self.cambiar_pagina(4))
+            btn_sc_cursos = self.crear_boton_acceso('fa5s.book', "Cursos", lambda: self.cambiar_pagina(4))
             layout_accesos.addWidget(btn_sc_cursos)
-            btn_sc_personal = self.crear_boton_acceso("👨‍💼", "Gestionar Personal", lambda: self.cambiar_pagina(9))
-            layout_accesos.addWidget(btn_sc_personal)
-        if self.permisos.get('can_manage_users') or self.permisos.get('is_admin'):
-            btn_sc_usuarios = self.crear_boton_acceso("👤", "Gestionar Usuarios", lambda: self.cambiar_pagina(5))
-            layout_accesos.addWidget(btn_sc_usuarios)
             
-        layout_accesos.addStretch()
+        if self.permisos.get('can_manage_users') or self.permisos.get('is_admin'):
+            btn_sc_usuarios = self.crear_boton_acceso('fa5s.user-shield', "Usuarios", lambda: self.cambiar_pagina(5))
+            layout_accesos.addWidget(btn_sc_usuarios)
 
         layout.addLayout(layout_accesos)
         layout.addStretch()
+
+        scroll.setWidget(content_widget)
+        layout_principal.addWidget(scroll)
+        
         return widget
     
-    def crear_boton_acceso(self, icono, texto, on_click):
-        """Crea un botón de acceso directo (icono + texto)."""
-        widget = QWidget()
-        widget.setObjectName("shortcutButton")
-        layout = QVBoxLayout(widget)
+    def actualizar_dashboard(self):
+        """Recarga los datos de las tarjetas estadísticas."""
+        if hasattr(self, 'lbl_stat_alumnos'):
+            # 1. Consultar base de datos
+            num_alumnos, dinero_mes, num_deudores = self.obtener_resumen_estadisticas()
+            
+            # 2. Actualizar las etiquetas
+            self.lbl_stat_alumnos.setText(str(num_alumnos))
+            self.lbl_stat_dinero.setText(f"$ {dinero_mes:,.2f}")
+            self.lbl_stat_deuda.setText(str(num_deudores))
+    
+    def obtener_resumen_estadisticas(self):
+        """Consulta la BD para obtener métricas rápidas."""
+        total_alumnos = 0
+        ingresos_mes = 0.0
+        total_deudores = 0
+        
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                
+                # 1. Total de Alumnos
+                cursor.execute("SELECT COUNT(*) FROM alumnos")
+                total_alumnos = cursor.fetchone()[0]
+                
+                # 2. Ingresos del Mes Actual
+                fecha_hoy = datetime.date.today()
+                mes_actual_str = fecha_hoy.strftime("%Y-%m") # Ej: "2023-10"
+                # Filtramos fechas que empiecen con "YYYY-MM"
+                cursor.execute("SELECT SUM(monto) FROM pagos WHERE fecha_pago LIKE ?", (f"{mes_actual_str}%",))
+                resultado_pagos = cursor.fetchone()[0]
+                ingresos_mes = resultado_pagos if resultado_pagos else 0.0
+                
+                # 3. Inscripciones con Adeudo (Pendiente o Parcial)
+                # Contamos cuántas inscripciones tienen saldo pendiente
+                cursor.execute("SELECT COUNT(*) FROM inscripciones WHERE monto_pagado < monto_total")
+                total_deudores = cursor.fetchone()[0]
 
-        btn = QPushButton(icono)
-        btn.setObjectName("shortcutIcon")
-        btn.setFixedSize(100, 100)
+        except Exception as e:
+            print(f"Error calculando estadísticas: {e}")
+            
+        return total_alumnos, ingresos_mes, total_deudores
+    
+    def crear_tarjeta_estadistica(self, titulo, valor, icono_nombre, color_icono):
+        """Crea un widget tipo tarjeta y DEVUELVE LA ETIQUETA DEL VALOR."""
+        tarjeta = QFrame()
+        tarjeta.setObjectName("statCard")
+        tarjeta.setStyleSheet(f"""
+            #statCard {{
+                background-color: #FFFFFF;
+                border-radius: 12px;
+                border: 1px solid #E5E5E5;
+            }}
+            #statValue {{
+                font-size: 24px; font-weight: 700; color: #1D1D1F;
+            }}
+            #statTitle {{
+                font-size: 13px; font-weight: 500; color: #86868B;
+            }}
+        """)
+        
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(20)
+        shadow.setColor(QColor(0, 0, 0, 15))
+        shadow.setOffset(0, 4)
+        tarjeta.setGraphicsEffect(shadow)
+        
+        layout = QHBoxLayout(tarjeta)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        text_layout = QVBoxLayout()
+        text_layout.setSpacing(5)
+        
+        lbl_titulo = QLabel(titulo)
+        lbl_titulo.setObjectName("statTitle")
+        
+        lbl_valor = QLabel(str(valor))
+        lbl_valor.setObjectName("statValue")
+        
+        text_layout.addWidget(lbl_titulo)
+        text_layout.addWidget(lbl_valor)
+        
+        btn_icon = QPushButton()
+        btn_icon.setIcon(qta.icon(icono_nombre, color=color_icono))
+        btn_icon.setIconSize(QSize(32, 32))
+        btn_icon.setStyleSheet("border: none; background: transparent;")
+        
+        layout.addLayout(text_layout)
+        layout.addStretch()
+        layout.addWidget(btn_icon)
+        
+        # CAMBIO CLAVE: Devolvemos la tarjeta Y la etiqueta del número
+        return tarjeta, lbl_valor
+    
+    def crear_boton_acceso(self, icon_name, texto, on_click):
+        """Crea un botón de acceso directo estilo macOS."""
+        widget = QWidget()
+        widget.setObjectName("shortcutButton") # Este ID debe tener estilo en el CSS
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(15, 25, 15, 25)
+        layout.setSpacing(15)
+
+        # Botón transparente que contiene solo el icono
+        btn = QPushButton()
+        btn.setIcon(qta.icon(icon_name, color="#007AFF")) # Azul Apple
+        btn.setIconSize(QSize(50, 50)) # Icono grande
+        btn.setStyleSheet("border: none; background: transparent;")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.clicked.connect(on_click)
 
         lbl = QLabel(texto)
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl.setObjectName("shortcutLabel")
-
+        lbl.setObjectName("shortcutLabel") # Texto seminegrita
+        
         layout.addWidget(btn)
         layout.addWidget(lbl)
-
+        
+        # Hacemos que todo el widget sea clicable (opcional, requiere event filter, 
+        # pero por ahora el botón cubre la función principal)
+        
         return widget
-
 
     def _acceso(self, icono, texto, on_click):
         """Crea un botón de acceso directo (icono + texto)."""
@@ -2212,6 +2494,7 @@ class VentanaPrincipal(QMainWindow):
         # 3. Lógica de preparación de datos (IGUAL QUE ANTES, PERO SIN setCurrentIndex)
         if index == 0: 
             boton_activo = self.btn_nav_inicio
+            self.actualizar_dashboard()
         elif index == 1: 
             boton_activo = self.btn_nav_inscripcion
             self.cargar_combo_curso_registro() 
@@ -2260,7 +2543,7 @@ class VentanaPrincipal(QMainWindow):
         
         # Creamos la animación de deslizamiento
         self.animacion = QPropertyAnimation(widget_entrante, b"pos")
-        self.animacion.setDuration(300)  # Duración en milisegundos (ajustable)
+        self.animacion.setDuration(400)  # Duración en milisegundos (ajustable)
         self.animacion.setStartValue(QPoint(ancho, 0))
         self.animacion.setEndValue(QPoint(0, 0))
         self.animacion.setEasingCurve(QEasingCurve.Type.InOutCubic) # Curva de aceleración suave
@@ -2523,13 +2806,10 @@ class VentanaPrincipal(QMainWindow):
         widget.setObjectName("contentPage")
         widget.setContentsMargins(15, 15, 15, 15) 
 
-        # Lado izquierdo: Registrar Pago
+        # --- PANEL IZQUIERDO: Registrar Pago ---
         left_panel = QGroupBox("Registrar Nuevo Pago")
         left_layout = QFormLayout()
         
-        # --- ELIMINADO EL CAMPO DE BÚSQUEDA ---
-        
-        # El combo box ahora es la lista filtrada por la entrada de búsqueda
         self.combo_inscripcion_pago = QComboBox()
         self.combo_inscripcion_pago.setPlaceholderText("--- Seleccione una inscripción ---")
         
@@ -2550,7 +2830,6 @@ class VentanaPrincipal(QMainWindow):
         self.btn_registrar_pago = QPushButton("Registrar Pago")
         self.btn_registrar_pago.setObjectName("primaryButton") 
 
-        # Se usa el QComboBox estándar como única forma de selección
         left_layout.addRow(QLabel("Inscripción (Alumno - Curso):"), self.combo_inscripcion_pago)
         left_layout.addRow(QLabel("Monto Total:"), self.lbl_pago_total)
         left_layout.addRow(QLabel("Monto Pagado:"), self.lbl_pago_pagado)
@@ -2560,16 +2839,31 @@ class VentanaPrincipal(QMainWindow):
         left_layout.addRow(self.btn_registrar_pago)
         left_panel.setLayout(left_layout)
 
-        # Lado derecho: Historial de Pagos de la Inscripción
+        # --- PANEL DERECHO: Historial y Botón de Reimpresión ---
         right_panel = QGroupBox("Historial de Pagos")
         right_layout = QVBoxLayout()
-        self.tabla_historial_pagos = QTableWidget(0, 3)
-        self.tabla_historial_pagos.setHorizontalHeaderLabels(["Fecha", "Monto", "Método"])
-        self.tabla_historial_pagos.horizontalHeader().setStretchLastSection(True)
+        
+        # Tabla (Configurada para 4 columnas para ocultar el ID)
+        self.tabla_historial_pagos = QTableWidget(0, 4)
+        self.tabla_historial_pagos.setHorizontalHeaderLabels(["ID", "Fecha", "Monto", "Método"])
+        self.tabla_historial_pagos.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.tabla_historial_pagos.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.tabla_historial_pagos.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.tabla_historial_pagos.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.tabla_historial_pagos.hideColumn(0) # Ocultamos la columna 0 (ID)
+        
+        # ESTE ES EL BOTÓN QUE FALTABA
+        self.btn_reimprimir_recibo = QPushButton("🖨️ Reimprimir Recibo Seleccionado")
+        self.btn_reimprimir_recibo.setObjectName("secondaryButton") # Estilo gris
+        # Asegúrate de haber pegado el método 'reimprimir_recibo_seleccionado' en la clase
+        self.btn_reimprimir_recibo.clicked.connect(self.reimprimir_recibo_seleccionado)
+        
+        # AÑADIR A LA PANTALLA
         right_layout.addWidget(self.tabla_historial_pagos)
+        right_layout.addWidget(self.btn_reimprimir_recibo) # <--- AQUÍ SE AGREGA AL LAYOUT
         right_panel.setLayout(right_layout)
 
+        # --- UNIR PANELES ---
         main_layout.addWidget(left_panel, 1)
         main_layout.addWidget(right_panel, 2)
         widget.setLayout(main_layout)
@@ -2608,9 +2902,21 @@ class VentanaPrincipal(QMainWindow):
         layout_tabla.addLayout(filter_layout)
         # --- FIN NUEVO: FILTRO DE CURSO ---
         
-        self.tabla_alumnos = QTableWidget(0, 6) # Modificado a 6 columnas: ID, Nombre, ApellidoP, ApellidoM, Email, Curso
+        self.tabla_alumnos = QTableWidget(0, 6)
         self.tabla_alumnos.setHorizontalHeaderLabels(["ID", "Nombre(s)", "Ap. Paterno", "Ap. Materno", "Email", "Curso Inscrito"])
-        self.tabla_alumnos.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        
+        # --- MEJORAS DE ESTILO MACOS ---
+        self.tabla_alumnos.setShowGrid(False)                            
+        self.tabla_alumnos.setAlternatingRowColors(True)                 
+        self.tabla_alumnos.verticalHeader().setVisible(False)            
+        self.tabla_alumnos.setFrameShape(QFrame.Shape.NoFrame)           
+        self.tabla_alumnos.setFocusPolicy(Qt.FocusPolicy.NoFocus)        
+        
+        # Configuración funcional (igual que antes)
+        header = self.tabla_alumnos.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)      
+        header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter) 
+        
         self.tabla_alumnos.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.tabla_alumnos.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.tabla_alumnos.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
@@ -2929,6 +3235,27 @@ class VentanaPrincipal(QMainWindow):
         # --- FIN DE MODIFICACIÓN ---
 
         # Botones de acción del formulario
+        
+        lbl_titulo_seguridad = QLabel("---- Seguridad Biométrica ----")
+        lbl_titulo_seguridad.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout_form.addWidget(lbl_titulo_seguridad)
+
+        self.btn_huella_usuario = QPushButton("👆 Vincular Huella Digital")
+        self.btn_huella_usuario.setObjectName("secondaryButton") # Estilo gris
+        self.btn_huella_usuario.clicked.connect(self.registrar_huella_usuario)
+        
+        # Validar si tenemos la librería disponible (WINSDEK_AVAILABLE debe estar definida al inicio del archivo)
+        if not globals().get('WINSDEK_AVAILABLE', False):
+             self.btn_huella_usuario.setEnabled(False)
+             self.btn_huella_usuario.setToolTip("Librería biométrica no disponible")
+
+        self.lbl_status_huella_usuario = QLabel("Estado: No Vinculada")
+        self.lbl_status_huella_usuario.setStyleSheet("color: #86868B; font-size: 11px; font-weight: 600;")
+        self.lbl_status_huella_usuario.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        layout_form.addWidget(self.btn_huella_usuario)
+        layout_form.addWidget(self.lbl_status_huella_usuario)
+        
         self.btn_guardar_usuario = QPushButton("Guardar Usuario")
         self.btn_guardar_usuario.setObjectName("primaryButton")
         self.btn_guardar_usuario.clicked.connect(self.guardar_usuario) 
@@ -2970,9 +3297,62 @@ class VentanaPrincipal(QMainWindow):
         layout_usuario_tabla.addWidget(self.btn_eliminar_usuario)
 
         layout_main.addWidget(panel_usuario_form)
-        layout_main.addWidget(panel_usuario_tabla, 1) 
+        layout_main.addWidget(panel_usuario_tabla, 1)
         
         return widget
+    
+    # --- MÉTODOS PARA GESTIÓN DE USUARIOS (HUELLA) ---
+
+    def registrar_huella_usuario(self):
+        """Inicia el proceso de huella en la pestaña de Usuarios."""
+        print("Clic en botón Vincular Huella") # Debug
+
+        # 1. Verificar librería
+        if not globals().get('WINSDEK_AVAILABLE', False):
+            mostrar_error("El soporte para Windows Hello no está instalado.")
+            return
+
+        # 2. UI de espera
+        self.btn_huella_usuario.setEnabled(False)
+        self.btn_huella_usuario.setText("Iniciando servicio de Windows...")
+        QApplication.processEvents() # Forzar actualización visual
+
+        # 3. Iniciar hilo (USANDO self. PARA EVITAR QUE SE CIERRE SOLO)
+        # Usamos un nombre de variable único para evitar conflictos
+        self.worker_registro_huella = BiometricWorker() 
+        
+        # Conectamos la señal
+        self.worker_registro_huella.finished.connect(self.on_registro_huella_finished)
+        
+        # Iniciamos
+        self.worker_registro_huella.start()
+        print("Hilo de registro arrancado...")
+
+    def on_registro_huella_finished(self, exito, mensaje):
+        """Se ejecuta automáticamente cuando termina de leer la huella."""
+        # 1. Restaurar botón a su estado normal
+        self.btn_huella_usuario.setEnabled(True)
+        self.btn_huella_usuario.setText("👆 Vincular Huella Digital")
+
+        # 2. Mostrar resultado visualmente
+        if exito:
+            self.lbl_status_huella_usuario.setText("Estado: LISTA PARA GUARDAR ✅")
+            self.lbl_status_huella_usuario.setStyleSheet("color: #34C759; font-weight: bold;")
+            
+            # Marcamos la bandera para que al dar "Guardar Usuario" se registre en la BD
+            self.huella_usuario_temporal = True 
+            
+            mostrar_info("Huella leída correctamente.\n\nIMPORTANTE: No olvide presionar el botón azul 'Actualizar/Guardar Usuario' para confirmar el cambio.")
+        else:
+            # Si falló
+            self.lbl_status_huella_usuario.setText("Estado: Error de lectura ❌")
+            self.lbl_status_huella_usuario.setStyleSheet("color: #FF3B30;") # Rojo
+            
+            if "Error técnico" in mensaje:
+                 QMessageBox.warning(self, "Error", f"Fallo técnico: {mensaje}")
+            else:
+                 # Solo aviso si fue cancelación o no coincidencia
+                 pass
     
     # ---- (PÁGINA 6: GESTIONAR MATERIAS - Esta debe estar aquí) ----
     def crear_pagina_gestion_materias(self):
@@ -4099,15 +4479,14 @@ class VentanaPrincipal(QMainWindow):
     def cargar_historial_pagos(self, inscripcion_id):
         """Rellena la tabla con el historial de pagos de una inscripción."""
         try: 
-            # 1. Limpiar la tabla si existe
             if hasattr(self, 'tabla_historial_pagos'):
                 self.tabla_historial_pagos.setRowCount(0)
             
-            # 2. Conectar a la BD y cargar datos
             with get_db_connection() as conn:
                 cursor = conn.cursor()
+                # Seleccionamos también el ID del pago
                 cursor.execute("""
-                SELECT fecha_pago, monto, metodo_pago
+                SELECT id, fecha_pago, monto, metodo_pago
                 FROM pagos
                 WHERE inscripcion_id = ?
                 ORDER BY fecha_pago DESC
@@ -4115,20 +4494,24 @@ class VentanaPrincipal(QMainWindow):
 
                 pagos = cursor.fetchall()
 
-                # 3. Rellenar la tabla (solo si existe)
                 if hasattr(self, 'tabla_historial_pagos'):
                     self.tabla_historial_pagos.setRowCount(len(pagos))
                     for row, pago in enumerate(pagos): 
-                        self.tabla_historial_pagos.setItem(row, 0, QTableWidgetItem(pago['fecha_pago']))
+                        # Columna 0: ID (Oculto)
+                        self.tabla_historial_pagos.setItem(row, 0, QTableWidgetItem(str(pago['id'])))
+                        # Columna 1: Fecha
+                        self.tabla_historial_pagos.setItem(row, 1, QTableWidgetItem(pago['fecha_pago']))
+                        # Columna 2: Monto
                         item_monto = QTableWidgetItem(f"$ {pago['monto']:.2f}")
                         item_monto.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                        self.tabla_historial_pagos.setItem(row, 1, item_monto)
-                        self.tabla_historial_pagos.setItem(row, 2, QTableWidgetItem(pago['metodo_pago']))
+                        self.tabla_historial_pagos.setItem(row, 2, item_monto)
+                        # Columna 3: Método
+                        self.tabla_historial_pagos.setItem(row, 3, QTableWidgetItem(pago['metodo_pago']))
 
         except sqlite3.Error as e:
             mostrar_error(f"Error al cargar historial de pagos: {e}")
         except AttributeError:
-            pass # Ignorar si el widget no existe
+            pass
 
     def registrar_pago(self):
         """Registra un nuevo pago en la BD y genera la siguiente mensualidad si aplica."""
@@ -4264,6 +4647,69 @@ class VentanaPrincipal(QMainWindow):
             mostrar_error(f"Error al registrar el pago: {e}")
         except Exception as e:
             mostrar_error(f"Error inesperado al generar recibo: {e}\n{traceback.format_exc()}")
+    
+    def reimprimir_recibo_seleccionado(self):
+        """Genera nuevamente el recibo para un pago histórico."""
+        selected_items = self.tabla_historial_pagos.selectedItems()
+        if not selected_items:
+            mostrar_error("Por favor, seleccione un pago de la lista (derecha) para reimprimir.")
+            return
+
+        row = self.tabla_historial_pagos.currentRow()
+        pago_id = int(self.tabla_historial_pagos.item(row, 0).text()) # Obtenemos el ID oculto
+
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                
+                # 1. Obtener datos del pago
+                cursor.execute("SELECT * FROM pagos WHERE id = ?", (pago_id,))
+                pago_data = cursor.fetchone()
+                
+                if not pago_data:
+                    mostrar_error("No se encontró el registro del pago.")
+                    return
+
+                # 2. Obtener datos de la inscripción, alumno y curso asociados
+                insc_id = pago_data['inscripcion_id']
+                cursor.execute("""
+                    SELECT i.monto_total, i.monto_pagado,
+                           a.nombres, a.apellido_paterno, a.apellido_materno, 
+                           c.nombre_curso
+                    FROM inscripciones i
+                    JOIN alumnos a ON i.alumno_id = a.id
+                    JOIN cursos c ON i.curso_id = c.id
+                    WHERE i.id = ?
+                """, (insc_id,))
+                datos_extra = cursor.fetchone()
+
+            # 3. Construir el diccionario de información
+            pago_info = {
+                "inscripcion_id": insc_id,
+                "fecha_pago": pago_data['fecha_pago'],
+                "monto_pagado_recibo": pago_data['monto'],
+                "metodo_pago": pago_data['metodo_pago'],
+                "nombre_alumno": f"{datos_extra['nombres']} {datos_extra['apellido_paterno']} {datos_extra['apellido_materno']}",
+                "nombre_curso": datos_extra['nombre_curso'],
+                "monto_total_curso": datos_extra['monto_total'],
+                "monto_pagado_total": datos_extra['monto_pagado'],
+                "saldo_pendiente": datos_extra['monto_total'] - datos_extra['monto_pagado']
+            }
+
+            # 4. Preguntar tipo de recibo
+            opciones_recibo = ["Ticket (Impresora Térmica)", "Recibo PDF (Completo)"]
+            opcion_elegida, ok = QInputDialog.getItem(self, "Reimprimir Recibo",
+                                                      "¿Qué tipo de recibo desea generar?",
+                                                      opciones_recibo, 0, False)
+            
+            if ok:
+                if opcion_elegida == "Recibo PDF (Completo)":
+                    self.generar_ticket_pago_pdf(pago_info)
+                elif opcion_elegida == "Ticket (Impresora Térmica)":
+                    self.generar_ticket_termico_pdf(pago_info)
+
+        except Exception as e:
+            mostrar_error(f"Error al reimprimir recibo: {e}")
 
     # --- FUNCIÓN NUEVA ---
     def actualizar_opciones_pago(self):
@@ -5392,9 +5838,9 @@ class VentanaPrincipal(QMainWindow):
     def generar_credencial_pdf(self):
         """Genera dos caras de la credencial (Anverso y Reverso) en una sola página de tamaño carta (letter)."""
         
-        # --- DEFINICIONES CRÍTICAS DE TAMAÑO ---
+        # --- 1. DEFINICIONES CRÍTICAS DE TAMAÑO ---
         PAGE_WIDTH, PAGE_HEIGHT = letter 
-        GAFETE_W, GAFETE_H = 85.6 * mm, 53.98 * mm # Medida estándar CR80 (la que ya usabas)
+        GAFETE_W, GAFETE_H = 85.6 * mm, 53.98 * mm # Medida estándar CR80
         
         # Margen para centrar los gafetes en la hoja carta (215.9mm x 279.4mm)
         MARGIN_X = (PAGE_WIDTH - (GAFETE_W * 2 + 10 * mm)) / 2 
@@ -5499,25 +5945,62 @@ class VentanaPrincipal(QMainWindow):
                     canvas_obj.setFillColorRGB(0.2, 0.2, 0.2)
                     canvas_obj.setFont("Helvetica-Bold", 7)
                     canvas_obj.drawString(30*mm, 34*mm, "ALUMNO(A):")
-                    canvas_obj.setFont("Helvetica", 9)
-                    nombre_completo = f"{datos['nombres']} {datos['apellido_paterno']} {datos['apellido_materno']}"
-                    if len(nombre_completo) > 25: canvas_obj.setFont("Helvetica", 8)
-                    canvas_obj.drawString(30*mm, 30*mm, nombre_completo)
+                    
+                    # --- BLOQUE DE NOMBRE INTELIGENTE (CON SALTO DE LÍNEA) ---
+                    nombre_completo = f"{datos['nombres']} {datos['apellido_paterno']} {datos['apellido_materno']}".upper()
+                    
+                    # 1. Definir el ancho máximo disponible (aprox 52mm)
+                    max_width = 52 * mm 
+                    
+                    # 2. Configuración inicial
+                    font_size = 10
+                    canvas_obj.setFont("Helvetica-Bold", font_size)
+                    text_width = canvas_obj.stringWidth(nombre_completo, "Helvetica-Bold", font_size)
+                    
+                    # 3. Lógica de decisión
+                    if text_width <= max_width:
+                        # CASO A: UNA SOLA LÍNEA
+                        while text_width > max_width and font_size > 8:
+                            font_size -= 0.5
+                            canvas_obj.setFont("Helvetica-Bold", font_size)
+                            text_width = canvas_obj.stringWidth(nombre_completo, "Helvetica-Bold", font_size)
+                        
+                        # BAJAMOS A 29mm (antes 30mm) para despegarlo de "ALUMNO(A)"
+                        canvas_obj.drawString(30*mm, 29*mm, nombre_completo)
+                        
+                    else:
+                        # CASO B: DOS LÍNEAS
+                        palabras = nombre_completo.split()
+                        mitad = len(palabras) // 2
+                        if len(palabras) % 2 != 0: mitad += 1 
+                        
+                        linea1 = " ".join(palabras[:mitad])
+                        linea2 = " ".join(palabras[mitad:])
+                        
+                        font_size_doble = 8.5 
+                        canvas_obj.setFont("Helvetica-Bold", font_size_doble)
+                        
+                        # --- COORDENADAS CORREGIDAS ---
+                        # Línea 1: Bajamos a 30mm (lejos de "ALUMNO")
+                        canvas_obj.drawString(30*mm, 30*mm, linea1)
+                        
+                        # Línea 2: Bajamos a 26.5mm (lejos de "MATRÍCULA")
+                        canvas_obj.drawString(30*mm, 26.5*mm, linea2)
 
                     canvas_obj.setFont("Helvetica-Bold", 7)
-                    canvas_obj.drawString(30*mm, 24*mm, "MATRÍCULA:")
+                    canvas_obj.drawString(30*mm, 21*mm, "MATRÍCULA:")
                     canvas_obj.setFont("Helvetica", 10)
                     canvas_obj.setFillColorRGB(0.7, 0, 0)
-                    canvas_obj.drawString(30*mm, 19.5*mm, f"{datos['id']:06d}")
+                    canvas_obj.drawString(30*mm, 16.5*mm, f"{datos['id']:06d}")
 
                     canvas_obj.setFillColorRGB(0.2, 0.2, 0.2)
                     canvas_obj.setFont("Helvetica-Bold", 7)
-                    canvas_obj.drawString(55*mm, 24*mm, "CURSO:")
+                    canvas_obj.drawString(55*mm, 21*mm, "CURSO:")
                     
                     # Curso ajustado (Anverso)
                     textobject = canvas_obj.beginText()
                     textobject.setFont("Helvetica", 7)
-                    textobject.setTextOrigin(55*mm, 20*mm)
+                    textobject.setTextOrigin(55*mm, 17*mm)
                     max_curso_width = 38*mm
                     curso_texto = datos['nombre_curso'] if datos['nombre_curso'] else "N/A"
                     wrapped_curso = []
@@ -5536,7 +6019,7 @@ class VentanaPrincipal(QMainWindow):
                     # Pie de página (Vigencia)
                     canvas_obj.setStrokeColorRGB(0, 0.2, 0.4)
                     canvas_obj.line(4*mm, 8*mm, width-4*mm, 8*mm)
-                    canvas_obj.setFont("Helvetica", 7) # Ajusté un poco el tamaño para que se vea bien
+                    canvas_obj.setFont("Helvetica", 7)
                     canvas_obj.setFillColorRGB(0.4, 0.4, 0.4)
                     
                     hoy = datetime.date.today()
@@ -5573,8 +6056,22 @@ class VentanaPrincipal(QMainWindow):
                     canvas_obj.setFillColorRGB(0.4, 0.4, 0.4)
                     canvas_obj.drawCentredString(width/2, 5*mm, "Esta credencial es personal e intransferible y debe ser portada obligatoriamente.")
 
-
                 canvas_obj.restoreState()
+            
+            # --- 1. DIBUJAR CARA FRONTAL (ANVERSO) ---
+            dibujar_cara_credencial(c, MARGIN_X, MARGIN_Y, es_reverso=False)
+
+            # --- 2. DIBUJAR CARA TRASERA (REVERSO) ---
+            dibujar_cara_credencial(c, MARGIN_X + GAFETE_W + 10 * mm, MARGIN_Y, es_reverso=True)
+            
+            c.save()
+
+            self._temp_pdf_files.append(filename)
+            url = QUrl.fromLocalFile(filename)
+            QDesktopServices.openUrl(url)
+
+        except Exception as e:
+            mostrar_error(f"Error al generar credencial: {e}\n{traceback.format_exc()}")
             
             # --- 1. DIBUJAR CARA FRONTAL (ANVERSO) ---
             # Posición izquierda
@@ -5954,10 +6451,13 @@ class VentanaPrincipal(QMainWindow):
         self.guardar_usuario() 
 
     def guardar_usuario(self):
-        """Guarda un usuario nuevo o actualiza uno existente."""
+        """Guarda un usuario nuevo o actualiza uno existente, incluyendo huella digital."""
+        
+        # 1. Validar que existan los controles
         if not all(hasattr(self, w) for w in ['entry_usr_nombre', 'entry_usr_email', 'permisos_checkboxes']):
             return 
 
+        # 2. Obtener datos del formulario
         nombre = self.entry_usr_nombre.text().strip()
         telefono = self.entry_usr_telefono.text().strip()
         email = self.entry_usr_email.text().strip()
@@ -5966,51 +6466,76 @@ class VentanaPrincipal(QMainWindow):
             mostrar_error("Nombre Completo y Correo Electrónico son obligatorios.")
             return
             
-        # --- INICIO DE MODIFICACIÓN: Construir diccionario de permisos ---
+        # 3. Construir diccionario de permisos
         permisos_dict = {}
         for clave, checkbox in self.permisos_checkboxes.items():
             permisos_dict[clave] = checkbox.isChecked()
         
-        # Convertir a JSON
         permisos_json = json.dumps(permisos_dict)
-        # --- FIN DE MODIFICACIÓN ---
-            
+        
+        # 4. Determinar si se vinculó una huella en esta sesión
+        # (Esta variable la activamos en registrar_huella_usuario)
+        nueva_huella_registrada = 1 if hasattr(self, 'huella_usuario_temporal') and self.huella_usuario_temporal else 0
+
         try:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
                 
                 if self.usuario_seleccionado_id is None:
-                    # --- CREAR NUEVO USUARIO ---
+                    # --- CASO 1: CREAR NUEVO USUARIO ---
                     password = secrets.token_hex(4) 
+                    
+                    # Insertamos directamente con el estado de la huella (1 o 0)
                     cursor.execute("""
-                    INSERT INTO usuarios (nombre_completo, telefono, email, permisos, password)
-                    VALUES (?, ?, ?, ?, ?)
-                    """, (nombre, telefono, email, permisos_json, password))
+                    INSERT INTO usuarios (nombre_completo, telefono, email, permisos, password, tiene_huella)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """, (nombre, telefono, email, permisos_json, password, nueva_huella_registrada))
+                    
                     user_id = cursor.lastrowid 
                     conn.commit()
                     
+                    mensaje_huella = "SÍ" if nueva_huella_registrada else "NO"
+                    
                     mostrar_info(f"Usuario creado exitosamente:\n\n"
-                                 f"No. de Empleado (ID): {user_id}\n"
-                                 f"Usuario (Email): {email}\n"
-                                 f"Contraseña: {password}\n\n"
+                                 f"ID: {user_id}\n"
+                                 f"Usuario: {email}\n"
+                                 f"Contraseña: {password}\n"
+                                 f"Huella Vinculada: {mensaje_huella}\n\n"
                                  "Por favor, guarde esta contraseña. No se puede recuperar.")
                 
                 else:
-                    # --- ACTUALIZAR USUARIO EXISTENTE ---
-                    cursor.execute("""
-                    UPDATE usuarios SET nombre_completo = ?, telefono = ?, email = ?, permisos = ?
-                    WHERE id = ?
-                    """, (nombre, telefono, email, permisos_json, self.usuario_seleccionado_id))
+                    # --- CASO 2: ACTUALIZAR USUARIO EXISTENTE ---
+                    
+                    # Lógica inteligente para la huella:
+                    # Si el usuario registró una huella AHORA (nueva_huella_registrada == 1), la guardamos.
+                    # Si no tocó el botón de huella (0), NO actualizamos ese campo para no borrar una huella previa.
+                    
+                    if nueva_huella_registrada == 1:
+                        # Actualización COMPLETA (incluyendo huella)
+                        cursor.execute("""
+                        UPDATE usuarios 
+                        SET nombre_completo = ?, telefono = ?, email = ?, permisos = ?, tiene_huella = ?
+                        WHERE id = ?
+                        """, (nombre, telefono, email, permisos_json, 1, self.usuario_seleccionado_id))
+                    else:
+                        # Actualización PARCIAL (sin tocar la huella)
+                        cursor.execute("""
+                        UPDATE usuarios 
+                        SET nombre_completo = ?, telefono = ?, email = ?, permisos = ?
+                        WHERE id = ?
+                        """, (nombre, telefono, email, permisos_json, self.usuario_seleccionado_id))
+
                     conn.commit()
                     mostrar_info(f"Usuario (ID: {self.usuario_seleccionado_id}) actualizado exitosamente.")
                          
+            # 5. Limpieza final
             self.limpiar_campos_usuario()
             self.cargar_tabla_usuarios()
             
         except sqlite3.IntegrityError:
             mostrar_error("Error: Ese correo electrónico ya está registrado.")
         except sqlite3.Error as e:
-            mostrar_error(f"Error al registrar usuario: {e}")
+            mostrar_error(f"Error al guardar usuario: {e}")
 
     def cambiar_password_usuario(self):
         """Cambia la contraseña del usuario seleccionado."""
@@ -6051,36 +6576,57 @@ class VentanaPrincipal(QMainWindow):
 
         try:
             user_id = int(user_id_item.text())
-            
+
             with get_db_connection() as conn:
                 cursor = conn.cursor()
+                # Seleccionamos también la columna 'tiene_huella'
                 cursor.execute("SELECT * FROM usuarios WHERE id = ?", (user_id,))
                 datos = cursor.fetchone()
 
             if datos:
                 self.usuario_seleccionado_id = user_id
+                
+                # 1. Rellenar campos de texto
                 self.entry_usr_nombre.setText(datos['nombre_completo'])
                 self.entry_usr_telefono.setText(datos['telefono'])
                 self.entry_usr_email.setText(datos['email'])
                 
-                # --- INICIO DE MODIFICACIÓN: Cargar permisos ---
+                # 2. Cargar permisos (Checkboxes)
                 try:
                     permisos_dict = json.loads(datos['permisos'])
                 except json.JSONDecodeError:
-                    permisos_dict = {} # Fallback
+                    permisos_dict = {} # Fallback si el JSON falla
 
                 # Asignar el estado de los checkboxes
-                for clave, checkbox in self.permisos_checkboxes.items():
-                    checkbox.setChecked(permisos_dict.get(clave, False))
-                # --- FIN DE MODIFICACIÓN ---
+                if hasattr(self, 'permisos_checkboxes'):
+                    for clave, checkbox in self.permisos_checkboxes.items():
+                        checkbox.setChecked(permisos_dict.get(clave, False))
                 
+                # 3. Cargar estado de la Huella Digital
+                tiene_huella = datos['tiene_huella'] if 'tiene_huella' in datos.keys() else 0
+                
+                # Reiniciamos la bandera temporal para no sobrescribir accidentalmente
+                self.huella_usuario_temporal = False 
+                
+                if hasattr(self, 'lbl_status_huella_usuario'):
+                    if tiene_huella == 1:
+                        self.lbl_status_huella_usuario.setText("Estado: YA VINCULADA (Registrada)")
+                        self.lbl_status_huella_usuario.setStyleSheet("color: #007AFF; font-weight: bold;")
+                    else:
+                        self.lbl_status_huella_usuario.setText("Estado: No Vinculada")
+                        self.lbl_status_huella_usuario.setStyleSheet("color: #86868B;")
+
+                # 4. Actualizar interfaz
                 self.btn_guardar_usuario.setText("Actualizar Usuario")
                 
                 # Proteger al Admin ID 1
+                is_admin_perm = permisos_dict.get('is_admin', False)
                 if user_id == 1:
                     self.btn_cambiar_password.setVisible(False)
+                    self.toggle_all_permissions(True) # Bloquear permisos del superadmin
                 else:
                     self.btn_cambiar_password.setVisible(True)
+                    self.toggle_all_permissions(is_admin_perm) # Ajustar según sea admin o no
 
         except Exception as e:
             mostrar_error(f"Error al cargar datos de usuario: {e}")
@@ -6139,22 +6685,40 @@ class VentanaPrincipal(QMainWindow):
     def limpiar_campos_usuario(self):
         """Limpia el formulario de gestión de usuarios y resetea el modo a 'Guardar'."""
         try:
+            # 1. Limpiar campos de texto
             if hasattr(self, 'entry_usr_nombre'):
                 self.entry_usr_nombre.clear()
+            
+            if hasattr(self, 'entry_usr_telefono'):
                 self.entry_usr_telefono.clear()
+                
+            if hasattr(self, 'entry_usr_email'):
                 self.entry_usr_email.clear()
                 
-                # --- INICIO DE MODIFICACIÓN: Limpiar checkboxes ---
-                if hasattr(self, 'permisos_checkboxes'):
-                    for checkbox in self.permisos_checkboxes.values():
-                        checkbox.setChecked(False)
-                        checkbox.setEnabled(True)
-                # --- FIN DE MODIFICACIÓN ---
+            # 2. Resetear checkboxes de permisos
+            if hasattr(self, 'permisos_checkboxes'):
+                for checkbox in self.permisos_checkboxes.values():
+                    checkbox.setChecked(False)
+                    checkbox.setEnabled(True) # Asegurarse de que estén habilitados
+            
+            # 3. Resetear estado de Huella Digital (NUEVO)
+            self.huella_usuario_temporal = False # Reiniciar bandera
+            if hasattr(self, 'lbl_status_huella_usuario'):
+                self.lbl_status_huella_usuario.setText("Estado: No Vinculada")
+                self.lbl_status_huella_usuario.setStyleSheet("color: #86868B; font-size: 11px; font-weight: 600;")
                 
-                self.usuario_seleccionado_id = None
+            # 4. Resetear variables de control y botones
+            self.usuario_seleccionado_id = None
+            
+            if hasattr(self, 'btn_guardar_usuario'):
                 self.btn_guardar_usuario.setText("Guardar Usuario")
+                
+            if hasattr(self, 'btn_cambiar_password'):
                 self.btn_cambiar_password.setVisible(False)
+                
+            if hasattr(self, 'tabla_usuarios'):
                 self.tabla_usuarios.clearSelection()
+
         except AttributeError:
             pass
     
@@ -6335,16 +6899,17 @@ class VentanaPrincipal(QMainWindow):
     
     def on_check_for_updates_button_click(self):
         """
-        Se ejecuta al presionar el botón "Buscar Actualizaciones" en Configuración.
-        Realiza una comprobación síncrona.
+        Consulta el servidor para ver si hay una nueva versión disponible.
         """
-        try:
-            # Deshabilitar el botón para evitar clics dobles
+        # Deshabilitar botón visualmente
+        if hasattr(self, 'btn_check_updates'):
             self.btn_check_updates.setEnabled(False)
             self.btn_check_updates.setText("Buscando...")
-            QApplication.processEvents() # Actualizar UI
+        QApplication.processEvents()
 
-            # (Asegúrate de tener requests y APP_VERSION_URL definidos al inicio de tu script)
+        try:
+            # 1. Consultar el archivo JSON en GitHub
+            # APP_VERSION_URL ya está definida al inicio de tu script
             response = requests.get(APP_VERSION_URL, timeout=5)
             response.raise_for_status()
             
@@ -6352,28 +6917,43 @@ class VentanaPrincipal(QMainWindow):
             latest_version = data.get("version")
             download_url = data.get("url")
 
-            if latest_version and download_url:
-                # (Asegúrate de tener APP_CURRENT_VERSION definida)
-                if latest_version != APP_CURRENT_VERSION:
-                    print(f"¡Nueva versión encontrada! {latest_version}")
-                    # Llamar a la función que pregunta al usuario (ya existe)
-                    prompt_update(self, latest_version, download_url)
-                else:
-                    print("El sistema ya está actualizado.")
-                    mostrar_info("El sistema ya está actualizado a la última versión.")
+            # 2. Comparar versiones
+            # APP_CURRENT_VERSION ya está definida al inicio de tu script
+            if latest_version and latest_version != APP_CURRENT_VERSION:
+                # Hay una actualización
+                reply = QMessageBox.question(
+                    self, 
+                    "Actualización Disponible",
+                    f"Hay una nueva versión disponible ({latest_version}).\n"
+                    f"Tu versión actual es: {APP_CURRENT_VERSION}\n\n"
+                    "¿Desea descargarla ahora?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
+
+                if reply == QMessageBox.StandardButton.Yes:
+                    # 3. Abrir navegador
+                    if download_url:
+                        webbrowser.open(download_url)
+                        QMessageBox.information(self, "Descargando", 
+                            "La descarga se ha iniciado en su navegador.\n"
+                            "Por favor, cierre este programa e instale la nueva versión.")
+                    else:
+                        QMessageBox.warning(self, "Error", "No se encontró la URL de descarga en el servidor.")
             else:
-                mostrar_error("El archivo de versión en el servidor tiene un formato incorrecto.")
+                QMessageBox.information(self, "Sistema Actualizado", 
+                    f"Ya tienes la última versión instalada ({APP_CURRENT_VERSION}).")
 
         except requests.exceptions.RequestException as e:
-            mostrar_error(f"Error al buscar actualizaciones:\nNo se pudo conectar al servidor.\n\n{e}")
-        except NameError as e:
-            mostrar_error(f"Error de configuración: Faltan variables de actualización (APP_VERSION_URL o APP_CURRENT_VERSION) en el script.\n\n{e}")
+            QMessageBox.warning(self, "Error de Conexión", 
+                f"No se pudo conectar con el servidor de actualizaciones.\nVerifique su internet.\n{e}")
         except Exception as e:
-            mostrar_error(f"Error desconocido al procesar actualizaciones: {e}")
+            QMessageBox.critical(self, "Error", f"Ocurrió un error al verificar actualizaciones:\n{e}")
+        
         finally:
-            # Reactivar el botón
-            self.btn_check_updates.setEnabled(True)
-            self.btn_check_updates.setText("🛰️ Buscar Actualizaciones")
+            # Restaurar el botón
+            if hasattr(self, 'btn_check_updates'):
+                self.btn_check_updates.setEnabled(True)
+                self.btn_check_updates.setText("🛰️ Buscar Actualizaciones")
 
 
 # ---- HOJAS DE ESTILO (QSS) ----
@@ -6694,296 +7274,299 @@ class VentanaPrincipal(QMainWindow):
     # --- FIN DE MÉTODOS DE GESTIÓN DE PERSONAL ---
 
 def get_accent_stylesheet(accent_name):
-    """Retorna el QSS para un color de acento específico."""
-    if accent_name == "Azul":
-        return f"""
-            /* Se establece el color de acento para hover/select */
-            :root {{
-                --accent-color: #0d6efd;
-            }}
-            #navBar {{ 
-                /* Se usa un fondo neutro para el menú */
-                background-color: transparent;
-            }}
-            #navButton {{
-                color: #555555; /* Texto gris neutro en claro */
-                margin: 5px 10px;
-                border-radius: 8px; /* Mac: Esquinas suaves */
-                background-color: transparent;
-                padding-left: 20px; /* Alineación del texto */
-                
-            }}
-            #navButton:hover {{ 
-                background-color: rgba(13, 110, 253, 0.1); 
-                color: #0d6efd; 
-            }}
-            #navButton[selected="true"] {{ 
-                background-color: rgba(13, 110, 253, 0.2); 
-                color: #0d6efd;
-                font-weight: 600; /* Mac: Font semi-bold */
-                border-left: none; /* Mac: Eliminar borde lateral, usar solo el fondo */
-            }}
-            QGroupBox::title {{ color: #0a58ca; }}
-            QHeaderView::section {{ background-color: #0d6efd; border: 1px solid #0a58ca; }}
-            #topBar {{ background-color: #0a58ca; }}
-            
-            /* Ajustes en Modo Oscuro */
-            QWidget[style="dark"] #navButton {{ color: #E0E0E0; }}
-            QWidget[style="dark"] #navButton:hover {{ 
-                background-color: rgba(13, 110, 253, 0.2); 
-                color: #0d6efd; 
-            }}
-            QWidget[style="dark"] #navButton[selected="true"] {{ 
-                background-color: rgba(13, 110, 253, 0.3); 
-                color: #0d6efd;
-                border-left: none;
-            }}
-        """
-    elif accent_name == "Verde":
-        return f"""
-            :root {{
-                --accent-color: #198754;
-            }}
-            #navBar {{ 
-                background-color: transparent;
-            }}
-            #navButton {{
-                color: #555555; 
-                margin: 5px 10px;
-                border-radius: 8px;
-                background-color: transparent;
-                padding-left: 20px;
-            }}
-            #navButton:hover {{ 
-                background-color: rgba(25, 135, 84, 0.1); 
-                color: #198754; 
-            }}
-            #navButton[selected="true"] {{ 
-                background-color: rgba(25, 135, 84, 0.2); 
-                color: #198754;
-                font-weight: 600;
-                border-left: none;
-            }}
-            QGroupBox::title {{ color: #146c43; }}
-            QHeaderView::section {{ background-color: #198754; border: 1px solid #146c43; }}
-            #topBar {{ background-color: #146c43; }}
-            
-            /* Ajustes en Modo Oscuro */
-            QWidget[style="dark"] #navButton {{ color: #E0E0E0; }}
-            QWidget[style="dark"] #navButton:hover {{ 
-                background-color: rgba(25, 135, 84, 0.2); 
-                color: #198754; 
-            }}
-            QWidget[style="dark"] #navButton[selected="true"] {{ 
-                background-color: rgba(25, 135, 84, 0.3); 
-                color: #198754;
-                border-left: none;
-            }}
-        """
-    # Default (Naranja)
+    # Colores de acento estilo macOS
+    accents = {
+        "Azul": "#007AFF",    # macOS Blue
+        "Verde": "#34C759",   # macOS Green
+        "Naranja": "#FF9500"  # macOS Orange
+    }
+    color = accents.get(accent_name, "#007AFF")
+    
     return f"""
         :root {{
-            --accent-color: #FFA726;
+            --accent-color: {color};
         }}
-        #navBar {{ 
-            background-color: transparent;
-        }}
+        
+        /* Botones del Menú Lateral (Sidebar) */
         #navButton {{
-            color: #555555; 
-            margin: 5px 10px;
-            border-radius: 8px;
             background-color: transparent;
-            padding-left: 20px;
+            color: #333333;
+            border: none;
+            border-radius: 6px;
+            margin: 2px 10px;
+            padding: 8px 12px;
+            font-weight: 500;
+            text-align: left;
         }}
-        #navButton:hover {{ 
-            background-color: rgba(255, 167, 38, 0.1); 
-            color: #E65100;
+        #navButton:hover {{
+            background-color: rgba(0, 0, 0, 0.05);
         }}
-        #navButton[selected="true"] {{ 
-            background-color: rgba(255, 167, 38, 0.2); 
-            color: #E65100;
-            font-weight: 600;
-            border-left: none;
+        #navButton[selected="true"] {{
+            background-color: {color};
+            color: #FFFFFF;
         }}
-        QGroupBox::title {{ color: #E65100; }}
-        QHeaderView::section {{ background-color: #FFA726; border: 1px solid #E65100; }}
-        #topBar {{ background-color: #E65100; }} /* Se usa un color más profundo */
+        
+        /* Ajustes para Modo Oscuro en Sidebar */
+        QWidget[style="dark"] #navButton {{ color: #DDDDDD; }}
+        QWidget[style="dark"] #navButton:hover {{ background-color: rgba(255, 255, 255, 0.1); }}
+        QWidget[style="dark"] #navButton[selected="true"] {{ background-color: {color}; color: #FFFFFF; }}
 
-        /* Ajustes en Modo Oscuro */
-        QWidget[style="dark"] #navButton {{ color: #E0E0E0; }}
-        QWidget[style="dark"] #navButton:hover {{ 
-            background-color: rgba(255, 167, 38, 0.2); 
-            color: #FFA726; 
+        /* Encabezados y Elementos con Acento */
+        QGroupBox::title {{ color: {color}; }}
+        #topBarUser {{ color: {color}; }}
+        
+        /* Botones Primarios */
+        QPushButton#primaryButton {{
+            background-color: {color};
+            color: white;
+            border: 1px solid {color};
         }}
-        QWidget[style="dark"] #navButton[selected="true"] {{ 
-            background-color: rgba(255, 167, 38, 0.3); 
-            color: #FFA726;
-            border-left: none;
+        QPushButton#primaryButton:hover {{
+            background-color: {color}DD; /* Transparencia leve */
         }}
     """
 
 style_sheet_light = """
-    /* --- Tema Claro (Base) --- */
+    /* --- macOS Light Mode --- */
     QWidget {
+        background-color: #F5F5F7;
+        color: #1D1D1F;
+        font-family: -apple-system, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+        font-size: 13px;
+    }
+
+    #topBar {
         background-color: #FFFFFF;
-        color: #333333;
-        font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Roboto", "Segoe UI", sans-serif;
-        font-size: 10pt;
+        border-bottom: 1px solid #E5E5E5;
+        min-height: 60px;
     }
-    
-    /* CORRECCIÓN CRÍTICA: Fuerza el color del texto a blanco para asegurar legibilidad sobre el fondo de acento saturado */
-    #topBar QLabel, #topBarUser, #topBarLabel, #topBarIcon { 
-        color: #333333; 
-        font-size: 9pt; 
+    #topBar QLabel { background-color: transparent; }
+
+    #navBar {
+        background-color: #FFFFFF;
+        border-right: 1px solid #E5E5E5;
     }
-    #topBarUser { font-weight: bold; font-size: 10pt; }
-    #topBarButton { background-color: transparent;
-        color: #555555; border: none; font-size: 16pt; padding: 5px; }
-    #topBarButton:hover { background-color: rgba(0, 0, 0, 0.1); }
-    
-    #navBar { background-color: #F8F8F8; } /* Fondo más claro para el menú */
-    
-    /* Reglas base del botón de navegación (para ambos modos, los colores se aplican con el accent) */
-    #navButton { 
-        border: none; 
-        padding: 15px 10px; 
-        font-size: 11pt; 
-        text-align: left; 
-        padding-left: 20px;
-        font-weight: normal; 
-    }
-    
-    #mainContentArea, #contentPage { background-color: #FFFFFF; }
-    QScrollArea { border: none; background-color: #FFFFFF; }
-    #welcomeTitle { font-size: 24pt; font-weight: bold; color: #333333; }
-    #shortcutsTitle { font-size: 16pt;
-        font-weight: bold; color: #555555; padding-bottom: 5px; }
-    #shortcutButton { 
-        border: 1px solid #E0E0E0;
-        background-color: #FFFFFF; 
+
+    #contentPage {
+        background-color: #FFFFFF;
         border-radius: 12px;
-        padding: 15px;
-        /* Sombra Sutil y Profesional */
-        box-shadow: 0px 1px 3px rgba(0, 0, 0, 0.05), 0px 1px 2px rgba(0, 0, 0, 0.1);
+        border: 1px solid #E5E5E5;
+        margin: 15px;
     }
-    #shortcutIcon { 
-        background-color: #F0F0F0; /* Fondo más limpio para el ícono */
-        border: none; 
-        border-radius: 8px; /* Menos redondeado */
-        font-size: 36pt; /* Ícono un poco más pequeño, más elegante */
-        padding: 10px;
+    
+    QScrollArea { background-color: transparent; border: none; }
+    QScrollArea > QWidget > QWidget { background-color: transparent; }
+
+    /* Títulos */
+    #welcomeTitle {
+        font-size: 32px; font-weight: 700; color: #1D1D1F;
+        background: transparent; margin-bottom: 10px; padding: 10px;
     }
-    #shortcutIcon:hover { background-color: #E0E0E0; }
-    #shortcutLabel { font-size: 11pt; font-weight: bold; color: #333333; }
-    QGroupBox { background-color: #F9F9F9; border: 1px solid #E0E0E0; border-radius: 6px; margin-top: 10px; padding: 10px; }
-    QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 0 10px 0 10px; font-size: 12pt; font-weight: bold; }
-    QLabel { color: #333333; }
-    QLineEdit, QComboBox, QDoubleSpinBox { background-color: #FFFFFF; color: #333333;
-        border: 1px solid #C0C0C0; border-radius: 4px; padding: 5px; min-height: 20px; }
-    QComboBox QAbstractItemView { background-color: #FFFFFF; color: #333333; }
-    QCheckBox { color: #333333; font-size: 9pt; }
-    QCheckBox::indicator { width: 16px; height: 16px; }
-    QCheckBox::indicator:unchecked { border: 1px solid #C0C0C0; background-color: #FFFFFF; border-radius: 3px; }
-    QCheckBox::indicator:checked { 
-            background-color: #007ACC;
-            border: 1px solid #007ACC;
-            image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><path fill="none" stroke="%23FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3 8l3 3l7-7"/></svg>');
-        }
-    #expedienteDisplay { background-color: #FDFDFD; border: 1px solid #E0E0E0; font-family: Consolas, monospace; font-size: 9pt; }
-    #deleteButton { background-color: #D32F2F; color: #FFFFFF; border: none; border-radius: 4px; padding: 10px 20px; font-weight: bold;
-        font-size: 10pt; margin-top: 10px; }
-    #deleteButton:hover { background-color: #E53935; }
-    #deleteButton:pressed { background-color: #B71C1C; }
-    #secondaryButton { background-color: #607D8B; color: #FFFFFF; border: none; border-radius: 4px; padding: 10px 20px; font-weight: bold;
-        font-size: 10pt; }
-    #secondaryButton:hover { background-color: #546E7A; }
-    QPushButton#primaryButton { background-color: #007ACC; color: #FFFFFF; border: none; border-radius: 4px; padding: 10px 20px; font-weight: bold; font-size: 11pt; min-height: 25px; }
-    QPushButton#primaryButton:hover { background-color: #0099E6; }
-    QPushButton#primaryButton:pressed { background-color: #005F99; }
-    QTableWidget { background-color: #FFFFFF; color: #333333; gridline-color: #E0E0E0; border: 1px solid #C0C0C0; selection-color: #333333; }
-    QHeaderView::section { color: #FFFFFF; padding: 6px; font-weight: bold; }
-    QMessageBox { background-color: #FFFFFF; }
-    #placeholderText { font-style: italic; color: #888888; }
+    #shortcutsTitle {
+        font-size: 20px; font-weight: 600; color: #86868B;
+        background: transparent; margin-left: 5px; margin-bottom: 10px;
+    }
+
+    /* Tarjetas */
+    #shortcutButton {
+        background-color: #FFFFFF;
+        border: 1px solid #E5E5E5;
+        border-radius: 16px;
+    }
+    #shortcutButton:hover {
+        border: 1px solid #007AFF;
+        background-color: #F0F8FF;
+    }
+    #shortcutLabel {
+        color: #1D1D1F; font-weight: 600; font-size: 15px; background: transparent;
+    }
+
+    /* GroupBox */
+    QGroupBox {
+        background-color: #FAFAFA;
+        border: 1px solid #E5E5E5;
+        border-radius: 12px;
+        margin-top: 20px; padding: 15px; font-weight: bold; font-size: 14px;
+    }
+    QGroupBox::title {
+        subcontrol-origin: margin; left: 10px; padding: 0 5px; background-color: transparent;
+    }
+
+    /* Inputs */
+    QLineEdit, QComboBox, QDoubleSpinBox {
+        background-color: #FFFFFF;
+        border: 1px solid #D1D1D6;
+        border-radius: 8px; padding: 8px; font-size: 14px;
+    }
+    QLineEdit:focus, QComboBox:focus { border: 2px solid #007AFF; }
+
+    /* Tablas */
+    QTableWidget {
+        background-color: #FFFFFF;
+        border: 1px solid #E5E5E5;
+        border-radius: 10px;
+        gridline-color: transparent; /* Ocultar cuadrícula */
+        selection-background-color: #007AFF;
+        selection-color: #FFFFFF;
+        font-size: 13px;
+        outline: 0; /* Quitar línea punteada al seleccionar */
+    }
+    QTableWidget::item {
+        padding: 8px;
+        border-bottom: 1px solid #F0F0F0; /* Solo línea horizontal sutil */
+    }
+    QTableWidget::item:selected {
+        background-color: #007AFF;
+        border-bottom: none;
+    }
+    QHeaderView::section {
+        background-color: #F5F5F7; border: none;
+        border-bottom: 1px solid #D1D1D6; padding: 8px; font-weight: 600; font-size: 13px;
+    }
+
+    /* Botones Generales */
+    QPushButton {
+        border-radius: 8px; padding: 8px 16px; font-weight: 500; font-size: 13px;
+        border: none;
+    }
+
+    /* --- BOTONES SECUNDARIOS (Editar, Ver, Cancelar) --- */
+    #secondaryButton, #navConfigButton {
+        background-color: #E5E5EA; /* Gris más visible (estándar Mac) */
+        color: #1D1D1F;            /* Texto oscuro */
+        border: 1px solid #D1D1D6; /* Borde sutil para definir la forma */
+        font-weight: 600;
+    }
+    #secondaryButton:hover {
+        background-color: #D1D1D6; /* Gris más oscuro al pasar el mouse */
+        border: 1px solid #C7C7CC;
+    }
+
+    /* Botón Primario (Acción) */
+    QPushButton#primaryButton {
+        background-color: #007AFF; 
+        color: #FFFFFF;
+        font-weight: 600;
+        font-size: 14px;
+        border: 1px solid #007AFF;
+    }
+    QPushButton#primaryButton:hover { background-color: #0062CC; }
+    
+    /* Botón Eliminar */
+    QPushButton#deleteButton {
+        background-color: #FF3B30; 
+        color: #FFFFFF; font-weight: 600;
+    }
+    QPushButton#deleteButton:hover { background-color: #D70015; }
 """
 
 style_sheet_dark = """
-    /* --- Tema Oscuro (Base) --- */
+    /* --- macOS Dark Mode --- */
     QWidget {
-        background-color: #2D2D2D; /* Gris oscuro para mayor contraste */
-        color: #E0E0E0;
-        font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Roboto", "Segoe UI", sans-serif;
-        font-size: 10pt;
+        background-color: #1E1E1E;
+        color: #F5F5F7;
+        font-family: -apple-system, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+        font-size: 13px;
     }
 
-    #topBar QLabel, #topBarUser, #topBarLabel, #topBarIcon { 
-        color: #FFFFFF;
-        font-size: 9pt; 
+    #topBar {
+        background-color: #2C2C2E;
+        border-bottom: 1px solid #38383A;
     }
-    #topBarUser { font-weight: 600; font-size: 11pt; } 
-    #topBarButton { background-color: transparent;
-        color: #FFFFFF; border: none; font-size: 16pt; padding: 5px; }
-    #topBarButton:hover { background-color: #3A3A3A; }
+    #topBar QLabel { background-color: transparent; }
     
-    #navBar { background-color: #3A3A3A; } /* Fondo del menú ligeramente más claro para contraste */
-    
-    /* Reglas base del botón de navegación */
-    #navButton { 
-        border: none; 
-        padding: 15px 10px; 
-        font-size: 11pt; 
-        text-align: left; 
-        padding-left: 20px;
-        font-weight: normal;
-        border-radius: 8px; /* Esquinas redondeadas */
-        margin: 5px 8px; /* Margen para flotar */
+    #navBar {
+        background-color: #252525;
+        border-right: 1px solid #38383A;
     }
 
-    #mainContentArea, #contentPage { background-color: #2D2D2D; }
-    QScrollArea { border: none; background-color: #2D2D2D; }
-    #welcomeTitle { font-size: 24pt; font-weight: 600; color: #E0E0E0; }
-    #shortcutsTitle { font-size: 16pt;
-        font-weight: 500; color: #C0C0C0; padding-bottom: 5px; }
-    #shortcutButton { 
-        border: 1px solid #4D4D4D;
-        background-color: #3A3A3A; /* Fondo de botones de acceso */
+    #contentPage, QScrollArea, #mainContentArea {
+        background-color: #1C1C1E;
         border-radius: 12px;
-        padding: 15px;
     }
-    #shortcutIcon { 
-        background-color: #4A4A4A; /* Fondo más limpio para el ícono */
-        border: none;
-        border-radius: 8px;
-        font-size: 36pt; 
-        padding: 10px;
+    
+    QScrollArea { background-color: transparent; border: none; }
+    QScrollArea > QWidget > QWidget { background-color: transparent; }
+
+    #welcomeTitle {
+        font-size: 32px; font-weight: 700; color: #FFFFFF;
+        background: transparent; margin-bottom: 10px;
     }
-    #shortcutIcon:hover { background-color: #5A5A5A; }
-    QGroupBox { background-color: #3A3A3A; border: 1px solid #4D4D4D; border-radius: 8px; margin-top: 10px; padding: 10px; }
-    QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 0 10px 0 10px; font-size: 12pt; font-weight: 600; }
-    QLabel { color: #E0E0E0; }
-    QLineEdit, QComboBox, QDoubleSpinBox { background-color: #4A4A4A; color: #E0E0E0;
-        border: 1px solid #4D4D4D; border-radius: 6px; padding: 5px; min-height: 20px; }
-    QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus { border: 1px solid #707070; }
-    QComboBox QAbstractItemView { background-color: #4A4A4A; color: #E0E0E0; selection-background-color: #5A5A5A; }
-    QCheckBox { color: #E0E0E0; font-size: 9pt; }
-    QCheckBox::indicator { width: 16px; height: 16px; }
-    QCheckBox::indicator:unchecked { border: 1px solid #4D4D4D; background-color: #3A3A3A; border-radius: 3px; }
-    QCheckBox::indicator:checked { 
-            background-color: #007ACC;
-            border: 1px solid #007ACC;
-            image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><path fill="none" stroke="%23FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3 8l3 3l7-7"/></svg>');
-        }
-    #expedienteDisplay { background-color: #3A3A3A; border: 1px solid #4D4D4D; font-family: Consolas, monospace; font-size: 9pt; }
-    #deleteButton { background-color: #D32F2F; color: #FFFFFF; border: none; border-radius: 6px; padding: 10px 20px; font-weight: 600; font-size: 10pt; margin-top: 10px; }
-    #deleteButton:hover { background-color: #E53935; }
-    #deleteButton:pressed { background-color: #B71C1C; }
-    #secondaryButton { background-color: #607D8B; color: #FFFFFF; border: none; border-radius: 6px; padding: 10px 20px; font-weight: 600; font-size: 10pt; }
-    QPushButton#primaryButton { background-color: #007ACC; color: #FFFFFF; border: none; border-radius: 6px; padding: 10px 20px; font-weight: 600; font-size: 11pt; min-height: 25px; }
-    QPushButton#primaryButton:hover { background-color: #0099E6; }
-    QPushButton#primaryButton:pressed { background-color: #005F99; }
-    QTableWidget { background-color: #3A3A3A; color: #E0E0E0; gridline-color: #4D4D4D; border: 1px solid #4D4D4D; selection-background-color: #5A5A5A; selection-color: #E0E0E0; }
-    QHeaderView::section { color: #FFFFFF; padding: 6px; font-weight: 600; border: 1px solid #4D4D4D; }
-    QMessageBox { background-color: #3A3A3A; color: #E0E0E0; }
-    #placeholderText { font-style: italic; color: #888888; }
+    #shortcutsTitle {
+        font-size: 20px; font-weight: 600; color: #AEAEB2;
+        background: transparent; margin-left: 5px;
+    }
+
+    #shortcutButton {
+        background-color: #2C2C2E;
+        border: 1px solid #38383A;
+        border-radius: 16px;
+    }
+    #shortcutButton:hover {
+        border: 1px solid #0A84FF;
+        background-color: #3A3A3C;
+    }
+    #shortcutLabel {
+        color: #FFFFFF; font-weight: 600; font-size: 15px; background: transparent;
+    }
+
+    QGroupBox {
+        background-color: #2C2C2E;
+        border: 1px solid #38383A;
+        border-radius: 12px;
+        margin-top: 20px; padding: 15px; font-weight: bold; font-size: 14px;
+    }
+    QGroupBox::title {
+        subcontrol-origin: margin; left: 10px; padding: 0 5px; background-color: transparent;
+    }
+
+    QLineEdit, QComboBox, QDoubleSpinBox {
+        background-color: #1C1C1E;
+        border: 1px solid #48484A;
+        border-radius: 8px; color: #FFFFFF; padding: 8px;
+    }
+    QLineEdit:focus { border: 2px solid #0A84FF; }
+
+    QTableWidget {
+        background-color: #1C1C1E;
+        border: 1px solid #38383A;
+        gridline-color: #38383A;
+        selection-background-color: #0A84FF;
+    }
+    QHeaderView::section {
+        background-color: #2C2C2E;
+        border-bottom: 1px solid #38383A;
+        color: #98989D; padding: 8px; font-weight: 600;
+    }
+
+    QPushButton {
+        border-radius: 8px; padding: 8px 16px; font-weight: 500; font-size: 13px;
+    }
+
+    /* --- BOTONES SECUNDARIOS (Modo Oscuro) --- */
+    #secondaryButton {
+        background-color: #3A3A3C; /* Gris oscuro visible */
+        color: #FFFFFF;
+        border: 1px solid #48484A;
+        font-weight: 600;
+    }
+    #secondaryButton:hover {
+        background-color: #48484A;
+        border: 1px solid #636366;
+    }
+
+    QPushButton#primaryButton {
+        background-color: #0A84FF;
+        color: #FFFFFF;
+        font-weight: 600;
+        font-size: 14px;
+    }
+    QPushButton#primaryButton:hover { background-color: #409CFF; }
+    
+    QPushButton#deleteButton {
+        background-color: #FF453A;
+        color: #FFFFFF; font-weight: 600;
+    }
 """
 
 def get_full_stylesheet(theme, accent):
@@ -6994,67 +7577,59 @@ def get_full_stylesheet(theme, accent):
 
 
 # ---- Punto de Entrada de la Aplicación (CON BUCLE DE SESIÓN) ----
+# ---- Punto de Entrada de la Aplicación ----
 if __name__ == '__main__':
+    # 1. INICIAR LA APP PRIMERO (Esto arregla el error de QWidget)
+    app = QApplication(sys.argv)
 
     try:
-        # 1. Asegurar que la DB esté inicializada
+        # 2. Ahora sí, inicializamos la base de datos
         inicializar_db()
         
-        app = QApplication(sys.argv)
-        
         login_exitoso = True
-        window = None # Definir window fuera del bucle
+        window = None 
 
         while login_exitoso:
-            # 1. Iniciar la pantalla de Login
+            # Resetear estilos antes del login
             app.setStyleSheet("")
+            
             login_window = LoginScreen()
             login_window.show()
-            app.exec() 
+            app.exec() # Ejecutar bucle para el Login
 
-            # Si el usuario cerró el login sin autenticarse, salimos del bucle
             if not login_window.accept_login:
                 login_exitoso = False
                 continue 
 
-            # 2. Si el login fue exitoso, obtener usuario y mostrar ventana principal
+            # Obtener datos del usuario logueado
             username = login_window.username
             full_username = login_window.full_username
-            user_role = login_window.user_role # Obtener el ROL
+            user_role = login_window.user_role
             permisos_dict = login_window.permisos_dict
             
+            # Iniciar Ventana Principal
             window = VentanaPrincipal(username, full_username, user_role, permisos_dict)
             window.showMaximized() 
 
-            app.exec() 
+            app.exec() # Ejecutar bucle para la Ventana Principal
 
-            # 3. Cuando la app principal se cierra, revisamos si fue por "Cerrar Sesión"
             if not window.logout_solicitado:
                 login_exitoso = False 
 
-        # --- Limpiar archivos temporales al salir del bucle principal ---
         if window and hasattr(window, '_temp_pdf_files'): 
             window.limpiar_archivos_temporales()
 
         sys.exit(0) 
 
     except Exception as e:
-        # Captura de error final por si algo falla en la inicialización
         print(f"--- ERROR FATAL: {e} ---")
-        error_info = traceback.format_exc()
-
-        with open("error_log.txt", "w", encoding="utf-8") as f:
-            f.write("Ha ocurrido un error fatal al iniciar la aplicación:\n\n")
-            f.write(error_info)
-
-        # Mostrar el error en una ventana emergente simple si es posible
-        try:
-            error_dialog = QMessageBox()
-            error_dialog.setIcon(QMessageBox.Icon.Critical)
-            error_dialog.setWindowTitle("Error Fatal")
-            error_dialog.setText(f"Error fatal al iniciar:\n{e}\n\nConsulte 'error_log.txt' para detalles.")
-            error_dialog.exec()
-        except:
-            pass
-
+        traceback.print_exc()
+        
+        # Ahora sí podemos mostrar el error visualmente porque 'app' ya existe
+        msg_box = QMessageBox()
+        msg_box.setIcon(QMessageBox.Icon.Critical)
+        msg_box.setWindowTitle("Error Fatal al Iniciar")
+        msg_box.setText(f"Ocurrió un error crítico:\n{e}")
+        msg_box.exec()
+        
         sys.exit(1)
