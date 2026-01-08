@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QDialog, QInputDialog, QFileDialog, QPlainTextEdit,
                              QAbstractItemView, QDateEdit, QScrollArea, QGridLayout, 
                              QGraphicsOpacityEffect, QCheckBox, QSpinBox, QDoubleSpinBox, QGroupBox, QGraphicsDropShadowEffect,
-                             QFormLayout, QTabWidget, QListWidget)
+                             QFormLayout, QTabWidget, QListWidget, QRadioButton)
 from PyQt6.QtCore import Qt, QSize, QDate, QPropertyAnimation, QEasingCurve, QPoint, QParallelAnimationGroup, pyqtSignal, QObject
 from PyQt6.QtGui import QIcon, QFont, QColor, QPixmap
 from mercado_pago_pos import MercadoPagoPoint
@@ -757,347 +757,344 @@ class DialogoCapturaIMEI(QDialog):
             self.txt_imei.setPlaceholderText("¡Ingrese un valor!")
 
 class DialogoRecargas(QDialog):
-    def __init__(self, parent=None, tema="Dark"):
-        super().__init__(parent)
-        self.setWindowTitle("Tiempo Aire")
-        self.setFixedSize(450, 620)
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        
-        self.tema_actual = tema
+    def __init__(self, modo_oscuro=True):
+        super().__init__()
+        self.setWindowTitle("Recarga Electrónica")
+        self.setFixedSize(400, 650)  # Aumenté un poco la altura
+
+        # --- 0. VARIABLES DE ESTADO (MEMORIA) ---
+        self.monto_seleccionado = None
         self.metodo_pago = "EFECTIVO"
-        self.monto_sel = 50
         
-        # Diccionario de colores base (se llena en aplicar_tema)
-        self.colores = {} 
-
-        try:
-            from recargas_service import RecargasService
-            self.service = RecargasService()
-        except ImportError:
-            self.service = None
-
-        # --- LAYOUT PRINCIPAL ---
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        self.frame = QFrame()
-        layout.addWidget(self.frame)
-        
-        l_frame = QVBoxLayout(self.frame)
-        l_frame.setContentsMargins(30, 30, 30, 30)
-        l_frame.setSpacing(12)
-
-        # Título
-        lbl = QLabel("📱 Recarga Electrónica")
-        lbl.setStyleSheet("font-size: 22px; font-weight: bold; color: #007aff;")
-        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        l_frame.addWidget(lbl)
-
-        # Inputs
-        l_frame.addWidget(QLabel("Compañía:"))
-        self.combo = QComboBox()
-        self.combo.addItems(["TELCEL", "MOVISTAR", "AT&T", "UNEFON", "BAIT"])
-        l_frame.addWidget(self.combo)
-
-        l_frame.addWidget(QLabel("Número (10 dígitos):"))
-        self.txt_num = QLineEdit()
-        self.txt_num.setPlaceholderText("5512345678")
-        # Letter spacing para que se vea mejor el número
-        self.txt_num.setStyleSheet("font-size: 18px; letter-spacing: 2px; font-weight: bold;") 
-        l_frame.addWidget(self.txt_num)
-
-        l_frame.addWidget(QLabel("Monto:"))
-        
-        # Grid de Montos
-        grid = QGridLayout()
-        self.montos = [20, 30, 50, 100, 200, 500]
-        self.btn_group_montos = []
-        
-        row, col = 0, 0
-        for m in self.montos:
-            b = QPushButton(f"${m}")
-            b.setCheckable(True)
-            b.setFixedSize(85, 45)
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.clicked.connect(lambda _, x=m, btn=b: self.set_monto(x, btn))
-            grid.addWidget(b, row, col)
-            self.btn_group_montos.append(b)
-            col += 1; 
-            if col > 2: col=0; row+=1
-        
-        l_frame.addLayout(grid)
-
-        # --- SELECCIÓN DE MÉTODO DE PAGO ---
-        l_frame.addSpacing(10)
-        l_frame.addWidget(QLabel("Método de Pago:"))
-        h_pago = QHBoxLayout()
-        
-        self.btn_efectivo = QPushButton("💵 EFECTIVO")
-        self.btn_efectivo.setCheckable(True)
-        self.btn_efectivo.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_efectivo.setFixedHeight(45)
-        self.btn_efectivo.clicked.connect(lambda: self.set_metodo("EFECTIVO"))
-        
-        self.btn_tarjeta = QPushButton("💳 TARJETA")
-        self.btn_tarjeta.setCheckable(True)
-        self.btn_tarjeta.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_tarjeta.setFixedHeight(45)
-        self.btn_tarjeta.clicked.connect(lambda: self.set_metodo("TARJETA"))
-        
-        h_pago.addWidget(self.btn_efectivo)
-        h_pago.addWidget(self.btn_tarjeta)
-        l_frame.addLayout(h_pago)
-
-        # Botones Acción Final
-        l_frame.addSpacing(20)
-        h_btns = QHBoxLayout()
-        self.btn_cancel = QPushButton("Cancelar")
-        self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_cancel.setFixedHeight(45)
-        self.btn_cancel.clicked.connect(self.reject)
-        
-        self.btn_ok = QPushButton("RECARGAR AHORA")
-        self.btn_ok.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_ok.setFixedHeight(45)
-        # El botón verde siempre es verde, no depende tanto del tema, pero su borde sí
-        self.btn_ok.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; border-radius: 8px; font-size: 14px;")
-        self.btn_ok.clicked.connect(self.procesar)
-        
-        h_btns.addWidget(self.btn_cancel)
-        h_btns.addWidget(self.btn_ok)
-        l_frame.addLayout(h_btns)
-
-        # --- INICIALIZAR ---
-        self.aplicar_tema(tema) # Aplicamos colores por primera vez
-        
-        # Seleccionar defaults (usando los colores ya cargados)
-        self.set_monto(50, self.btn_group_montos[2]) 
-        self.set_metodo("EFECTIVO")
-
-    def aplicar_tema(self, tema):
-        """
-        Aplica los colores exactos definidos en SISTEMAMUNTIFUNCIONAL1.1
-        """
-        self.tema_actual = tema
-        
-        if tema == "Dark":
-            # Basado en tu código
-            c = {
-                "bg_card": "#2d2d30",  # Fondo de la tarjeta
-                "text": "#ffffff",     # Texto blanco
-                "input_bg": "#333337", # Fondo de inputs
-                "border": "#3e3e42",   # Bordes oscuros
-                "btn_bg": "#3a3a3a",   # Botones inactivos oscuros
-                "btn_fg": "white",
-                "btn_hover": "#444"
+        # --- 1. DEFINICIÓN DE COLORES ---
+        if modo_oscuro:
+            self.c = { # Lo hice self.c para usarlo en las funciones
+                "bg": "#2b2b2b", "text": "#ffffff",
+                "input_bg": "#3a3a3a", "btn_bg": "#404040",
+                "btn_hover": "#505050", "accent": "#0078d4",
+                "success": "#28a745", "btn_text": "#ffffff"
             }
         else:
-            # Basado en tu código
-            c = {
-                "bg_card": "#ffffff",  # Fondo blanco puro
-                "text": "#1d1d1f",     # Texto casi negro
-                "input_bg": "#f5f5f7", # Fondo inputs gris muy claro
-                "border": "#d2d2d7",   # Bordes grises suaves
-                "btn_bg": "#f0f0f0",   # Botones inactivos claros
-                "btn_fg": "#1d1d1f",
-                "btn_hover": "#e5e5e5"
+            self.c = {
+                "bg": "#f3f3f3", "text": "#000000",
+                "input_bg": "#ffffff", "btn_bg": "#e0e0e0",
+                "btn_hover": "#d0d0d0", "accent": "#0078d4",
+                "success": "#28a745", "btn_text": "#000000"
             }
 
-        self.colores = c # Guardamos para usar en los métodos de click
-
-        # 1. Aplicar al Frame Principal
-        self.frame.setStyleSheet(f"""
-            QFrame {{ 
-                background-color: {c['bg_card']}; 
-                border-radius: 15px; 
-                border: 1px solid {c['border']}; 
-            }}
-            QLabel {{ 
-                color: {c['text']}; 
-                font-weight: bold; 
-                background: transparent; 
-                border: none; 
-            }}
-            QLineEdit, QComboBox {{ 
-                background-color: {c['input_bg']}; 
-                color: {c['text']}; 
-                border: 1px solid {c['border']}; 
-                border-radius: 8px; 
-                padding: 8px; 
-                selection-background-color: #007aff;
+        # --- 2. ESTILOS CSS GENERALES ---
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {self.c['bg']}; color: {self.c['text']}; }}
+            QLabel {{ color: {self.c['text']}; font-weight: bold; font-size: 14px; margin-top: 5px; }}
+            QLineEdit, QComboBox {{
+                background-color: {self.c['input_bg']};
+                color: {self.c['text']};
+                border: 1px solid #555;
+                border-radius: 8px;
+                padding: 10px;
+                font-size: 14px;
             }}
             QComboBox::drop-down {{ border: none; }}
-        """)
-
-        # 2. Botón Cancelar
-        self.btn_cancel.setStyleSheet(f"""
-            QPushButton {{ 
-                background-color: {c['btn_bg']}; 
-                color: {c['text']}; 
-                border: 1px solid {c['border']}; 
-                border-radius: 8px; 
-                font-weight: bold; 
+            QPushButton {{
+                background-color: {self.c['btn_bg']};
+                color: {self.c['btn_text']};
+                border-radius: 8px;
+                padding: 10px;
+                font-weight: bold;
+                border: none;
             }}
-            QPushButton:hover {{ background-color: {c['btn_hover']}; }}
+            QPushButton:hover {{ background-color: {self.c['btn_hover']}; }}
         """)
 
-        # 3. Refrescar estilos de botones de selección (Montos y Pagos)
-        # Esto es vital: si cambias de tema con la ventana abierta, 
-        # los botones inactivos deben repintarse.
-        
-        # Refrescar Montos
-        btn_monto_activo = None
-        for b in self.btn_group_montos:
-            if b.isChecked(): btn_monto_activo = b
-        
-        # Re-aplicar selección (esto fuerza a usar el nuevo self.colores)
-        if btn_monto_activo:
-            self.set_monto(self.monto_sel, btn_monto_activo)
-        
-        # Refrescar Método Pago
-        self.set_metodo(self.metodo_pago)
+        # --- 3. CONSTRUCCIÓN DE LA INTERFAZ ---
+        layout_principal = QVBoxLayout()
+        layout_principal.setSpacing(15)
+        layout_principal.setContentsMargins(20, 20, 20, 20)
 
-    def set_monto(self, m, btn_sender):
-        self.monto_sel = m
-        c = self.colores
+        # Título
+        lbl_titulo = QLabel("📱 Recarga Electrónica")
+        lbl_titulo.setStyleSheet(f"color: {self.c['accent']}; font-size: 18px;")
+        lbl_titulo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout_principal.addWidget(lbl_titulo)
+
+        # Campo: Compañía (CAMBIO: Ahora es un ComboBox)
+        layout_principal.addWidget(QLabel("Compañía:"))
+        self.combo_compania = QComboBox()
+        self.combo_compania.addItems(["TELCEL", "MOVISTAR", "AT&T", "UNEFON", "BAIT"])
+        layout_principal.addWidget(self.combo_compania)
+
+        # Campo: Número
+        layout_principal.addWidget(QLabel("Número (10 dígitos):"))
+        self.txt_numero = QLineEdit()
+        self.txt_numero.setPlaceholderText("5512345678")
+        self.txt_numero.setMaxLength(10) # Limitar a 10 caracteres
+        layout_principal.addWidget(self.txt_numero)
+
+        # Sección: Monto
+        layout_principal.addWidget(QLabel("Monto:"))
+        grid_montos = QGridLayout()
+        grid_montos.setSpacing(10)
+
+        # Lista de montos (números reales, no strings con signo de pesos para facilitar lógica)
+        montos_data = [20, 30, 50, 100, 200, 500]
+        positions = [(i, j) for i in range(2) for j in range(3)]
         
-        # Estilos Dinámicos
-        # Activo: Azul corporativo (#007aff)
-        style_active = f"""
-            background-color: #007aff; 
-            color: white; 
-            border: 2px solid #007aff; 
-            border-radius: 8px; 
-            font-weight: bold;
-        """
-        # Inactivo: Color del tema actual
-        style_inactive = f"""
-            background-color: {c['btn_bg']}; 
-            color: {c['btn_fg']}; 
-            border: 1px solid {c['border']}; 
-            border-radius: 8px; 
-            font-weight: bold;
-        """
-        
-        for b in self.btn_group_montos:
-            b.setChecked(False)
-            b.setStyleSheet(style_inactive)
+        self.botones_montos = [] # Lista para guardar referencias a los botones
+
+        for position, cantidad in zip(positions, montos_data):
+            texto_btn = f"${cantidad}"
+            btn = QPushButton(texto_btn)
+            btn.setFixedHeight(40)
             
-        btn_sender.setChecked(True)
-        btn_sender.setStyleSheet(style_active)
+            # CONEXIÓN DE LA LÓGICA (Usamos lambda para pasar el valor)
+            # check=False es necesario por defecto en PyQt buttons
+            btn.clicked.connect(lambda checked=False, m=cantidad: self.seleccionar_monto(m))
+            
+            grid_montos.addWidget(btn, *position)
+            self.botones_montos.append(btn) # Guardar en lista para cambiar color después
+        
+        layout_principal.addLayout(grid_montos)
 
-    def set_metodo(self, metodo):
+        # Sección: Método de Pago
+        layout_principal.addWidget(QLabel("Método de Pago:"))
+        layout_pago = QHBoxLayout()
+        
+        self.btn_efectivo = QPushButton("💵 EFECTIVO")
+        self.btn_tarjeta = QPushButton("💳 TARJETA")
+        
+        # Conectar botones de pago
+        self.btn_efectivo.clicked.connect(lambda: self.cambiar_metodo_pago("EFECTIVO"))
+        self.btn_tarjeta.clicked.connect(lambda: self.cambiar_metodo_pago("TARJETA"))
+
+        layout_pago.addWidget(self.btn_efectivo)
+        layout_pago.addWidget(self.btn_tarjeta)
+        layout_principal.addLayout(layout_pago)
+
+        layout_principal.addStretch()
+
+        # Botones Acción
+        layout_botones = QHBoxLayout()
+        btn_cancelar = QPushButton("Cancelar")
+        btn_cancelar.setStyleSheet("background-color: #555; color: white;")
+        btn_cancelar.clicked.connect(self.close)
+
+        btn_recargar = QPushButton("RECARGAR AHORA")
+        btn_recargar.setStyleSheet(f"background-color: {self.c['success']}; color: white; padding: 12px;")
+        btn_recargar.clicked.connect(self.procesar_recarga) # <--- CONEXIÓN FINAL
+        
+        layout_botones.addWidget(btn_cancelar)
+        layout_botones.addWidget(btn_recargar)
+        layout_principal.addLayout(layout_botones)
+
+        self.setLayout(layout_principal)
+        
+        # Seleccionar valores por defecto al iniciar
+        self.cambiar_metodo_pago("EFECTIVO")
+        # Opcional: Seleccionar 50 por defecto
+        # self.seleccionar_monto(50) 
+
+    # --- 4. LÓGICA DEL PROGRAMA ---
+
+    def seleccionar_monto(self, monto):
+        """ Actualiza la variable y pinta el botón seleccionado """
+        self.monto_seleccionado = monto
+        print(f"Monto seleccionado: {monto}")
+        
+        # Actualizar colores visualmente
+        for btn in self.botones_montos:
+            if btn.text() == f"${monto}":
+                # Estilo seleccionado
+                btn.setStyleSheet(f"background-color: {self.c['accent']}; color: white;")
+            else:
+                # Estilo normal
+                btn.setStyleSheet(f"background-color: {self.c['btn_bg']}; color: {self.c['btn_text']};")
+
+    def cambiar_metodo_pago(self, metodo):
         self.metodo_pago = metodo
-        c = self.colores
-        
-        style_active = f"""
-            background-color: #007aff; 
-            color: white; 
-            border: 2px solid #007aff; 
-            border-radius: 8px; 
-            font-weight: bold; 
-            padding: 5px;
-        """
-        style_inactive = f"""
-            background-color: {c['btn_bg']}; 
-            color: {c['btn_fg']}; 
-            border: 1px solid {c['border']}; 
-            border-radius: 8px; 
-            font-weight: bold; 
-            padding: 5px;
-        """
-        
+        estilo_activo = f"background-color: {self.c['accent']}; color: white;"
+        estilo_inactivo = f"background-color: {self.c['btn_bg']}; color: {self.c['btn_text']};"
+
         if metodo == "EFECTIVO":
-            self.btn_efectivo.setStyleSheet(style_active); self.btn_efectivo.setChecked(True)
-            self.btn_tarjeta.setStyleSheet(style_inactive); self.btn_tarjeta.setChecked(False)
+            self.btn_efectivo.setStyleSheet(estilo_activo)
+            self.btn_tarjeta.setStyleSheet(estilo_inactivo)
         else:
-            self.btn_tarjeta.setStyleSheet(style_active); self.btn_tarjeta.setChecked(True)
-            self.btn_efectivo.setStyleSheet(style_inactive); self.btn_efectivo.setChecked(False)
+            self.btn_efectivo.setStyleSheet(estilo_inactivo)
+            self.btn_tarjeta.setStyleSheet(estilo_activo)
 
-    def procesar(self):
-        # 1. Validaciones
-        num = self.txt_num.text().strip()
-        if len(num) != 10 or not num.isdigit():
-            return QMessageBox.warning(self, "Error", "El número debe tener 10 dígitos.")
-
-        cia = self.combo.currentText()
-        monto = self.monto_sel
+    def procesar_recarga(self):
+        # 1. Obtener datos
+        compania = self.combo_compania.currentText()
+        numero = self.txt_numero.text()
         
-        # Confirmación
-        msg = f"¿Recargar ${monto:.2f}?\n\nCompañía: {cia}\nNúmero: {num}\nPago con: {self.metodo_pago}"
-        if QMessageBox.question(self, "Confirmar", msg, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+        # 2. Validaciones
+        if not numero.isdigit() or len(numero) != 10:
+            QMessageBox.warning(self, "Error", "El número debe tener 10 dígitos numéricos.")
             return
 
-        # 2. Llamada al Servicio (Backend)
-        if not self.service:
-             # Simulación si no existe el archivo backend
-             exito, mensaje_prov, folio = True, "Simulación Exitosa", "DEMO-999"
+        if self.monto_seleccionado is None:
+            QMessageBox.warning(self, "Error", "Selecciona un monto para recargar.")
+            return
+
+        # 3. Confirmación (Simulación de cobro)
+        mensaje = (f"¿Confirmar recarga?\n\n"
+                   f"Compañía: {compania}\n"
+                   f"Número: {numero}\n"
+                   f"Monto: ${self.monto_seleccionado}\n"
+                   f"Pago: {self.metodo_pago}")
+                   
+        respuesta = QMessageBox.question(self, "Confirmar", mensaje, 
+                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        
+        if respuesta == QMessageBox.StandardButton.Yes:
+            print("Enviando petición de recarga al sistema...")
+            # AQUI VA TU CÓDIGO DE BASE DE DATOS O API
+            QMessageBox.information(self, "Éxito", "Recarga exitosa.")
+            self.accept() # Cierra la ventana devolviendo "True"
+
+class DialogoNuevoCliente(QDialog):
+    def __init__(self, tema="Dark", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Nuevo Cliente - Registro Rápido")
+        self.setFixedSize(400, 320)
+        
+        layout = QFormLayout(self)
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        self.txt_nombre = QLineEdit()
+        self.txt_nombre.setPlaceholderText("Ej. Juan Pérez")
+        
+        self.txt_telefono = QLineEdit()
+        self.txt_telefono.setPlaceholderText("10 dígitos")
+        
+        self.txt_direccion = QLineEdit()
+        self.txt_direccion.setPlaceholderText("Calle, Colonia...")
+        
+        self.spin_limite = QDoubleSpinBox()
+        self.spin_limite.setRange(0, 100000)
+        self.spin_limite.setPrefix("$")
+        self.spin_limite.setValue(2000)
+
+        # Etiquetas (Las guardamos para cambiarles el color si hace falta)
+        self.labels = []
+        l1 = QLabel("Nombre (*):"); layout.addRow(l1, self.txt_nombre); self.labels.append(l1)
+        l2 = QLabel("Teléfono:"); layout.addRow(l2, self.txt_telefono); self.labels.append(l2)
+        l3 = QLabel("Dirección:"); layout.addRow(l3, self.txt_direccion); self.labels.append(l3)
+        l4 = QLabel("Límite Crédito:"); layout.addRow(l4, self.spin_limite); self.labels.append(l4)
+
+        self.btn_guardar = QPushButton("GUARDAR CLIENTE")
+        self.btn_guardar.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_guardar.clicked.connect(self.accept)
+        layout.addRow(self.btn_guardar)
+
+        # Aplicar el tema recibido al iniciar
+        self.aplicar_tema(tema)
+
+    def aplicar_tema(self, tema):
+        if tema == "Dark":
+            c = {"bg": "#333", "fg": "white", "input": "#444", "border": "#555"}
         else:
-             self.frame.setEnabled(False) # Bloquear UI
-             QApplication.processEvents() # Refrescar visualmente
-             exito, mensaje_prov, folio = self.service.realizar_recarga(cia, num, monto)
-             self.frame.setEnabled(True)
+            c = {"bg": "#f3f3f3", "fg": "black", "input": "white", "border": "#ccc"}
 
-        if exito:
-            # 3. Guardar en Base de Datos
-            class ProductoRecarga:
-                def __init__(self, nombre, precio):
-                    self.id = 0 
-                    self.nombre = nombre
-                    self.precio = precio
-                    self.costo = precio * 0.94 # Margen simulado
-                    self.categoria = "TELEFONIA"
-                    self.detalles_json = "{}"
-            
-            nombre_item = f"RECARGA {cia} - {num} [Folio: {folio}]"
-            producto_mock = ProductoRecarga(nombre_item, monto)
-            
-            try:
-                # Accedemos al usuario desde la ventana padre (VentasWidget -> MainWindow)
-                usuario = self.parent().main.usuario_actual
-                
-                guardado_ok, venta_id = db.realizar_venta(
-                    [producto_mock],
-                    monto,
-                    usuario.id,
-                    "Público General",
-                    self.metodo_pago, 
-                    f"Recarga {folio}"
-                )
-                
-                if guardado_ok:
-                    # 4. Imprimir Ticket
-                    try:
-                        import utils
-                        ruta_pdf = utils.generar_ticket_pdf(
-                            venta_id, [producto_mock], monto, monto, 0,
-                            "Público General", usuario.username,
-                            self.metodo_pago, 
-                            self.parent().main.config
-                        )
-                        if ruta_pdf and os.path.exists(ruta_pdf):
-                            os.startfile(ruta_pdf)
-                    except Exception as e:
-                        print(f"Error ticket: {e}")
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {c['bg']}; color: {c['fg']}; }}
+            QLabel {{ color: {c['fg']}; font-weight: bold; font-size: 14px; background-color: transparent; }}
+            QLineEdit, QDoubleSpinBox {{ 
+                background-color: {c['input']}; color: {c['fg']}; 
+                border: 1px solid {c['border']}; padding: 8px; border-radius: 4px;
+            }}
+            QPushButton {{ 
+                background-color: #28a745; color: white; 
+                padding: 10px; border-radius: 5px; font-weight: bold; border: none;
+            }}
+            QPushButton:hover {{ background-color: #218838; }}
+        """)
+        
+    def get_data(self):
+        return (self.txt_nombre.text().strip(), 
+                self.txt_telefono.text().strip(), 
+                self.txt_direccion.text().strip(), 
+                self.spin_limite.value())
 
-                    QMessageBox.information(self, "Exitosa", f"✅ Recarga realizada.\nFolio: {folio}")
-                    self.accept()
-                else:
-                    QMessageBox.warning(self, "Error BD", f"Error al guardar venta: {venta_id}")
-            except Exception as e:
-                 QMessageBox.critical(self, "Error", f"Error de sistema: {e}")
+# ==========================================
+# CLASES DE GESTIÓN DE CLIENTES Y ABONOS
+# ==========================================
+
+class DialogoAbonar(QDialog):
+    def __init__(self, nombre, deuda_actual, tema="Dark", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Abonar - {nombre}")
+        self.setFixedSize(350, 280)
+        self.monto_pagar = 0.0
+        
+        # Definir colores según tema
+        if tema == "Dark":
+            bg, fg, inp = "#333", "white", "#444"
+            btn_bg = "#555"
         else:
-            QMessageBox.warning(self, "Error Proveedor", mensaje_prov)
+            bg, fg, inp = "#f5f5f7", "black", "white"
+            btn_bg = "#e0e0e0"
 
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {bg}; color: {fg}; }}
+            QLabel {{ font-size: 14px; color: {fg}; }}
+            QDoubleSpinBox {{ 
+                background-color: {inp}; color: {fg}; 
+                padding: 5px; font-size: 16px; border: 1px solid #888; border-radius: 4px;
+            }}
+            QPushButton {{ padding: 10px; font-weight: bold; border-radius: 5px; }}
+        """)
 
+        layout = QVBoxLayout(self)
+        
+        layout.addWidget(QLabel(f"Cliente: {nombre}\nDeuda Actual:"))
+        
+        lbl_deuda = QLabel(f"${deuda_actual:,.2f}")
+        lbl_deuda.setStyleSheet("font-size: 28px; font-weight: bold; color: #ff4d4d;") # Siempre rojo
+        lbl_deuda.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(lbl_deuda)
+        
+        layout.addWidget(QLabel("Monto a Abonar:"))
+        self.spin_monto = QDoubleSpinBox()
+        self.spin_monto.setPrefix("$")
+        self.spin_monto.setRange(0.0, deuda_actual)
+        self.spin_monto.setValue(0.0)
+        layout.addWidget(self.spin_monto)
+        
+        # Espacio
+        layout.addSpacing(10)
+
+        hbox = QHBoxLayout()
+        btn_cancel = QPushButton("Cancelar")
+        btn_cancel.setStyleSheet(f"background-color: {btn_bg}; color: {fg};")
+        btn_cancel.clicked.connect(self.reject)
+
+        btn_pagar = QPushButton("CONFIRMAR")
+        btn_pagar.setStyleSheet("background-color: #28a745; color: white;")
+        btn_pagar.clicked.connect(self.confirmar)
+        
+        hbox.addWidget(btn_cancel)
+        hbox.addWidget(btn_pagar)
+        layout.addLayout(hbox)
+
+    def confirmar(self):
+        self.monto_pagar = self.spin_monto.value()
+        if self.monto_pagar <= 0:
+            # Usamos QMessageBox estático para simplificar estilos
+            QMessageBox.warning(self, "Error", "El monto debe ser mayor a 0")
+            return
+        self.accept()
+        
+# =======================================================
+# 2. CLASE PRINCIPAL: VENTAS WIDGET (MODIFICADA)
+# =======================================================
 class VentasWidget(QWidget):
     def __init__(self, main):
         super().__init__()
         self.main = main
         self.carrito = {}
         self.total = 0.0
-        self.items_finales = [] # Lista para guardar los productos con detalles
+        self.items_finales = [] 
         
         # Layout Principal (Horizontal)
         layout = QHBoxLayout(self)
@@ -1108,24 +1105,51 @@ class VentasWidget(QWidget):
         lp = QVBoxLayout()
         lp.setSpacing(10)
         
-        # 1. Campo Cliente
-        self.txt_cliente = QLineEdit()
-        self.txt_cliente.setPlaceholderText("👤 Nombre del Cliente (Dejar vacío para 'Público General')")
-        self.txt_cliente.setFixedHeight(40)
-        lp.addWidget(self.txt_cliente)
+        # --- CLIENTE (MODIFICADO: CON BOTÓN "+") ---
+        h_cliente = QHBoxLayout()
+        h_cliente.setSpacing(5)
         
-        # 2. Barra de Búsqueda
+        # 1. Campo ID (Pequeño)
+        self.txt_id_cliente = QLineEdit()
+        self.txt_id_cliente.setPlaceholderText("ID")
+        self.txt_id_cliente.setFixedWidth(60)
+        self.txt_id_cliente.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.txt_id_cliente.setToolTip("Ingresa el N° de Cliente y presiona Enter")
+        self.txt_id_cliente.returnPressed.connect(self.buscar_cliente_por_id) 
+        
+        # 2. Campo Nombre (Grande)
+        self.txt_cliente = QLineEdit()
+        self.txt_cliente.setPlaceholderText("👤 Cliente (Vacío para 'Público General')")
+        self.txt_cliente.setFixedHeight(40)
+        self.txt_id_cliente.setFixedHeight(40)
+        
+        # 3. [NUEVO] Botón de Agregar Cliente Rápido
+        self.btn_add_cliente = QPushButton("+")
+        self.btn_add_cliente.setFixedSize(40, 40)
+        self.btn_add_cliente.setToolTip("Registrar Nuevo Cliente para Crédito")
+        self.btn_add_cliente.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_add_cliente.setStyleSheet("""
+            QPushButton { background-color: #28a745; color: white; font-size: 20px; font-weight: bold; border-radius: 5px; }
+            QPushButton:hover { background-color: #218838; }
+        """)
+        self.btn_add_cliente.clicked.connect(self.abrir_registro_rapido) # <--- CONEXIÓN
+        
+        h_cliente.addWidget(self.txt_id_cliente)
+        h_cliente.addWidget(self.txt_cliente)
+        h_cliente.addWidget(self.btn_add_cliente) # <--- AÑADIDO AL LAYOUT
+        
+        lp.addLayout(h_cliente)
+        
+        # --- Barra de Búsqueda Productos ---
         self.txt_bus = QLineEdit()
-        self.txt_bus.setPlaceholderText("🔍 Buscar producto...")
+        self.txt_bus.setPlaceholderText("🔍 Buscar producto (Nombre o Código)...")
         self.txt_bus.textChanged.connect(self.buscar)
         lp.addWidget(self.txt_bus)
         
-        # 3. Tabla de Resultados (Moderna)
+        # --- Tabla de Resultados ---
         self.grid_res = QTableWidget()
         self.grid_res.setColumnCount(3)
         self.grid_res.setHorizontalHeaderLabels(["Producto", "Precio", "Stock"])
-        
-        # Estilo Tabla Izquierda
         self.grid_res.verticalHeader().hide()
         self.grid_res.setShowGrid(False)
         self.grid_res.setAlternatingRowColors(True)
@@ -1135,174 +1159,164 @@ class VentasWidget(QWidget):
         self.grid_res.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.grid_res.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
-        # Ajuste de columnas
         header = self.grid_res.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        header.setDefaultSectionSize(40)
-        self.grid_res.verticalHeader().setDefaultSectionSize(50)
-
+        
         self.grid_res.cellDoubleClicked.connect(self.add_cart)
         lp.addWidget(self.grid_res)
         
-        # Agregamos el panel izquierdo al layout principal (60% ancho)
         layout.addLayout(lp, stretch=6)
         
         # ==========================================
         # PANEL DERECHO (rp) - TICKET ACTUAL
         # ==========================================
-        rp = QVBoxLayout()  
+        rp = QVBoxLayout()
         rp.setSpacing(10)
         
-        # Título
         lbl_ticket = QLabel("Ticket Actual")
         lbl_ticket.setObjectName("Title")
         rp.addWidget(lbl_ticket)
         
-        # 4. Tabla del Carrito (Moderna)
+        # Tabla del Carrito
         self.grid_cart = QTableWidget()
         self.grid_cart.setColumnCount(4)
         self.grid_cart.setHorizontalHeaderLabels(["Prod", "Cant", "Total", ""]) 
-        
-        # Estilo Tabla Derecha
         self.grid_cart.verticalHeader().hide()
         self.grid_cart.setShowGrid(False)
         self.grid_cart.setFrameShape(QFrame.Shape.NoFrame)
         self.grid_cart.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.grid_cart.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         
-        # Ajuste columnas Carrito
         h_cart = self.grid_cart.horizontalHeader()
         h_cart.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        h_cart.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        self.grid_cart.setColumnWidth(1, 120) 
-        h_cart.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        self.grid_cart.setColumnWidth(2, 80)
-        h_cart.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        self.grid_cart.setColumnWidth(3, 50)
-        h_cart.setDefaultSectionSize(40)
-        self.grid_cart.verticalHeader().setDefaultSectionSize(50)
+        h_cart.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed); self.grid_cart.setColumnWidth(1, 120) 
+        h_cart.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed); self.grid_cart.setColumnWidth(2, 80)
+        h_cart.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed); self.grid_cart.setColumnWidth(3, 50)
         
         rp.addWidget(self.grid_cart)
         
-        # Área de Totales y Botón (Abajo a la derecha)
+        # Totales y Botones
         vr = QVBoxLayout()
-        
         self.lbl_tot = QLabel("$0.00")
         self.lbl_tot.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.lbl_tot.setStyleSheet("font-size: 30px; font-weight: bold; color: #28a745;")
         vr.addWidget(self.lbl_tot)
-
-        # -----------------------------------------------------------
-        # NUEVO BOTÓN AGREGADO: RECARGAS
-        # -----------------------------------------------------------
+        
+        # Botón Recargas
         self.btn_recargas = QPushButton("📱 RECARGA T.A.")
         self.btn_recargas.setMinimumHeight(45)
         self.btn_recargas.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_recargas.setStyleSheet("""
-            QPushButton { 
-                background-color: #007aff; 
-                color: white; 
-                font-weight: bold; 
-                border-radius: 8px; 
-                font-size: 14px; 
-            }
-            QPushButton:hover { background-color: #005bb5; }
-        """)
-        # Conectamos a la función que abre el diálogo
+        self.btn_recargas.setStyleSheet("background-color: #007aff; color: white; font-weight: bold; border-radius: 8px;")
         self.btn_recargas.clicked.connect(self.abrir_recargas)
         vr.addWidget(self.btn_recargas)
         
-        # Espacio separador
         vr.addSpacing(10)
-        # -----------------------------------------------------------
         
+        # Botón Cobrar
         self.btn_cobrar = QPushButton("Cobrar")
-        self.btn_cobrar.setObjectName("SuccessBtn")
+        self.btn_cobrar.setObjectName("SuccessBtn") 
         self.btn_cobrar.setMinimumHeight(55)
         self.btn_cobrar.clicked.connect(self.iniciar_cobro)
         vr.addWidget(self.btn_cobrar)
         
         rp.addLayout(vr)
-        
-        # Agregamos el panel derecho al layout principal (40% ancho)
         layout.addLayout(rp, stretch=4)
         
-        # Cargar productos iniciales
         self.buscar()
 
+    # --- [NUEVA FUNCIÓN] REGISTRO RÁPIDO DE CLIENTE ---
+    def abrir_registro_rapido(self):
+        """Abre ventana modal, guarda en BD y pone los datos en la venta"""
+        tema_actual = self.main.config.get("tema", "Dark")
+        dlg = DialogoNuevoCliente(tema=tema_actual, parent=self)
+        if dlg.exec():
+            nombre, tel, direc, limite = dlg.get_data()
+            
+            if not nombre:
+                return QMessageBox.warning(self, "Error", "El nombre es obligatorio")
+            
+            # Guardamos en BD usando tu función de database.py
+            exito, resultado = db.agregar_cliente(nombre, tel, direc, limite)
+            
+            if exito:
+                nuevo_id = resultado
+                # Auto-rellenamos los campos
+                self.txt_id_cliente.setText(str(nuevo_id))
+                self.txt_cliente.setText(nombre)
+                
+                QMessageBox.information(self, "Registrado", 
+                                      f"✅ Cliente Registrado.\n\n"
+                                      f"ID GENERADO: {nuevo_id}\n"
+                                      f"Límite Crédito: ${limite:,.2f}")
+                self.txt_bus.setFocus()
+            else:
+                QMessageBox.critical(self, "Error", f"No se pudo guardar: {resultado}")
+
+    # --- LÓGICA DE BÚSQUEDA ---
     def buscar(self):
         txt = self.txt_bus.text().strip()
-        # Si está vacío, no busques nada para no llenar la tabla de basura
         if not txt: 
             self.grid_res.setRowCount(0)
             return
 
-        res = db.buscar_productos(txt) # Asegúrate de tener esta función en database.py
+        res = db.buscar_productos(txt)
         
         self.grid_res.setRowCount(0)
         for p in res:
             r = self.grid_res.rowCount()
             self.grid_res.insertRow(r)
-            
-            # Columna 1: Nombre
             item_nom = QTableWidgetItem(p.nombre)
-            
-            # 👇 ¡ESTA LÍNEA ES VITAL! Guarda el objeto producto dentro de la celda 👇
             item_nom.setData(Qt.ItemDataRole.UserRole, p) 
-            # 👆 Sin esto, el carrito no sabe qué producto estás clicando 👆
-            
             self.grid_res.setItem(r, 0, item_nom)
-            
-            # Columna 2: Precio
             self.grid_res.setItem(r, 1, QTableWidgetItem(f"${p.precio}"))
-            
-            # Columna 3: Stock
             self.grid_res.setItem(r, 2, QTableWidgetItem(str(p.stock)))
 
-    def add_cart(self, r, c):
-        print(f"1. Doble clic detectado en Fila: {r}, Columna: {c}") # DEBUG
-        
-        # --- CORRECCIÓN CLAVE AQUÍ ---
-        # No usamos 'c' (la columna clicada). Forzamos leer la columna 0.
-        item = self.grid_res.item(r, 0) 
-        
-        if not item:
-            print("❌ Error: No se encontró el item en la columna 0")
-            return
-
-        # Recuperar el objeto
-        prod_obj = item.data(Qt.ItemDataRole.UserRole)
-        
-        if not prod_obj:
-            print("❌ Error: El item no tiene datos guardados (UserRole es None)")
-            return
+    def buscar_cliente_por_id(self):
+        id_str = self.txt_id_cliente.text().strip()
+        if not id_str: return
+        if not id_str.isdigit():
+            self.txt_id_cliente.clear()
+            return QMessageBox.warning(self, "Error", "El número de cliente debe ser numérico.")
             
-        print(f"2. Producto recuperado: {prod_obj.nombre}") # DEBUG
+        cliente = db.buscar_cliente_por_id(int(id_str))
+        if cliente:
+            self.txt_cliente.setText(cliente['nombre'])
+            self.txt_bus.setFocus() 
+            if cliente['saldo'] > 0:
+                QMessageBox.information(self, "Aviso", f"El cliente {cliente['nombre']} tiene un saldo pendiente de: ${cliente['saldo']:,.2f}")
+        else:
+            QMessageBox.warning(self, "No encontrado", "No existe ningún cliente con ese número.")
+            self.txt_cliente.clear()
+            self.txt_id_cliente.selectAll()
 
-        # --- A PARTIR DE AQUÍ SIGUE TU LÓGICA DE TALLAS/IMEI ---
+    # --- LÓGICA CARRITO ---
+    def add_cart(self, r, c):
+        item = self.grid_res.item(r, 0) 
+        if not item: return
+
+        prod_obj = item.data(Qt.ItemDataRole.UserRole)
+        if not prod_obj: return
+
         try:
             talla_elegida = None
-            stock_limite = prod_obj.stock
+            stock_limite = int(prod_obj.stock) 
             
-            # Lógica Ropa
             detalles = json.loads(prod_obj.detalles_json or "{}")
             if "tallas_stock" in detalles:
-                # Asegúrate de que DialogoSeleccionTalla esté importado y funcione
                 tema_actual = self.main.config.get("tema", "Light")
                 dlg = DialogoSeleccionTalla(detalles["tallas_stock"], tema=tema_actual, parent=self.main)
                 if dlg.exec():
                     talla_elegida = dlg.talla_seleccionada
-                    stock_limite = detalles["tallas_stock"].get(talla_elegida, 0)
+                    try:
+                        stock_limite = int(detalles["tallas_stock"].get(talla_elegida, 0))
+                    except: stock_limite = 0
                 else:
-                    print("Canceló selección de talla")
                     return 
 
-            # Generar Clave Única para el carrito
             cart_key = f"{prod_obj.id}_{talla_elegida}" if talla_elegida else prod_obj.id
             
-            # Agregar al diccionario
             if cart_key in self.carrito:
                 if self.carrito[cart_key]['cant'] + 1 > stock_limite:
                     return QMessageBox.warning(self, "Stock", f"Solo hay {stock_limite} disponibles.")
@@ -1310,21 +1324,12 @@ class VentasWidget(QWidget):
             else:
                 if stock_limite < 1:
                     return QMessageBox.warning(self, "Agotado", "Producto sin stock.")
-                    
                 self.carrito[cart_key] = {
-                    'obj': prod_obj, 
-                    'cant': 1, 
-                    'talla': talla_elegida,
-                    'stock_max': stock_limite
+                    'obj': prod_obj, 'cant': 1, 'talla': talla_elegida, 'stock_max': stock_limite
                 }
-            
-            print("3. Producto agregado al diccionario. Actualizando tabla...")
             self.upd_cart()
-            
         except Exception as e:
-            print(f"❌ ERROR DENTRO DE ADD_CART: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"Error add_cart: {e}")
 
     def upd_cart(self):
         self.grid_cart.setRowCount(0)
@@ -1334,85 +1339,60 @@ class VentasWidget(QWidget):
             prod = val['obj']
             cant = val['cant']
             talla = val.get('talla', '')
-            
             subtotal = prod.precio * cant
             self.total += subtotal
             
             r = self.grid_cart.rowCount()
             self.grid_cart.insertRow(r)
             
-            # --- COLUMNA 0: NOMBRE ---
             nom_str = prod.nombre
             if talla: nom_str += f" [{talla}]"
             item_nom = QTableWidgetItem(nom_str)
             item_nom.setFlags(Qt.ItemFlag.NoItemFlags)
             self.grid_cart.setItem(r, 0, item_nom)
             
-            # --- COLUMNA 1: BOTONES CANTIDAD (- 1 +) ---
+            # Widget Cantidad
             widget_qty = QWidget()
-            layout_qty = QHBoxLayout(widget_qty)
-            # IMPORTANTE: Márgenes en 0 para aprovechar todo el espacio
-            layout_qty.setContentsMargins(0, 0, 0, 0)
-            layout_qty.setSpacing(4) 
-            layout_qty.setAlignment(Qt.AlignmentFlag.AlignCenter) # Centrado total
+            lq = QHBoxLayout(widget_qty)
+            lq.setContentsMargins(0,0,0,0); lq.setSpacing(4); lq.setAlignment(Qt.AlignmentFlag.AlignCenter)
             
-            btn_menos = QPushButton("-")
-            btn_menos.setFixedSize(28, 28) # Un poco más grandes
-            btn_menos.setStyleSheet("background-color: #007aff; color: white; border-radius: 6px; font-weight: bold; padding: 0;")
-            btn_menos.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_menos.clicked.connect(lambda _, k=key: self.mod_qty(k, -1))
+            b_min = QPushButton("-")
+            b_min.setFixedSize(28,28)
+            b_min.setStyleSheet("background-color: #007aff; color: white; border-radius: 6px; font-weight: bold;")
+            b_min.clicked.connect(lambda _, k=key: self.mod_qty(k, -1))
             
-            lbl_cant = QLabel(str(cant))
-            lbl_cant.setStyleSheet("font-weight: bold; font-size: 14px;")
-            lbl_cant.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl_cant.setFixedWidth(30) # Ancho fijo para que no baile el texto
+            lbl_c = QLabel(str(cant))
+            lbl_c.setStyleSheet("font-weight: bold;")
+            lbl_c.setFixedWidth(20); lbl_c.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            b_mas = QPushButton("+")
+            b_mas.setFixedSize(28,28)
+            b_mas.setStyleSheet("background-color: #007aff; color: white; border-radius: 6px; font-weight: bold;")
+            b_mas.clicked.connect(lambda _, k=key: self.mod_qty(k, 1))
             
-            btn_mas = QPushButton("+")
-            btn_mas.setFixedSize(28, 28)
-            btn_mas.setStyleSheet("background-color: #007aff; color: white; border-radius: 6px; font-weight: bold; padding: 0;")
-            btn_mas.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_mas.clicked.connect(lambda _, k=key: self.mod_qty(k, 1))
-            
-            layout_qty.addWidget(btn_menos)
-            layout_qty.addWidget(lbl_cant)
-            layout_qty.addWidget(btn_mas)
-            
+            lq.addWidget(b_min); lq.addWidget(lbl_c); lq.addWidget(b_mas)
             self.grid_cart.setCellWidget(r, 1, widget_qty)
             
-            # --- COLUMNA 2: TOTAL ---
-            lbl_tot = QLabel(f"${subtotal:,.0f}") # Sin decimales para ahorrar espacio visual si prefieres, o usa .2f
-            lbl_tot.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl_tot.setStyleSheet("color: #333; font-weight: bold;")
-            self.grid_cart.setCellWidget(r, 2, lbl_tot)
+            # Total
+            lbl_st = QLabel(f"${subtotal:,.0f}")
+            lbl_st.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.grid_cart.setCellWidget(r, 2, lbl_st)
             
-            # --- COLUMNA 3: BORRAR ---
-            w_del = QWidget()
-            l_del = QHBoxLayout(w_del)
-            l_del.setContentsMargins(0,0,0,0)
-            l_del.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            
-            btn_del = QPushButton("✕") # Usamos un caracter de X más bonito
-            btn_del.setFixedSize(28, 28)
-            btn_del.setStyleSheet("""
-                QPushButton { background-color: #ff3b30; color: white; border-radius: 6px; font-weight: bold; padding: 0;}
-                QPushButton:hover { background-color: #d32f2f; }
-            """)
-            btn_del.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_del.clicked.connect(lambda _, k=key: self.del_item(k))
-            
-            l_del.addWidget(btn_del)
+            # Borrar
+            w_del = QWidget(); ld = QHBoxLayout(w_del); ld.setContentsMargins(0,0,0,0); ld.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            b_del = QPushButton("✕")
+            b_del.setFixedSize(28,28)
+            b_del.setStyleSheet("background-color: #ff3b30; color: white; border-radius: 6px; font-weight: bold;")
+            b_del.clicked.connect(lambda _, k=key: self.del_item(k))
+            ld.addWidget(b_del)
             self.grid_cart.setCellWidget(r, 3, w_del)
             
         self.lbl_tot.setText(f"${self.total:,.2f}")
 
-    # También actualiza 'mod' para usar la nueva 'key'
     def mod_qty(self, key, d):
         if key in self.carrito:
-            # Validar stock al sumar con botón '+'
-            if d > 0:
-                if self.carrito[key]['cant'] + d > self.carrito[key]['stock_max']:
-                     return QMessageBox.warning(self, "Stock", "No hay más stock disponible.")
-            
+            if d > 0 and self.carrito[key]['cant'] + d > self.carrito[key]['stock_max']:
+                 return QMessageBox.warning(self, "Stock", "No hay más stock disponible.")
             self.carrito[key]['cant'] += d
             if self.carrito[key]['cant'] <= 0: del self.carrito[key]
             self.upd_cart()
@@ -1422,408 +1402,270 @@ class VentasWidget(QWidget):
             del self.carrito[key]
             self.upd_cart()
 
-    # --- FUNCIÓN NUEVA: ABRIR DIÁLOGO DE RECARGAS ---
     def abrir_recargas(self):
-        # Leemos la configuración global del tema
-        tema_actual = self.main.config.get("tema", "Light") 
+        # Detectar brillo para modo oscuro
+        bg_color = self.palette().color(self.palette().ColorRole.Window)
+        es_modo_oscuro = bg_color.lightness() < 128
         
-        # Se lo enviamos al diálogo para que se pinte correctamente
-        dlg = DialogoRecargas(self, tema=tema_actual)
-        dlg.exec()
+        dialogo = DialogoRecargas(modo_oscuro=es_modo_oscuro)
+        dialogo.exec()
 
-    # --- FLUJO DE COBRO CORREGIDO ---
+    def seleccionar_imei_disponible(self, producto):
+        try:
+            raw_json = producto.detalles_json
+            detalles = json.loads(raw_json) if raw_json else {}
+            lista_imeis = detalles.get("imei", [])
+            
+            if not lista_imeis: 
+                QMessageBox.warning(self, "Stock Error", f"El producto '{producto.nombre}' no tiene IMEIs registrados.")
+                return None
+            
+            tema = self.main.config.get("tema", "Dark")
+            dlg = DialogoCapturaIMEI(producto.nombre, len(lista_imeis), self.main, tema=tema)
+            
+            while True:
+                if dlg.exec(): 
+                    imei = dlg.imei_resultado
+                    if imei in lista_imeis: return imei
+                    else:
+                        QMessageBox.warning(self, "Error", "El IMEI escaneado no pertenece a este lote.")
+                        dlg.txt_imei.clear(); dlg.txt_imei.setFocus()
+                else: return None
+        except: return None
+
+    # --- COBRO Y FINALIZACIÓN ---
     def iniciar_cobro(self):
-        print("🟢 Iniciando proceso de cobro...") # DEBUG
-        
-        if not self.carrito: 
-            return QMessageBox.warning(self, "!", "Carrito vacío")
+        if not self.carrito: return QMessageBox.warning(self, "!", "Carrito vacío")
         
         try:
             self.items_finales = []
-            
-            # 1. PROCESAR CARRITO
             for key, val in self.carrito.items():
                 prod_obj = val['obj']
                 cantidad = val['cant']
                 talla = val.get('talla')
                 
-                # Detectar Celular
                 es_celular = False
                 try:
                     if prod_obj.categoria == "TELEFONIA": es_celular = True
                     elif "imei" in json.loads(prod_obj.detalles_json or "{}"): es_celular = True
                 except: pass
 
-                # Crear copias unitarias
                 for _ in range(cantidad):
                     copia = copy.copy(prod_obj)
-                    
-                    # Ropa
                     if talla:
                         copia.talla_vendida_temp = talla
                         copia.nombre = f"{copia.nombre} [{talla}]"
-                    
-                    # Telefonía
                     if es_celular:
                         imei = self.seleccionar_imei_disponible(copia)
-                        if imei:
-                            copia.imei_seleccionado = imei
-                            copia.nombre = f"{copia.nombre} [IMEI: {imei}]"
-                        else:
-                            return QMessageBox.warning(self, "Error", f"Falta IMEI para {prod_obj.nombre}")
-
+                        if not imei: return 
+                        copia.imei_seleccionado = imei
+                        copia.nombre = f"{copia.nombre} [IMEI: {imei}]"
                     self.items_finales.append(copia)
             
-            print("✅ Items procesados. Abriendo ventana de pago...") # DEBUG
-
-            # 2. ABRIR VENTANA DE PAGO
-            tema_actual = self.main.config.get("tema", "Light")
-            dialogo = DialogoPago(self.total, tema=tema_actual, parent=self.main)
+            tema = self.main.config.get("tema", "Light")
+            dialogo = DialogoPago(self.total, tema=tema, parent=self.main)
             
             if dialogo.exec():
-                print(f"💰 Cobro confirmado. Método: {dialogo.metodo_seleccionado}") # DEBUG
-                self.procesar_pago_confirmado(dialogo.metodo_seleccionado, dialogo.referencia_pago)
+                metodo = dialogo.metodo_seleccionado
+                referencia = dialogo.referencia_pago
+                cliente_id_credito = None
+                
+                # Validación Crédito
+                if metodo == "CREDITO":
+                    nombre_cliente = self.txt_cliente.text().strip()
+                    id_txt = self.txt_id_cliente.text().strip()
+                    cliente_db = None
+                    
+                    if id_txt.isdigit(): cliente_db = db.buscar_cliente_por_id(int(id_txt))
+                    if not cliente_db: cliente_db = db.buscar_cliente_nombre(nombre_cliente)
+                    
+                    if not cliente_db:
+                        return QMessageBox.warning(self, "Error", "Cliente no encontrado. Regístralo primero con el botón (+).")
+                    
+                    nueva_deuda = cliente_db['saldo'] + self.total
+                    if nueva_deuda > cliente_db['limite']:
+                        return QMessageBox.critical(self, "Límite Excedido", f"Límite: ${cliente_db['limite']}\nSaldo Nuevo sería: ${nueva_deuda}")
+                    
+                    cliente_id_credito = cliente_db['id']
+                    if QMessageBox.question(self, "Confirmar", f"¿Fiar a {cliente_db['nombre']}?", QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                        return
+
+                self.procesar_pago_confirmado(metodo, referencia, cliente_id_credito)
                 
         except Exception as e:
-            print(f"❌ ERROR CRÍTICO EN COBRO: {e}")
-            import traceback
-            traceback.print_exc()
-            QMessageBox.critical(self, "Error", f"Ocurrió un error al intentar cobrar:\n{e}")
-    
-    def seleccionar_imei_disponible(self, producto):
-        """
-        Abre el diálogo bonito para escanear IMEI y verifica si existe en la lista del producto.
-        """
+            print(f"Error cobro: {e}")
+            import traceback; traceback.print_exc()
+
+    def procesar_pago_confirmado(self, metodo, referencia, cliente_id_credito=None):
+        cliente_nombre = self.txt_cliente.text().strip() or "Público General"
         try:
-            # 1. Obtener lista de IMEIs del producto (Base de datos / JSON)
-            raw_json = producto.detalles_json
-            if not raw_json:
-                detalles = {}
-            elif isinstance(raw_json, dict):
-                detalles = raw_json
-            else:
-                import json
-                detalles = json.loads(raw_json)
-
-            lista_imeis_validos = detalles.get("imei", [])
-            
-            # Validación: Si no hay IMEIs registrados, no se puede vender
-            if not lista_imeis_validos: 
-                QMessageBox.warning(self, "Stock Error", f"El producto '{producto.nombre}' figura como telefonía pero NO tiene IMEIs registrados en el sistema.")
-                return None
-            
-            # --- 2. DETECTAR EL TEMA ACTUAL (CORRECCIÓN) ---
-            tema_actual = "Dark" # Valor por defecto
-            
-            # Buscamos la configuración en 'self.main' (lo más común si esto es una sub-ventana)
-            if hasattr(self, 'main') and hasattr(self.main, 'config'):
-                tema_actual = self.main.config.get("tema", "Dark")
-            # O buscamos en 'self' si esta es la ventana principal
-            elif hasattr(self, 'config'):
-                tema_actual = self.config.get("tema", "Dark")
-
-            # --- 3. ABRIR VENTANA PASANDO EL TEMA ---
-            # Pasamos 'tema=tema_actual' para que la ventana sepa de qué color pintarse
-            dlg = DialogoCapturaIMEI(producto.nombre, len(lista_imeis_validos), self, tema=tema_actual)
-            
-            while True:
-                # Mostrar ventana y esperar
-                if dlg.exec(): 
-                    # El usuario dio Enter o clic en Validar
-                    imei_input = dlg.imei_resultado
-                    
-                    if imei_input in lista_imeis_validos:
-                        return imei_input # ¡ÉXITO! Retornamos el IMEI
-                    else:
-                        # Error visual
-                        QMessageBox.warning(self, "Error de Validación", 
-                                            f"El IMEI '{imei_input}' no pertenece a este lote de productos.\n"
-                                            "Por favor escanee uno de los disponibles.")
-                        
-                        # Reiniciamos el input para intentar de nuevo
-                        dlg.txt_imei.clear()
-                        dlg.txt_imei.setFocus()
-                else:
-                    return None # El usuario dio Cancelar o cerró la ventana
-
-        except Exception as e:
-            print(f"Error en flujo IMEI: {e}")
-            QMessageBox.critical(self, "Error", f"Fallo al procesar IMEI: {e}")
-            return None
-
-    def procesar_pago_confirmado(self, metodo, referencia):
-        # 1. OBTENER NOMBRE DEL CLIENTE
-        cliente_nombre = self.txt_cliente.text().strip()
-        if not cliente_nombre:
-            cliente_nombre = "Público General"
-
-        try:
-            # 2. ENVIAR A BASE DE DATOS
-            exito, resultado = db.realizar_venta(
-                self.items_finales, 
-                self.total, 
-                self.main.usuario_actual.id, 
-                cliente_nombre,
-                metodo, 
-                referencia
+            exito, res = db.realizar_venta(
+                self.items_finales, self.total, self.main.usuario_actual.id, 
+                cliente_nombre, metodo, referencia
             )
             
             if exito:
-                venta_id = resultado
+                venta_id = res
+                if metodo == "CREDITO" and cliente_id_credito:
+                    # Registramos el cargo en la cuenta del cliente
+                    db.cargar_venta_credito(cliente_id_credito, self.total)
                 
-                # 3. GENERAR TICKET PDF
                 try:
-                    # ✅ CORRECCIÓN FINAL: Agregamos 'metodo' para que coincida con utils.py
+                    # Generación de Ticket (Asumiendo que utils existe)
+                    import utils 
                     ruta_pdf = utils.generar_ticket_pdf(
-                        venta_id, 
-                        self.items_finales, 
-                        self.total, 
-                        self.total,     # Recibido (asumimos exacto por ahora)
-                        0,              # Cambio (asumimos 0 por ahora)
-                        cliente_nombre, 
-                        self.main.usuario_actual.username,
-                        metodo,         # <--- ¡AQUÍ FALTABA ESTE DATO!
-                        self.main.config
+                        venta_id, self.items_finales, self.total, self.total, 0, 
+                        cliente_nombre, self.main.usuario_actual.username, metodo, self.main.config
                     )
-                    
-                    if ruta_pdf and os.path.exists(ruta_pdf):
-                        os.startfile(ruta_pdf)
-                    else:
-                        print("Advertencia: El PDF se generó pero no se encuentra la ruta.")
-                        
-                except Exception as e_ticket:
-                    # Mostrar error en pantalla para saber qué pasa si falla de nuevo
-                    print(f"Error al generar ticket: {e_ticket}")
-                    QMessageBox.warning(self, "Error Ticket", f"Venta guardada, pero error al imprimir:\n{e_ticket}")
+                    if ruta_pdf and os.path.exists(ruta_pdf): os.startfile(ruta_pdf)
+                except: pass
                 
-                # 4. LIMPIAR INTERFAZ
-                self.carrito = {}       
-                self.upd_cart()         
-                
-                self.txt_cliente.clear() 
-                self.txt_bus.clear()     
-                self.buscar()            
-                self.txt_bus.setFocus()  
-                
-                # Opcional: Quitar mensaje si prefieres venta rápida
-                QMessageBox.information(self, "Venta Exitosa", f"Venta #{venta_id} registrada correctamente.")
-                
+                # Limpiar todo
+                self.carrito = {}
+                self.upd_cart()
+                self.txt_cliente.clear(); self.txt_id_cliente.clear()
+                self.txt_bus.clear(); self.buscar(); self.txt_bus.setFocus()
+                QMessageBox.information(self, "Venta Exitosa", f"Venta #{venta_id} registrada.")
             else:
-                QMessageBox.warning(self, "Error al Guardar", f"La venta no se pudo registrar:\n{resultado}")
-                
+                QMessageBox.warning(self, "Error", f"Fallo al guardar: {res}")
         except Exception as e:
-            QMessageBox.critical(self, "Error Crítico", f"Ocurrió un error inesperado:\n{str(e)}")
-
+            QMessageBox.critical(self, "Error", str(e))
+            
 class DialogoPago(QDialog):
-    senal_estado = pyqtSignal(str)
-    senal_resultado = pyqtSignal(str)
-    def __init__(self, total_a_pagar, tema, parent=None):
+    def __init__(self, total, tema="Dark", parent=None):
         super().__init__(parent)
-        self.total = total_a_pagar
-        self.tema = tema
-        self.metodo_seleccionado = "EFECTIVO"
-        self.total_a_pagar = total_a_pagar
-        self.referencia_pago = ""
-        
+        self.setWindowTitle("Cobrar")
+        self.setFixedSize(400, 550) # Aumentamos un poco el alto
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedSize(500, 600)
-
-        # --- COLORES DINÁMICOS ---
-        if tema == "Dark":
-            bg = "#1e1e1e"; fg = "white"; input_bg = "#2d2d2d"; border = "#444"
-            self.active_style = "background-color: #007aff; color: white; border: none;"
-            self.inactive_style = "background-color: #3a3a3a; color: white; border: 1px solid #444;"
-        else:
-            bg = "#ffffff"; fg = "#1d1d1f"; input_bg = "#f5f5f7"; border = "#d2d2d7"
-            self.active_style = "background-color: #007aff; color: white; border: none;"
-            self.inactive_style = "background-color: #f0f0f0; color: #1d1d1f; border: 1px solid #d2d2d7;"
-
-        layout = QVBoxLayout(self); layout.setContentsMargins(0,0,0,0)
         
+        self.total_pagar = total
+        self.metodo_seleccionado = "EFECTIVO"
+        self.referencia_pago = ""
+        self.tema = tema
+        
+        layout = QVBoxLayout(self)
         self.frame = QFrame()
-        self.frame.setStyleSheet(f"""
-            QFrame {{ background-color: {bg}; border-radius: 15px; border: 1px solid {border}; }}
-            QLabel {{ color: {fg}; font-weight: bold; background: transparent; border: none; }}
-            QLineEdit {{ background-color: {input_bg}; color: {fg}; border: 1px solid {border}; border-radius: 8px; padding: 10px; font-size: 16px; }}
-            QPushButton {{ border-radius: 8px; padding: 10px; font-weight: bold; font-size: 14px; }}
-        """)
-        l_main = QVBoxLayout(self.frame); l_main.setContentsMargins(30,30,30,30); l_main.setSpacing(20)
-
-        # 1. Total
-        l_main.addWidget(QLabel("Total a Pagar", alignment=Qt.AlignmentFlag.AlignCenter))
-        lbl_tot = QLabel(f"${self.total:,.2f}")
-        lbl_tot.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_tot.setStyleSheet("font-size: 48px; color: #28a745;")
-        l_main.addWidget(lbl_tot)
-
-        # 2. Botones Método
-        l_main.addWidget(QLabel("Selecciona Método:"))
-        h_btns = QHBoxLayout()
-        self.btn_efe = self.btn_metodo("💵 Efectivo", "EFECTIVO")
-        self.btn_tar = self.btn_metodo("💳 Tarjeta", "TARJETA")
-        self.btn_tra = self.btn_metodo("🏦 Transf.", "TRANSFERENCIA")
-        h_btns.addWidget(self.btn_efe); h_btns.addWidget(self.btn_tar); h_btns.addWidget(self.btn_tra)
-        l_main.addLayout(h_btns)
-
-        # 3. Stacked Widget
-        self.stack = QStackedWidget(); self.stack.setFixedHeight(180)
+        layout.addWidget(self.frame)
         
-        # Pagina Efectivo
-        p_efe = QWidget(); l_efe = QVBoxLayout(p_efe)
-        self.txt_recibido = QLineEdit(); self.txt_recibido.setPlaceholderText("Monto Recibido")
-        self.txt_recibido.textChanged.connect(self.calc_cambio)
-        self.lbl_cambio = QLabel("Cambio: $0.00", alignment=Qt.AlignmentFlag.AlignRight)
-        self.lbl_cambio.setStyleSheet("font-size: 18px; color: #ff9800;")
-        l_efe.addWidget(QLabel("Dinero Recibido:")); l_efe.addWidget(self.txt_recibido); l_efe.addWidget(self.lbl_cambio); l_efe.addStretch()
-        self.stack.addWidget(p_efe)
+        l = QVBoxLayout(self.frame)
+        l.setContentsMargins(30,30,30,30)
+        l.setSpacing(15)
+        
+        # Total Gigante
+        lbl_tot = QLabel(f"${total:,.2f}")
+        lbl_tot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_tot.setStyleSheet("font-size: 40px; font-weight: bold; color: #28a745; border: none;")
+        l.addWidget(lbl_tot)
+        
+        l.addWidget(QLabel("Seleccione Método de Pago:", styleSheet="font-weight: bold; border: none;"))
+        
+        # Opciones
+        self.rb_efectivo = QRadioButton("💵 EFECTIVO")
+        self.rb_efectivo.setChecked(True)
+        self.rb_efectivo.toggled.connect(self.cambio_metodo)
+        
+        self.rb_tarjeta = QRadioButton("💳 TARJETA (Débito/Crédito)")
+        self.rb_tarjeta.toggled.connect(self.cambio_metodo)
+        
+        self.rb_transf = QRadioButton("🏦 TRANSFERENCIA")
+        self.rb_transf.toggled.connect(self.cambio_metodo)
 
-        # Pagina Tarjeta
-        p_tar = QWidget(); l_tar = QVBoxLayout(p_tar)
-        box = QFrame(); box.setStyleSheet("background-color: #009ee3; border-radius: 10px;")
-        lb_mp = QVBoxLayout(box)
-        lb_mp.addWidget(QLabel("Mercado Pago Point", alignment=Qt.AlignmentFlag.AlignCenter, styleSheet="color: white;"))
-        self.btn_mp = QPushButton("ACTIVAR MERCADO PAGO")
-        self.btn_mp.setStyleSheet("background: white; color: #009ee3; border: none; font-weight: bold;")
-        self.btn_mp.clicked.connect(self.iniciar_cobro_mp)
-        lb_mp.addWidget(self.btn_mp)
-        l_tar.addWidget(box)
-        self.stack.addWidget(p_tar)
-
-        # Pagina Transferencia
-        p_tra = QWidget(); l_tra = QVBoxLayout(p_tra)
-        self.txt_ref = QLineEdit(); self.txt_ref.setPlaceholderText("Número de Operación")
-        l_tra.addWidget(QLabel("Referencia:")); l_tra.addWidget(self.txt_ref); l_tra.addStretch()
-        self.stack.addWidget(p_tra)
-
-        l_main.addWidget(self.stack)
-
-        # 4. Acciones
-        h_act = QHBoxLayout()
-        btn_cancel = QPushButton("Cancelar"); 
-        btn_cancel.setStyleSheet(f"background-color: {input_bg}; color: {fg}; border: 1px solid {border};")
+        # --- NUEVA OPCIÓN: CRÉDITO ---
+        self.rb_credito = QRadioButton("📝 A CRÉDITO (Fiado)")
+        self.rb_credito.setStyleSheet("font-weight: bold; color: #ff9800;") # Naranja para resaltar
+        self.rb_credito.toggled.connect(self.cambio_metodo)
+        
+        l.addWidget(self.rb_efectivo)
+        l.addWidget(self.rb_tarjeta)
+        l.addWidget(self.rb_transf)
+        l.addWidget(self.rb_credito) # <--- AGREGAR AL LAYOUT
+        
+        # Campos Dinámicos
+        self.lbl_extra = QLabel("Recibido:")
+        self.lbl_extra.setStyleSheet("border: none;")
+        l.addWidget(self.lbl_extra)
+        
+        self.txt_extra = QLineEdit()
+        self.txt_extra.setPlaceholderText("Monto recibido")
+        self.txt_extra.textChanged.connect(self.calc_cambio)
+        l.addWidget(self.txt_extra)
+        
+        self.lbl_cambio = QLabel("Cambio: $0.00")
+        self.lbl_cambio.setStyleSheet("font-size: 18px; font-weight: bold; color: #ff9800; border: none;")
+        self.lbl_cambio.setAlignment(Qt.AlignmentFlag.AlignRight)
+        l.addWidget(self.lbl_cambio)
+        
+        l.addStretch()
+        
+        # Botones
+        h = QHBoxLayout()
+        btn_cancel = QPushButton("Cancelar")
         btn_cancel.clicked.connect(self.reject)
         
         self.btn_cobrar = QPushButton("COBRAR")
-        self.btn_cobrar.setStyleSheet("background-color: #28a745; color: white; border: none;")
-        self.btn_cobrar.clicked.connect(self.validar)
+        self.btn_cobrar.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; font-size: 16px; padding: 12px;")
+        self.btn_cobrar.clicked.connect(self.procesar)
         
-        h_act.addWidget(btn_cancel); h_act.addWidget(self.btn_cobrar)
-        l_main.addLayout(h_act)
+        h.addWidget(btn_cancel)
+        h.addWidget(self.btn_cobrar)
+        l.addLayout(h)
         
-        layout.addWidget(self.frame)
-        self.cambiar_metodo("EFECTIVO")
-        
-        # Centrar
-        if parent:
-            self.move(parent.geometry().center() - self.rect().center())
+        self.aplicar_tema()
 
-    def btn_metodo(self, txt, met):
-        b = QPushButton(txt); b.setCheckable(True); b.setFixedHeight(40)
-        b.clicked.connect(lambda: self.cambiar_metodo(met))
-        return b
-
-    def cambiar_metodo(self, met):
-        self.metodo_seleccionado = met
-        self.btn_efe.setStyleSheet(self.active_style if met=="EFECTIVO" else self.inactive_style)
-        self.btn_tar.setStyleSheet(self.active_style if met=="TARJETA" else self.inactive_style)
-        self.btn_tra.setStyleSheet(self.active_style if met=="TRANSFERENCIA" else self.inactive_style)
-        
-        if met == "EFECTIVO": self.stack.setCurrentIndex(0); self.txt_recibido.setFocus()
-        elif met == "TARJETA": self.stack.setCurrentIndex(1)
-        elif met == "TRANSFERENCIA": self.stack.setCurrentIndex(2); self.txt_ref.setFocus()
+    def cambio_metodo(self):
+        if self.rb_efectivo.isChecked():
+            self.metodo_seleccionado = "EFECTIVO"
+            self.lbl_extra.setText("Dinero Recibido:")
+            self.txt_extra.setPlaceholderText("$")
+            self.txt_extra.setEnabled(True)
+            self.lbl_cambio.show()
+        elif self.rb_credito.isChecked():
+            self.metodo_seleccionado = "CREDITO"
+            self.lbl_extra.setText("Referencia / Nota:")
+            self.txt_extra.setPlaceholderText("Ej. Autorizó Gerente...")
+            self.txt_extra.setEnabled(True)
+            self.lbl_cambio.hide()
+        else:
+            self.metodo_seleccionado = "TARJETA" if self.rb_tarjeta.isChecked() else "TRANSFERENCIA"
+            self.lbl_extra.setText("N° Autorización:")
+            self.txt_extra.setPlaceholderText("Opcional")
+            self.txt_extra.setEnabled(True)
+            self.lbl_cambio.hide()
 
     def calc_cambio(self):
+        if self.metodo_seleccionado != "EFECTIVO": return
         try:
-            val = float(self.txt_recibido.text() or 0)
-            c = val - self.total
-            self.lbl_cambio.setText(f"Cambio: ${c:,.2f}")
-        except: pass
+            recibido = float(self.txt_extra.text())
+            cambio = recibido - self.total_pagar
+            if cambio < 0:
+                self.lbl_cambio.setStyleSheet("color: #f44336; font-size: 18px; font-weight: bold; border: none;")
+                self.lbl_cambio.setText(f"Falta: ${abs(cambio):.2f}")
+                self.btn_cobrar.setEnabled(False)
+            else:
+                self.lbl_cambio.setStyleSheet("color: #28a745; font-size: 18px; font-weight: bold; border: none;")
+                self.lbl_cambio.setText(f"Cambio: ${cambio:.2f}")
+                self.btn_cobrar.setEnabled(True)
+        except:
+            self.lbl_cambio.setText("Cambio: $0.00")
+            self.btn_cobrar.setEnabled(False)
 
-    def validar(self):
-        if self.metodo_seleccionado == "EFECTIVO":
-            try:
-                if float(self.txt_recibido.text() or 0) < self.total:
-                    return QMessageBox.warning(self, "Error", "Monto insuficiente")
-                self.referencia_pago = "Efectivo"
-            except: return
-        elif self.metodo_seleccionado == "TRANSFERENCIA":
-            self.referencia_pago = self.txt_ref.text()
+    def procesar(self):
+        if self.metodo_seleccionado != "EFECTIVO":
+            self.referencia_pago = self.txt_extra.text().strip()
         self.accept()
-    
-    def iniciar_cobro_mp(self):
-        print("Botón presionado en DialogoPago")
-        self.btn_mp.setEnabled(False)
-        self.btn_mp.setText("Conectando...")
+
+    def aplicar_tema(self):
+        bg = "#212121" if self.tema == "Dark" else "#ffffff"
+        fg = "white" if self.tema == "Dark" else "black"
+        inp = "#333" if self.tema == "Dark" else "#f5f5f7"
         
-        # Conectamos las señales para actualizar el texto del botón
-        try:
-            self.senal_estado.disconnect() # Desconectar anteriores por si acaso
-        except: pass
-        self.senal_estado.connect(lambda txt: self.btn_mp.setText(txt))
-        
-        # Iniciar hilo
-        hilo = threading.Thread(target=self.hilo_worker_mp)
-        hilo.start()
-
-    def hilo_worker_mp(self):
-        # 1. Leer credenciales reales desde config.json
-        try:
-            with open('config.json', 'r') as f:
-                config = json.load(f)
-                # OJO: Asegúrate de que en tu json las claves se llamen así
-                TOKEN = config.get("mercado_pago", {}).get("access_token")
-                DEVICE = config.get("mercado_pago", {}).get("device_id")
-        except Exception as e:
-            print(f"Error leyendo config: {e}")
-            self.senal_estado.emit("Error Configuración")
-            return
-
-        self.senal_estado.emit("Conectando...")
-        
-        try:
-            # 2. Iniciar conexión real
-            mp = MercadoPagoPoint(TOKEN, DEVICE)
-            self.senal_estado.emit("Enviando cobro...")
-            
-            # Usamos el total real de la venta
-            monto = getattr(self, 'total_a_pagar', 100.00) 
-            
-            # 3. Crear Intento de Pago
-            payment_id = mp.crear_cobro(monto)
-
-            if not payment_id:
-                # Si falla (ej. error 401 o 404), avisamos
-                self.senal_estado.emit("Error de Conexión")
-                print("No se pudo obtener ID de pago (Revisar Token/Device ID)")
-                return
-
-            # 4. Esperar a que el cliente pague (Polling)
-            intentos = 0
-            while intentos < 60: # Esperar 2 minutos máx (60 * 2s)
-                self.senal_estado.emit(f"Esperando tarjeta... ({60-intentos})")
-                
-                estado = mp.verificar_estado_pago(payment_id)
-                
-                if estado == "approved":
-                    self.senal_estado.emit("¡PAGO APROBADO!")
-                    # Aquí podrías cerrar la ventana automáticamente:
-                    # self.accept() 
-                    return
-                elif estado == "rejected":
-                    self.senal_estado.emit("Pago Rechazado")
-                    return
-                
-                time.sleep(2)
-                intentos += 1
-                
-            # Timeout
-            mp.cancelar_cobro(payment_id)
-            self.senal_estado.emit("Tiempo Agotado")
-
-        except Exception as e:
-            print(f"Error en proceso: {e}")
-            self.senal_estado.emit("Error de Sistema")
+        self.frame.setStyleSheet(f"""
+            QFrame {{ background-color: {bg}; border: 1px solid #555; border-radius: 15px; }}
+            QLabel, QRadioButton {{ color: {fg}; font-size: 14px; }}
+            QLineEdit {{ background-color: {inp}; color: {fg}; padding: 8px; border-radius: 5px; border: 1px solid #777; font-size: 16px; }}
+            QPushButton {{ padding: 8px; border-radius: 5px; }}
+        """)
 
 # ==========================================
 # INVENTARIO & FORMULARIO (Diseño Oscuro)
@@ -2026,76 +1868,168 @@ class WidgetIMEI(QWidget):
                 self.txt_imei.setText(imei_limpio)
                 self.agregar_imei()
 
-class DialogoSeleccionTalla(QDialog):
-    def __init__(self, tallas_stock_dict, tema, parent=None):
+class DialogoPago(QDialog):
+    def __init__(self, total, tema="Dark", parent=None):
         super().__init__(parent)
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedSize(350, 300)
-        self.talla_seleccionada = None
+        self.setWindowTitle("Procesar Pago")
+        self.setFixedSize(400, 450)
+        self.metodo_seleccionado = None
+        self.referencia_pago = ""
+        
+        # Colores según tema
+        bg = "#333" if tema == "Dark" else "#f5f5f7"
+        fg = "white" if tema == "Dark" else "black"
+        btn_bg = "#444" if tema == "Dark" else "#e0e0e0"
 
-        # --- COLORES DINÁMICOS ---
-        if tema == "Dark":
-            bg = "#1e1e1e"; fg = "white"; btn_bg = "#3a3a3a"; border = "#444"
-            btn_hover = "#444"; btn_disabled = "#333"; txt_disabled = "#555"
-        else:
-            bg = "#ffffff"; fg = "#1d1d1f"; btn_bg = "#f5f5f7"; border = "#d2d2d7"
-            btn_hover = "#e5e5e5"; btn_disabled = "#f0f0f0"; txt_disabled = "#ccc"
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {bg}; color: {fg}; }}
+            QPushButton {{ background-color: {btn_bg}; color: {fg}; border-radius: 8px; padding: 15px; font-size: 14px; font-weight: bold; }}
+            QPushButton:hover {{ background-color: #007aff; color: white; }}
+            QLineEdit {{ padding: 10px; border-radius: 5px; border: 1px solid #555; background-color: {btn_bg}; color: {fg}; }}
+            QLabel {{ color: {fg}; }}
+        """)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0,0,0,0)
+        layout.setSpacing(15)
+        layout.setContentsMargins(30, 30, 30, 30)
 
-        frame = QFrame()
-        frame.setStyleSheet(f"""
-            QFrame {{ background-color: {bg}; border-radius: 15px; border: 1px solid {border}; }}
-            QLabel {{ color: {fg}; font-weight: bold; font-size: 16px; background: transparent; border: none; }}
-            QPushButton {{ background-color: {btn_bg}; color: {fg}; border-radius: 8px; border: 1px solid {border}; font-weight: bold; }}
-            QPushButton:hover {{ background-color: {btn_hover}; }}
-        """)
+        # Etiqueta Total
+        lbl_total = QLabel(f"Total a Pagar:\n${total:,.2f}")
+        lbl_total.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_total.setStyleSheet("font-size: 24px; font-weight: bold; color: #28a745; margin-bottom: 20px;")
+        layout.addWidget(lbl_total)
+
+        # Botones de Método de Pago
+        self.btn_efectivo = QPushButton("💵  EFECTIVO")
+        self.btn_efectivo.clicked.connect(lambda: self.finalizar("EFECTIVO"))
         
-        l_frame = QVBoxLayout(frame); l_frame.setContentsMargins(20,20,20,20)
-        l_frame.addWidget(QLabel("👕 Seleccionar Talla", alignment=Qt.AlignmentFlag.AlignCenter))
+        self.btn_tarjeta = QPushButton("💳  TARJETA")
+        self.btn_tarjeta.clicked.connect(lambda: self.pedir_referencia("TARJETA"))
         
-        # Área de Scroll
-        scroll = QScrollArea(); scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("background: transparent; border: none;")
-        cont = QWidget(); cont.setStyleSheet("background: transparent;")
-        grid = QGridLayout(cont); grid.setSpacing(10)
+        self.btn_trans = QPushButton("🏦  TRANSFERENCIA")
+        self.btn_trans.clicked.connect(lambda: self.pedir_referencia("TRANSFERENCIA"))
+
+        self.btn_credito = QPushButton("🤝  CRÉDITO (Fiar)")
+        self.btn_credito.setStyleSheet("background-color: #d63384; color: white; border-radius: 8px; padding: 15px; font-size: 14px; font-weight: bold;")
+        self.btn_credito.clicked.connect(lambda: self.finalizar("CREDITO"))
+
+        layout.addWidget(self.btn_efectivo)
+        layout.addWidget(self.btn_tarjeta)
+        layout.addWidget(self.btn_trans)
+        layout.addWidget(self.btn_credito)
+
+        btn_cancelar = QPushButton("Cancelar")
+        btn_cancelar.setStyleSheet("background-color: transparent; border: 1px solid #555; color: #888; padding: 10px;")
+        btn_cancelar.clicked.connect(self.reject)
+        layout.addWidget(btn_cancelar)
+
+    def pedir_referencia(self, metodo):
+        ref, ok = self.input_dialog("Referencia", f"Ingresa referencia de {metodo}:")
+        if ok:
+            self.referencia_pago = ref
+            self.finalizar(metodo)
+
+    def finalizar(self, metodo):
+        self.metodo_seleccionado = metodo
+        self.accept()
+
+    def input_dialog(self, title, label):
+        d = QDialog(self)
+        d.setWindowTitle(title)
+        l = QVBoxLayout(d)
+        l.addWidget(QLabel(label))
+        txt = QLineEdit()
+        l.addWidget(txt)
+        btn = QPushButton("OK")
+        btn.clicked.connect(d.accept)
+        l.addWidget(btn)
+        if d.exec(): return txt.text(), True
+        return "", False
+
+class DialogoSeleccionTalla(QDialog):
+    def __init__(self, tallas_stock, tema="Dark", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Seleccionar Talla")
+        self.setFixedSize(350, 400)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         
+        self.talla_seleccionada = None
+        self.tema = tema
+        
+        # Layout Principal
+        layout = QVBoxLayout(self)
+        self.frame = QFrame()
+        layout.addWidget(self.frame)
+        
+        l = QVBoxLayout(self.frame)
+        l.setSpacing(15)
+        l.setContentsMargins(20, 20, 20, 20)
+        
+        l.addWidget(QLabel("👕 Elige una talla disponible:", styleSheet="font-size: 16px; font-weight: bold; border: none;"))
+        
+        # Grid de Botones
+        grid = QGridLayout()
         row, col = 0, 0
-        for talla, cant in tallas_stock_dict.items():
-            btn = QPushButton(f"{talla}\n({cant})")
+        
+        # Ordenar tallas (S, M, L, XL...)
+        orden = ["XS", "S", "M", "L", "XL", "XXL"]
+        lista_tallas = sorted(tallas_stock.keys(), key=lambda x: orden.index(x) if x in orden else 99)
+        
+        for t in lista_tallas:
+            # --- CORRECCIÓN AQUÍ: Convertimos a int() para evitar el error 'str' > 'int' ---
+            try:
+                cant = int(tallas_stock[t]) 
+            except (ValueError, TypeError):
+                cant = 0 # Si hay un error en el dato, asumimos 0
+            # -------------------------------------------------------------------------------
+
+            txt = f"{t}\n({cant})"
+            btn = QPushButton(txt)
             btn.setFixedSize(80, 60)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
             
-            if cant > 0:
-                btn.setStyleSheet("background-color: #007aff; color: white; border: none;")
-                btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                btn.clicked.connect(lambda _, t=talla: self.elegir(t))
-            else:
-                btn.setStyleSheet(f"background-color: {btn_disabled}; color: {txt_disabled}; border: 1px solid {border};")
+            # Si no hay stock, deshabilitar
+            if cant <= 0:
                 btn.setEnabled(False)
-            
+                # Estilo deshabilitado
+                btn.setStyleSheet("background-color: #555; color: #aaa; border: 1px solid #666; border-radius: 8px;")
+            else:
+                # Estilo habilitado (Azul)
+                btn.setStyleSheet("""
+                    QPushButton { background-color: #007aff; color: white; border-radius: 8px; font-weight: bold; font-size: 14px; }
+                    QPushButton:hover { background-color: #005bb5; }
+                """)
+                # Usamos lambda para pasar el valor de 't'
+                btn.clicked.connect(lambda _, x=t: self.seleccionar(x))
+                
             grid.addWidget(btn, row, col)
-            col += 1; 
-            if col > 2: col = 0; row += 1
-
-        scroll.setWidget(cont)
-        l_frame.addWidget(scroll)
-
+            col += 1
+            if col > 2: col=0; row+=1
+            
+        l.addLayout(grid)
+        l.addStretch()
+        
         btn_cancel = QPushButton("Cancelar")
         btn_cancel.clicked.connect(self.reject)
-        l_frame.addWidget(btn_cancel)
+        l.addWidget(btn_cancel)
         
-        layout.addWidget(frame)
-        
-        # Centrar ventana
-        if parent:
-            geo = parent.geometry()
-            self.move(geo.center() - self.rect().center())
+        self.aplicar_tema()
 
-    def elegir(self, t):
-        self.talla_seleccionada = t
+    def seleccionar(self, talla):
+        self.talla_seleccionada = talla
         self.accept()
+
+    def aplicar_tema(self):
+        bg = "#2d2d30" if self.tema == "Dark" else "#ffffff"
+        fg = "white" if self.tema == "Dark" else "black"
+        border = "#444" if self.tema == "Dark" else "#ccc"
+        
+        self.frame.setStyleSheet(f"""
+            QFrame {{ background-color: {bg}; border: 1px solid {border}; border-radius: 15px; }}
+            QLabel {{ color: {fg}; }}
+            QPushButton {{ padding: 10px; border-radius: 5px; }}
+        """)
 
 class FormularioProducto(QWidget):
     def __init__(self, parent=None):
@@ -3687,141 +3621,128 @@ class DialogoGestorUsuario(QDialog):
         self.resultado = (u, p, r, permisos_json)
         self.accept()
 
+# ==========================================
+# CLASE GESTIÓN DE USUARIOS (CON TEMA)
+# ==========================================
 class WidgetUsuarios(QWidget):
-    def __init__(self, main_window, tema_inicial="Dark"):
+    def __init__(self, main, tema_inicial="Dark"):
         super().__init__()
-        self.main = main_window 
-        self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(30,30,30,30)
-        self.layout.setSpacing(15)
+        self.main = main
         
-        # Encabezado
-        h_header = QHBoxLayout()
-        lbl = QLabel("👥 Gestión de Personal")
-        lbl.setStyleSheet("font-size: 24px; font-weight: bold;")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
         
-        btn_nuevo = QPushButton("+ Nuevo Usuario")
-        btn_nuevo.setFixedSize(140, 40)
-        btn_nuevo.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_nuevo.setStyleSheet("QPushButton { background-color: #28a745; color: white; border-radius: 8px; font-weight: bold; }")
-        btn_nuevo.clicked.connect(self.abrir_crear)
+        # --- Encabezado ---
+        header = QHBoxLayout()
+        self.lbl_tit = QLabel("👥 Administración de Usuarios")
+        self.lbl_tit.setStyleSheet("font-size: 24px; font-weight: bold;")
         
-        h_header.addWidget(lbl)
-        h_header.addStretch()
-        h_header.addWidget(btn_nuevo)
-        self.layout.addLayout(h_header)
+        self.btn_nuevo = QPushButton("+ Nuevo Usuario")
+        self.btn_nuevo.setFixedSize(150, 40)
+        self.btn_nuevo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_nuevo.clicked.connect(self.nuevo_usuario)
         
-        # Tabla
+        header.addWidget(self.lbl_tit)
+        header.addStretch()
+        header.addWidget(self.btn_nuevo)
+        layout.addLayout(header)
+        
+        # --- Tabla ---
         self.tabla = QTableWidget()
         self.tabla.setColumnCount(4)
-        self.tabla.setHorizontalHeaderLabels(["ID", "Usuario", "Rol", "Acciones"])
+        self.tabla.setHorizontalHeaderLabels(["ID", "Usuario", "Rol", "Permisos"])
+        self.tabla.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.tabla.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tabla.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        layout.addWidget(self.tabla)
         
-        header = self.tabla.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents) 
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)          
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        self.tabla.setColumnWidth(2, 100)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        self.tabla.setColumnWidth(3, 180) # Espacio para 2 botones
+        # --- Botones Acción ---
+        hbox = QHBoxLayout()
+        hbox.addStretch()
         
-        self.tabla.verticalHeader().hide()
-        self.tabla.verticalHeader().setDefaultSectionSize(50)
-        self.tabla.setShowGrid(False)
-        self.tabla.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        self.layout.addWidget(self.tabla)
+        self.btn_eliminar = QPushButton("🗑️ Eliminar Usuario")
+        self.btn_eliminar.setFixedSize(160, 45)
+        self.btn_eliminar.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_eliminar.clicked.connect(self.eliminar_usuario)
         
-        self.cargar_usuarios()
+        hbox.addWidget(self.btn_eliminar)
+        layout.addLayout(hbox)
 
-    def cargar_usuarios(self):
+        # Cargar datos y aplicar tema inicial
+        self.cargar_datos()
+        self.aplicar_tema(tema_inicial) # <--- ESTO FALTABA
+
+    def aplicar_tema(self, tema):
+        """Cambia los colores de la pantalla de usuarios"""
+        if tema == "Dark":
+            c = {
+                "bg": "#2b2b2b", "text": "#ffffff", 
+                "table_bg": "#333333", "grid": "#555555",
+                "head_bg": "#444444", "head_text": "#ffffff",
+                "btn_main": "#007aff", "btn_danger": "#dc3545"
+            }
+        else:
+            c = {
+                "bg": "#f3f3f3", "text": "#000000", 
+                "table_bg": "#ffffff", "grid": "#cccccc",
+                "head_bg": "#e0e0e0", "head_text": "#000000",
+                "btn_main": "#007aff", "btn_danger": "#dc3545"
+            }
+
+        # Aplicar estilos
+        self.setStyleSheet(f"background-color: {c['bg']}; color: {c['text']};")
+        self.lbl_tit.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {c['text']};")
+        
+        self.btn_nuevo.setStyleSheet(f"background-color: {c['btn_main']}; color: white; font-weight: bold; border-radius: 5px; border: none;")
+        self.btn_eliminar.setStyleSheet(f"background-color: {c['btn_danger']}; color: white; font-weight: bold; border-radius: 5px; border: none;")
+
+        # Estilo Tabla
+        self.tabla.setStyleSheet(f"""
+            QTableWidget {{
+                background-color: {c['table_bg']};
+                color: {c['text']};
+                gridline-color: {c['grid']};
+                border: 1px solid {c['grid']};
+            }}
+            QHeaderView::section {{
+                background-color: {c['head_bg']};
+                color: {c['head_text']};
+                padding: 5px;
+                border: 1px solid {c['grid']};
+            }}
+            QTableCornerButton::section {{ background-color: {c['head_bg']}; }}
+        """)
+    
+    def cargar_datos(self):
         self.tabla.setRowCount(0)
-        # NECESITAMOS OBTENER TAMBIÉN LOS PERMISOS PARA PODER EDITARLOS
-        # Asegúrate de que db.obtener_todos_usuarios devuelva los permisos
-        # Si tu función retorna (id, username, rol, permisos), usa eso.
-        if hasattr(db, 'obtener_todos_usuarios'):
-            
-            # NOTA: Debemos modificar db.obtener_todos_usuarios para que traiga la columna permisos
-            # Si no la trae, la edición fallará al cargar checkboxes.
-            # Asumiré que modificaste db.obtener_todos_usuarios para retornar [(id, name, rol, perms), ...]
-            # Si no, hazlo en database.py: return [(u.id, u.username, u.rol, u.permisos) for u in users]
-            
-            usuarios = db.obtener_todos_usuarios()
-            
-            for u in usuarios:
-                r = self.tabla.rowCount()
-                self.tabla.insertRow(r)
-                
-                # u = (id, username, rol, permisos) -> Ajusta índices según tu DB
-                id_user = str(u[0])
-                nombre = str(u[1])
-                rol = str(u[2])
-                
-                self.tabla.setItem(r, 0, QTableWidgetItem(id_user))
-                self.tabla.setItem(r, 1, QTableWidgetItem(nombre))
-                
-                # Etiqueta de Rol con color
-                lbl_rol = QLabel(rol)
-                lbl_rol.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                color_rol = "#007aff" if rol == "ADMIN" else "#666"
-                lbl_rol.setStyleSheet(f"color: {color_rol}; font-weight: bold;")
-                self.tabla.setCellWidget(r, 2, lbl_rol)
-                
-                # --- BOTONES DE ACCIÓN (EDITAR Y ELIMINAR) ---
-                w_acc = QWidget()
-                l_acc = QHBoxLayout(w_acc)
-                l_acc.setContentsMargins(5,5,5,5)
-                l_acc.setSpacing(10)
-                
-                # Botón Editar
-                btn_edit = QPushButton("✏️")
-                btn_edit.setFixedSize(40, 30)
-                btn_edit.setStyleSheet("background-color: #ff9800; color: white; border-radius: 5px;")
-                btn_edit.setToolTip("Editar Permisos")
-                # Pasamos 'u' completo (la tupla con datos)
-                btn_edit.clicked.connect(lambda _, datos=u: self.abrir_editar(datos))
-                
-                # Botón Eliminar
-                btn_del = QPushButton("🗑️")
-                btn_del.setFixedSize(40, 30)
-                btn_del.setStyleSheet("background-color: #dc3545; color: white; border-radius: 5px;")
-                btn_del.clicked.connect(lambda _, uid=u[0], n=u[1]: self.eliminar(uid, n))
-                
-                l_acc.addWidget(btn_edit)
-                l_acc.addWidget(btn_del)
-                self.tabla.setCellWidget(r, 3, w_acc)
+        users = db.obtener_todos_usuarios()
+        for u in users:
+            row = self.tabla.rowCount()
+            self.tabla.insertRow(row)
+            self.tabla.setItem(row, 0, QTableWidgetItem(str(u[0])))
+            self.tabla.setItem(row, 1, QTableWidgetItem(u[1]))
+            self.tabla.setItem(row, 2, QTableWidgetItem(u[2]))
+            self.tabla.setItem(row, 3, QTableWidgetItem(u[3])) # Permisos (JSON)
 
-    def abrir_crear(self):
-        tema = self.main.config.get("tema", "Dark")
-        dlg = DialogoGestorUsuario(self.main, tema=tema)
-        if dlg.exec():
-            u, p, r, perms = dlg.resultado
-            if db.registrar_usuario_nuevo(u, p, r, perms):
-                QMessageBox.information(self, "Éxito", "Usuario creado.")
-                self.cargar_usuarios()
-            else:
-                QMessageBox.warning(self, "Error", "No se pudo crear.")
+    def nuevo_usuario(self):
+        # Aquí puedes implementar un diálogo similar al de Clientes
+        QMessageBox.information(self, "Info", "Función para crear usuario pendiente de implementar diálogo.")
 
-    def abrir_editar(self, datos_usuario):
-        # datos_usuario es la tupla (id, user, rol, permisos)
-        tema = self.main.config.get("tema", "Dark")
-        dlg = DialogoGestorUsuario(self.main, tema=tema, usuario_a_editar=datos_usuario)
+    def eliminar_usuario(self):
+        row = self.tabla.currentRow()
+        if row < 0: return QMessageBox.warning(self, "Error", "Selecciona un usuario")
         
-        if dlg.exec():
-            # Resultado: (user, pass, rol, permisos)
-            # Nota: 'user' no lo usamos para update (no cambiamos nombre), 'pass' puede estar vacío
-            _, nuevo_pass, nuevo_rol, nuevos_perms = dlg.resultado
-            id_usuario = datos_usuario[0]
+        uid = int(self.tabla.item(row, 0).text())
+        uname = self.tabla.item(row, 1).text()
+        
+        if uname == "admin":
+            return QMessageBox.warning(self, "Error", "No puedes eliminar al administrador principal.")
             
-            if db.actualizar_datos_usuario(id_usuario, nuevo_pass, nuevo_rol, nuevos_perms):
-                QMessageBox.information(self, "Actualizado", "Datos y permisos actualizados.")
-                self.cargar_usuarios()
+        if QMessageBox.question(self, "Confirmar", f"¿Eliminar a {uname}?") == QMessageBox.StandardButton.Yes:
+            if db.eliminar_usuario_db(uid):
+                self.cargar_datos()
             else:
-                QMessageBox.warning(self, "Error", "No se pudo actualizar.")
-
-    def eliminar(self, uid, nombre):
-        if str(uid) == "1" or nombre.lower() == "admin": return QMessageBox.warning(self, "Error", "No puedes borrar al admin")
-        if QMessageBox.question(self, "Confirmar", f"¿Eliminar a {nombre}?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
-            db.eliminar_usuario_db(uid)
-            self.cargar_usuarios()
+                QMessageBox.warning(self, "Error", "No se pudo eliminar.")
 
 class DialogoApertura(QDialog):
     def __init__(self, modo_oscuro=True):
@@ -3956,7 +3877,7 @@ class CorteCajaWidget(QWidget):
         self.lbl_titulo = QLabel("Corte de Caja y Arqueo")
         self.layout.addWidget(self.lbl_titulo)
 
-        # --- SECCIÓN 1: DETALLE DE EFECTIVO (FILA SUPERIOR) ---
+        # --- SECCIÓN 1: DETALLE DE EFECTIVO ---
         self.frame_efectivo = QFrame()
         l_efectivo = QHBoxLayout(self.frame_efectivo)
         l_efectivo.setContentsMargins(0,0,0,0)
@@ -3964,17 +3885,18 @@ class CorteCajaWidget(QWidget):
         
         self.card_apertura = self.crear_card("Monto Apertura", "$0.00", "#007aff")
         self.card_ventas_efectivo = self.crear_card("(+) Ventas Efectivo", "$0.00", "#28a745")
-        self.card_devoluciones = self.crear_card("(-) Devoluciones", "$0.00", "#d32f2f")
-        # Este es el más importante para comparar con tu conteo de billetes
+        self.card_gastos = self.crear_card("(-) Gastos/Retiros", "$0.00", "#d32f2f") # Tarjeta Roja
+        self.card_devoluciones = self.crear_card("(-) Devoluciones", "$0.00", "#c62828")
         self.card_esperado = self.crear_card("= TOTAL EN CAJA", "$0.00", "#ff9800", grande=True)
         
         l_efectivo.addWidget(self.card_apertura)
         l_efectivo.addWidget(self.card_ventas_efectivo)
+        l_efectivo.addWidget(self.card_gastos)
         l_efectivo.addWidget(self.card_devoluciones)
         l_efectivo.addWidget(self.card_esperado)
         self.layout.addWidget(self.frame_efectivo)
 
-        # --- SECCIÓN 2: BANCOS Y OTROS (FILA MEDIA) ---
+        # --- SECCIÓN 2: BANCOS ---
         self.frame_bancos = QFrame()
         l_bancos = QHBoxLayout(self.frame_bancos)
         l_bancos.setContentsMargins(0,0,0,0)
@@ -3989,9 +3911,9 @@ class CorteCajaWidget(QWidget):
         l_bancos.addWidget(self.card_transferencia)
         self.layout.addWidget(self.frame_bancos)
 
-        # --- SECCIÓN 3: ARQUEO DE BILLETES (FILA INFERIOR) ---
-        group_arqueo = QGroupBox("💵 Arqueo de Efectivo (Ingresa cantidades para cuadrar)")
-        group_arqueo.setStyleSheet("QGroupBox { font-weight: bold; border: 1px solid #555; border-radius: 5px; margin-top: 10px; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }")
+        # --- SECCIÓN 3: ARQUEO ---
+        group_arqueo = QGroupBox("💵 Arqueo de Efectivo")
+        # (Estilos se aplican en aplicar_tema)
         
         layout_arqueo = QGridLayout(group_arqueo)
         layout_arqueo.setContentsMargins(15, 15, 15, 15)
@@ -4000,7 +3922,6 @@ class CorteCajaWidget(QWidget):
         self.inputs_billetes = {}
         denominaciones = [1000, 500, 200, 100, 50, 20]
         
-        # Generar inputs de billetes en 2 columnas
         row, col = 0, 0
         for denom in denominaciones:
             lbl = QLabel(f"Billetes ${denom}:")
@@ -4008,62 +3929,75 @@ class CorteCajaWidget(QWidget):
             spin.setRange(0, 5000)
             spin.setStyleSheet("font-size: 14px; padding: 4px;")
             spin.valueChanged.connect(self.calcular_total_contado)
-            
             self.inputs_billetes[denom] = spin
-            
             layout_arqueo.addWidget(lbl, row, col)
             layout_arqueo.addWidget(spin, row, col+1)
-            
             col += 2
-            if col >= 4:
-                col = 0
-                row += 1
+            if col >= 4: col = 0; row += 1
 
-        # Monedas
         lbl_mon = QLabel("Monedas (Total):")
         self.spin_monedas = QDoubleSpinBox()
         self.spin_monedas.setRange(0, 10000)
         self.spin_monedas.setPrefix("$ ")
-        self.spin_monedas.setStyleSheet("font-size: 14px; padding: 4px; color: #ffeb3b; font-weight: bold;")
         self.spin_monedas.valueChanged.connect(self.calcular_total_contado)
         
         layout_arqueo.addWidget(lbl_mon, row + 1, 0)
         layout_arqueo.addWidget(self.spin_monedas, row + 1, 1)
 
-        # Totales del Arqueo
         self.lbl_total_contado = QLabel("Total Contado: $0.00")
-        self.lbl_total_contado.setStyleSheet("font-size: 18px; font-weight: bold; color: #ff9800;")
         self.lbl_total_contado.setAlignment(Qt.AlignmentFlag.AlignRight)
         
         self.lbl_diferencia = QLabel("Diferencia: $0.00")
-        self.lbl_diferencia.setStyleSheet("font-size: 16px; font-weight: bold; color: #aaa;")
         self.lbl_diferencia.setAlignment(Qt.AlignmentFlag.AlignRight)
 
-        layout_arqueo.addWidget(self.lbl_total_contado, row, 2, 1, 2) # Ubicado a la derecha de billetes
+        layout_arqueo.addWidget(self.lbl_total_contado, row, 2, 1, 2)
         layout_arqueo.addWidget(self.lbl_diferencia, row + 1, 2, 1, 2)
-
         self.layout.addWidget(group_arqueo)
 
-        # Botón Acción
-        self.btn_realizar_corte = QPushButton("✂️ REALIZAR CORTE DE CAJA")
+        # --- SECCIÓN 4: BOTONES DE ACCIÓN (NUEVO LAYOUT HORIZONTAL) ---
+        h_botones = QHBoxLayout()
+        h_botones.setSpacing(15)
+
+        # BOTÓN 1: REGISTRAR GASTO (NUEVO)
+        self.btn_gasto = QPushButton("📉 REGISTRAR GASTO")
+        self.btn_gasto.setFixedHeight(50)
+        self.btn_gasto.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_gasto.clicked.connect(self.abrir_gastos) # Conecta a la función
+        
+        # BOTÓN 2: REALIZAR CORTE
+        self.btn_realizar_corte = QPushButton("✂️ REALIZAR CORTE")
         self.btn_realizar_corte.setFixedHeight(50)
         self.btn_realizar_corte.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_realizar_corte.clicked.connect(self.accion_realizar_corte)
-        self.layout.addWidget(self.btn_realizar_corte)
+        
+        h_botones.addWidget(self.btn_gasto)         # Agregamos botón gasto
+        h_botones.addWidget(self.btn_realizar_corte) # Agregamos botón corte
+        
+        self.layout.addLayout(h_botones)
 
         self.aplicar_tema(self.tema)
+
+    # --- MÉTODO NUEVO PARA ABRIR GASTOS ---
+    def abrir_gastos(self):
+        if not DialogoGastos:
+            return QMessageBox.critical(self, "Error", "Falta dialogo_gastos.py")
+            
+        # Abrimos el diálogo pasándole el tema actual
+        dlg = DialogoGastos(self.main, tema=self.tema)
+        if dlg.exec():
+            # Si guardó un gasto, RECARGAMOS LOS DATOS para que se reste
+            self.cargar_datos()
+            QMessageBox.information(self, "Actualizado", "El corte se ha actualizado con el nuevo gasto.")
 
     def crear_card(self, titulo, valor, color, grande=False):
         card = QFrame()
         card.setStyleSheet(f"background-color: {color}; border-radius: 8px; color: white;")
         l = QVBoxLayout(card)
         lbl_t = QLabel(titulo); lbl_t.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_t.setStyleSheet("font-size: 11px;") # Texto un poco más pequeño para que quepa
-        
+        lbl_t.setStyleSheet("font-size: 11px;") 
         lbl_v = QLabel(valor); lbl_v.setAlignment(Qt.AlignmentFlag.AlignCenter)
         size = "22px" if grande else "18px"
         lbl_v.setStyleSheet(f"font-size: {size}; font-weight: bold;")
-        
         card.lbl_valor = lbl_v 
         l.addWidget(lbl_t); l.addWidget(lbl_v)
         return card
@@ -4073,11 +4007,28 @@ class CorteCajaWidget(QWidget):
         self.datos_corte = db.obtener_datos_corte(self.main.usuario_actual.id)
         
         if self.datos_corte:
-            # --- LLENAR TODAS LAS TARJETAS ---
+            # Calcular Gastos
+            ahora = datetime.now()
+            inicio_dia = ahora.replace(hour=0, minute=0, second=0, microsecond=0)
+            str_inicio = inicio_dia.strftime("%Y-%m-%d %H:%M:%S")
+            str_fin = ahora.strftime("%Y-%m-%d %H:%M:%S")
+
+            if hasattr(db, 'obtener_total_gastos_corte'):
+                total_gastos = db.obtener_total_gastos_corte(str_inicio, str_fin)
+            else:
+                total_gastos = 0.0
+
+            # Recalcular Total Esperado
+            nuevo_total_esperado = self.datos_corte['total_esperado'] - total_gastos
+            self.datos_corte['total_esperado'] = nuevo_total_esperado
+            self.datos_corte['total_gastos'] = total_gastos
+
+            # Actualizar Labels
             self.card_apertura.lbl_valor.setText(f"${self.datos_corte['monto_inicial']:.2f}")
             self.card_ventas_efectivo.lbl_valor.setText(f"${self.datos_corte['ventas_efectivo']:.2f}")
+            self.card_gastos.lbl_valor.setText(f"${total_gastos:.2f}") # Actualizar tarjeta gastos
             self.card_devoluciones.lbl_valor.setText(f"${self.datos_corte['devoluciones']:.2f}")
-            self.card_esperado.lbl_valor.setText(f"${self.datos_corte['total_esperado']:.2f}")
+            self.card_esperado.lbl_valor.setText(f"${nuevo_total_esperado:.2f}")
             
             self.card_tarjeta.lbl_valor.setText(f"${self.datos_corte['ventas_tarjeta']:.2f}")
             self.card_num_tarjeta.lbl_valor.setText(f"{self.datos_corte['num_cobros_tarjeta']}")
@@ -4090,23 +4041,18 @@ class CorteCajaWidget(QWidget):
 
     def calcular_total_contado(self):
         if not self.datos_corte: return
-        
         total = 0.0
         for denom, spin in self.inputs_billetes.items():
             total += (denom * spin.value())
         total += self.spin_monedas.value()
         
         self.lbl_total_contado.setText(f"Total Contado: ${total:.2f}")
-        
         esperado = self.datos_corte['total_esperado']
         dif = total - esperado
         
-        if dif == 0:
-            txt = "✅ EXACTO"; col = "#28a745"
-        elif dif > 0:
-            txt = f"⚠️ SOBRANTE: +${dif:.2f}"; col = "#ffeb3b"
-        else:
-            txt = f"❌ FALTANTE: -${abs(dif):.2f}"; col = "#f44336"
+        if dif == 0: txt = "✅ EXACTO"; col = "#28a745"
+        elif dif > 0: txt = f"⚠️ SOBRANTE: +${dif:.2f}"; col = "#ffeb3b"
+        else: txt = f"❌ FALTANTE: -${abs(dif):.2f}"; col = "#f44336"
             
         self.lbl_diferencia.setText(txt)
         self.lbl_diferencia.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {col};")
@@ -4114,91 +4060,48 @@ class CorteCajaWidget(QWidget):
 
     def accion_realizar_corte(self):
         total_fisico, diferencia = self.calcular_total_contado()
-        
-        msg = f"¿Cerrar turno y generar reporte?\n\nSistema: ${self.datos_corte['total_esperado']:.2f}\nFísico: ${total_fisico:.2f}"
-        reply = QMessageBox.question(self, "Confirmar", msg, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        
-        if reply == QMessageBox.StandardButton.Yes:
+        msg = f"¿Cerrar turno?\nSistema: ${self.datos_corte['total_esperado']:.2f}\nFísico: ${total_fisico:.2f}"
+        if QMessageBox.question(self, "Confirmar", msg, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+            
             db.finalizar_corte_db(self.datos_corte['sesion_id'], total_fisico, diferencia)
             
             # Datos para el ticket
             desglose = {d: s.value() for d, s in self.inputs_billetes.items()}
             desglose["monedas"] = self.spin_monedas.value()
-            
             try:
                 import utils
                 import os, sys
                 ruta = utils.generar_ticket_corte(self.datos_corte, desglose, self.main.usuario_actual.username)
                 if os.path.exists(ruta): os.startfile(ruta)
-                
-                QMessageBox.information(self, "Éxito", "Corte realizado. El sistema se cerrará.")
+                QMessageBox.information(self, "Éxito", "Corte realizado.")
                 sys.exit()
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Error ticket: {e}")
 
     def aplicar_tema(self, modo):
         self.tema = modo
-        
-        # DEFINICIÓN DE COLORES
         if modo == "Dark":
-            bg = "#212121"
-            text = "white"
-            input_bg = "#333"
-            input_border = "#555"
-            group_border = "#555"
+            bg = "#212121"; text = "white"; input_bg = "#333"; input_border = "#555"; group_border = "#555"
         else:
-            bg = "#f5f5f7"
-            text = "black"
-            input_bg = "white"
-            input_border = "#ccc"
-            group_border = "#ccc"
+            bg = "#f5f5f7"; text = "black"; input_bg = "white"; input_border = "#ccc"; group_border = "#ccc"
         
-        # APLICAR ESTILO GENERAL
         self.setStyleSheet(f"""
             QWidget {{ background-color: {bg}; color: {text}; }}
-            
             QLabel {{ border: none; }}
+            QGroupBox {{ font-weight: bold; border: 1px solid {group_border}; border-radius: 5px; margin-top: 10px; background-color: transparent; }}
+            QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 5px; background-color: {bg}; }}
+            QSpinBox, QDoubleSpinBox {{ background-color: {input_bg}; color: {text}; border: 1px solid {input_border}; border-radius: 4px; padding: 5px; font-size: 14px; }}
             
-            /* Estilo del Grupo de Arqueo */
-            QGroupBox {{ 
-                font-weight: bold; 
-                border: 1px solid {group_border}; 
-                border-radius: 5px; 
-                margin-top: 10px; 
-                background-color: transparent;
-            }}
-            QGroupBox::title {{ 
-                subcontrol-origin: margin; 
-                left: 10px; 
-                padding: 0 5px; 
-                background-color: {bg}; /* Para que el texto no se tache con la línea */
-            }}
-            
-            /* Estilo de los Inputs (SpinBoxes) */
-            QSpinBox, QDoubleSpinBox {{
-                background-color: {input_bg};
-                color: {text};
-                border: 1px solid {input_border};
-                border-radius: 4px;
-                padding: 5px;
-                font-size: 14px;
-            }}
-            
-            /* Botón Rojo (Siempre igual) */
-            QPushButton {{ 
-                background-color: #d32f2f; 
-                color: white; 
-                border-radius: 10px; 
-                font-size: 18px; 
-                font-weight: bold; 
-                border: none;
-            }}
-            QPushButton:hover {{ background-color: #b71c1c; }}
-            
-            /* Deshabilitado */
+            /* ESTILO BOTONES DE ACCIÓN */
+            QPushButton {{ border-radius: 10px; font-size: 16px; font-weight: bold; border: none; }}
             QPushButton:disabled {{ background-color: #555; color: #aaa; }}
         """)
         
+        # Botón Gasto (Naranja/Rojo)
+        self.btn_gasto.setStyleSheet("background-color: #ff9800; color: white;") 
+        # Botón Corte (Verde/Rojo según lógica, aquí verde default)
+        self.btn_realizar_corte.setStyleSheet("background-color: #d32f2f; color: white;")
+
         self.lbl_titulo.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {text}; border: none;")
         
 class ConfiguracionWidget(QWidget):
@@ -4432,6 +4335,301 @@ class ConfiguracionWidget(QWidget):
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Error general: {e}")
 
+class ClientesWidget(QWidget):
+    def __init__(self, main, tema="Dark"):
+        super().__init__()
+        self.main = main
+        self.tema = tema
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        # Encabezado
+        h_header = QHBoxLayout()
+        self.lbl_titulo = QLabel("👥 Gestión de Clientes y Créditos")
+        self.lbl_titulo.setStyleSheet("font-size: 24px; font-weight: bold;")
+        
+        self.btn_nuevo = QPushButton("+ Nuevo Cliente")
+        self.btn_nuevo.setFixedSize(150, 40)
+        self.btn_nuevo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_nuevo.clicked.connect(self.abrir_nuevo_cliente)
+        
+        h_header.addWidget(self.lbl_titulo)
+        h_header.addStretch()
+        h_header.addWidget(self.btn_nuevo)
+        layout.addLayout(h_header)
+        
+        # Tabla
+        self.tabla = QTableWidget()
+        self.tabla.setColumnCount(5)
+        self.tabla.setHorizontalHeaderLabels(["ID", "Nombre", "Teléfono", "Límite Crédito", "Deuda Actual"])
+        self.tabla.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.tabla.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tabla.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        layout.addWidget(self.tabla)
+        
+        # Botones de Acción (Abonar)
+        h_actions = QHBoxLayout()
+        self.btn_abonar = QPushButton("💰 Abonar a Deuda")
+        self.btn_abonar.setFixedSize(180, 45)
+        self.btn_abonar.clicked.connect(self.abonar_deuda)
+        
+        h_actions.addStretch()
+        h_actions.addWidget(self.btn_abonar)
+        layout.addLayout(h_actions)
+        
+        self.aplicar_tema(tema)
+        self.cargar_tabla()
+
+    def cargar_tabla(self):
+        self.tabla.setRowCount(0)
+        clientes = db.obtener_clientes()
+        
+        for c in clientes:
+            row = self.tabla.rowCount()
+            self.tabla.insertRow(row)
+            
+            self.tabla.setItem(row, 0, QTableWidgetItem(str(c['id'])))
+            self.tabla.setItem(row, 1, QTableWidgetItem(c['nombre']))
+            self.tabla.setItem(row, 2, QTableWidgetItem(c['telefono']))
+            self.tabla.setItem(row, 3, QTableWidgetItem(f"${c['limite']:,.2f}"))
+            
+            item_saldo = QTableWidgetItem(f"${c['saldo']:,.2f}")
+            # Si debe dinero, poner en rojo
+            if c['saldo'] > 0:
+                item_saldo.setForeground(Qt.GlobalColor.red)
+            
+            self.tabla.setItem(row, 4, item_saldo)
+
+    def abrir_nuevo_cliente(self):
+        # 1. Abrir la ventana de registro
+        tema_actual = self.main.config.get("tema", "Dark")
+        dlg = DialogoNuevoCliente(tema=tema_actual, parent=self)
+        
+        if dlg.exec(): # Si el usuario dio click en "GUARDAR"
+            # 2. Recolectar datos
+            nombre = dlg.txt_nombre.text().strip()
+            tel = dlg.txt_telefono.text().strip()
+            direc = dlg.txt_direccion.text().strip()
+            limite = dlg.spin_limite.value()
+
+            # 3. Guardar en Base de Datos
+            import database as db  # Asegúrate de importar tu db
+            exito, resultado = db.agregar_cliente(nombre, tel, direc, limite)
+
+            if exito:
+                # 'resultado' aquí ES EL ID GENERADO (el número de cliente)
+                msg = f"""
+                ✅ Cliente registrado exitosamente.
+                
+                🆔 NÚMERO DE CLIENTE:  {resultado}
+                
+                Límite de crédito: ${limite:,.2f}
+                """
+                QMessageBox.information(self, "Registro Exitoso", msg)
+                
+                # 4. Recargar la tabla para que aparezca el nuevo
+                self.cargar_tabla() 
+            else:
+                QMessageBox.critical(self, "Error", f"No se pudo registrar: {resultado}")
+
+    def abonar_deuda(self):
+        row = self.tabla.currentRow()
+        if row < 0: return QMessageBox.warning(self, "Aviso", "Selecciona un cliente para abonar.")
+        
+        cid = int(self.tabla.item(row, 0).text())
+        nombre = self.tabla.item(row, 1).text()
+        saldo_str = self.tabla.item(row, 4).text().replace("$", "").replace(",", "")
+        saldo = float(saldo_str)
+        
+        if saldo <= 0:
+            return QMessageBox.information(self, "Sin Deuda", "Este cliente no tiene deuda pendiente.")
+            
+        # Diálogo simple para monto
+        from PyQt6.QtWidgets import QInputDialog
+        monto, ok = QInputDialog.getDouble(self, "Abonar", 
+                                         f"Cliente: {nombre}\nDeuda: ${saldo:.2f}\n\nIngrese monto a abonar:", 
+                                         0, 0, 100000, 2)
+        
+        if ok and monto > 0:
+            if monto > saldo:
+                return QMessageBox.warning(self, "Error", "No puedes abonar más de lo que debe.")
+            
+            uid = self.main.usuario_actual.id
+            exito, msg = db.registrar_abono_cliente(cid, monto, uid)
+            if exito:
+                QMessageBox.information(self, "Éxito", "Abono registrado.")
+                self.cargar_tabla()
+
+    def aplicar_tema(self, tema):
+        self.tema = tema
+        if tema == "Dark":
+            bg = "#212121"; fg = "white"; btn = "#007aff"
+        else:
+            bg = "#f5f5f7"; fg = "black"; btn = "#007aff"
+            
+        self.setStyleSheet(f"QWidget {{ background-color: {bg}; color: {fg}; }}")
+        self.btn_nuevo.setStyleSheet(f"background-color: {btn}; color: white; border-radius: 5px; font-weight: bold;")
+        self.btn_abonar.setStyleSheet("background-color: #28a745; color: white; border-radius: 5px; font-weight: bold;")
+
+# CLASE FORMULARIO CLIENTE
+class DialogoCliente(QDialog):
+    def __init__(self, tema, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Nuevo Cliente")
+        self.setFixedSize(400, 350)
+        
+        layout = QFormLayout(self)
+        self.txt_nombre = QLineEdit()
+        self.txt_tel = QLineEdit()
+        self.txt_dir = QLineEdit()
+        self.spin_limite = QDoubleSpinBox()
+        self.spin_limite.setRange(0, 50000)
+        self.spin_limite.setValue(1000) # Default
+        
+        layout.addRow("Nombre Completo:", self.txt_nombre)
+        layout.addRow("Teléfono:", self.txt_tel)
+        layout.addRow("Dirección:", self.txt_dir)
+        layout.addRow("Límite de Crédito ($):", self.spin_limite)
+        
+        btn_ok = QPushButton("Guardar")
+        btn_ok.clicked.connect(self.validar)
+        layout.addRow(btn_ok)
+        
+        if tema == "Dark": 
+            self.setStyleSheet("background-color: #333; color: white; QLineEdit { background-color: #444; }")
+        
+    def validar(self):
+        self.nombre = self.txt_nombre.text().strip()
+        self.telefono = self.txt_tel.text().strip()
+        self.direccion = self.txt_dir.text().strip()
+        self.limite = self.spin_limite.value()
+        
+        if not self.nombre: return QMessageBox.warning(self, "Error", "El nombre es obligatorio")
+        self.accept()
+                
+class DialogoGastos(QDialog):
+    def __init__(self, parent=None, tema="Dark"):
+        super().__init__(parent)
+        self.setWindowTitle("Registrar Gasto / Retiro")
+        self.setFixedSize(400, 450)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        
+        self.tema = tema
+        
+        # --- LAYOUT ---
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0,0,0,0) # Margen 0 para el borde
+        self.frame = QFrame()
+        layout.addWidget(self.frame)
+        
+        l = QVBoxLayout(self.frame)
+        l.setSpacing(15)
+        l.setContentsMargins(30, 30, 30, 30)
+
+        # Título
+        lbl_titulo = QLabel("📉 Registrar Salida de Efectivo")
+        lbl_titulo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Estilo inline para asegurar visibilidad
+        lbl_titulo.setStyleSheet("font-size: 18px; font-weight: bold; color: #ff3b30; border: none;") 
+        l.addWidget(lbl_titulo)
+
+        # 1. Monto
+        l.addWidget(QLabel("Monto a retirar:"))
+        self.spin_monto = QDoubleSpinBox()
+        self.spin_monto.setPrefix("$ ")
+        self.spin_monto.setRange(0.01, 100000.00)
+        self.spin_monto.setDecimals(2)
+        self.spin_monto.setFixedHeight(40)
+        l.addWidget(self.spin_monto)
+
+        # 2. Categoría
+        l.addWidget(QLabel("Motivo / Categoría:"))
+        self.combo_cat = QComboBox()
+        self.combo_cat.addItems([
+            "Pago a Proveedor", 
+            "Pago de Servicios (Luz/Internet)", 
+            "Comida de Empleados", 
+            "Insumos / Papelería",
+            "Retiro de Efectivo (Dueño)",
+            "Otro"
+        ])
+        self.combo_cat.setFixedHeight(35)
+        l.addWidget(self.combo_cat)
+
+        # 3. Descripción
+        l.addWidget(QLabel("Descripción / Notas:"))
+        self.txt_desc = QLineEdit()
+        self.txt_desc.setPlaceholderText("Ej. Coca-cola para repartidor...")
+        self.txt_desc.setFixedHeight(35)
+        l.addWidget(self.txt_desc)
+
+        # Botones
+        l.addSpacing(20)
+        h_btns = QHBoxLayout()
+        
+        btn_cancelar = QPushButton("Cancelar")
+        btn_cancelar.setFixedSize(100, 40)
+        btn_cancelar.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_cancelar.clicked.connect(self.reject)
+        
+        btn_guardar = QPushButton("REGISTRAR RETIRO")
+        btn_guardar.setFixedHeight(40)
+        btn_guardar.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_guardar.clicked.connect(self.guardar_gasto)
+        
+        h_btns.addWidget(btn_cancelar)
+        h_btns.addWidget(btn_guardar)
+        l.addLayout(h_btns)
+
+        self.aplicar_estilo()
+
+    def aplicar_estilo(self):
+        if self.tema == "Dark":
+            bg = "#2d2d30"; fg = "white"; inp = "#333"; border = "#444"
+        else:
+            bg = "white"; fg = "black"; inp = "#f0f0f0"; border = "#ccc"
+            
+        self.frame.setStyleSheet(f"""
+            QFrame {{ background-color: {bg}; border: 1px solid {border}; border-radius: 15px; }}
+            QLabel {{ color: {fg}; font-weight: bold; border: none; }}
+            QLineEdit, QComboBox, QDoubleSpinBox {{ 
+                background-color: {inp}; color: {fg}; border: 1px solid {border}; border-radius: 5px; padding: 5px; font-size: 14px;
+            }}
+            QPushButton {{ background-color: {inp}; color: {fg}; border: 1px solid {border}; border-radius: 5px; font-weight: bold; }}
+            QPushButton:hover {{ background-color: #ddd; color: black; }}
+        """)
+        # Forzar estilo botón guardar (siempre rojo)
+        self.findChild(QPushButton, "").nextInFocusChain().setStyleSheet("background-color: #d32f2f; color: white; border-radius: 5px; font-weight: bold;")
+
+    def guardar_gasto(self):
+        monto = self.spin_monto.value()
+        desc = self.txt_desc.text().strip()
+        cat = self.combo_cat.currentText()
+
+        if monto <= 0:
+            return QMessageBox.warning(self, "Error", "El monto debe ser mayor a 0.")
+        if not desc:
+            return QMessageBox.warning(self, "Error", "Escribe una descripción breve.")
+
+        if QMessageBox.question(self, "Confirmar", f"¿Retirar ${monto:.2f}?\nMotivo: {cat}", QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+
+        # Guardar en BD
+        # Intentamos obtener usuario del parent
+        uid = 1
+        if self.parent() and hasattr(self.parent(), 'usuario_actual'):
+             uid = self.parent().usuario_actual.id
+
+        exito, msg = db.registrar_gasto(monto, desc, cat, uid)
+        
+        if exito:
+            QMessageBox.information(self, "Registrado", "Gasto registrado correctamente.")
+            self.accept()
+        else:
+            QMessageBox.critical(self, "Error", f"No se pudo guardar: {msg}")
+
 # ==========================================
 # MAIN WINDOW
 # ==========================================
@@ -4444,7 +4642,6 @@ class MainWindow(QMainWindow):
         self.caja_inicial = monto_inicial
         
         # Bandera para controlar el ciclo en main.py
-        # False = Cerrar App completa | True = Volver al Login
         self.cerrar_sesion_solicitado = False 
 
         self.setWindowTitle(f"NEXUS POS 3.0 - Usuario: {self.usuario_actual.username}")
@@ -4454,7 +4651,7 @@ class MainWindow(QMainWindow):
         self.config = self.cargar_config()
         tema_inicial = self.config.get("tema", "Dark")
 
-        # 3. INTERFAZ PRINCIPAL (Ya no hay Login aquí dentro)
+        # 3. INTERFAZ PRINCIPAL
         self.widget_sistema = QWidget()
         self.setCentralWidget(self.widget_sistema)
         
@@ -4477,13 +4674,18 @@ class MainWindow(QMainWindow):
         sl.addWidget(self.lbl_sidebar_logo)
 
         self.btns_nav = []
+        
+        # === AQUÍ AGREGAMOS "CLIENTES" EN LA LISTA ===
+        # El orden ahora es: 
+        # 0: Ventas, 1: Inventario, 2: Clientes, 3: Historial...
         menu_items = [
             ("Ventas", "🛒"), 
             ("Inventario", "📦"), 
+            ("Clientes", "👥"),      # <--- NUEVO BOTÓN
             ("Historial", "📜"), 
             ("Devoluciones", "↩️"),
             ("Corte Caja", "💰"),
-            ("Usuarios", "👥"),
+            ("Usuarios", "🔐"),      # Cambié icono para distinguir de Clientes
             ("Configuración", "⚙️")
         ]
         
@@ -4498,7 +4700,7 @@ class MainWindow(QMainWindow):
             b.setStyleSheet("""
                 QPushButton {
                     background-color: transparent; 
-                    color: #888888; /* Gris visible por defecto */
+                    color: #888888;
                     border: none;
                     text-align: left;
                     padding-left: 20px;
@@ -4535,69 +4737,71 @@ class MainWindow(QMainWindow):
         btn_logout.clicked.connect(self.logout)
         sl.addWidget(btn_logout)
         
-        layout_sistema.addWidget(sb) # Agregamos Sidebar
+        layout_sistema.addWidget(sb) 
 
         # --- B. Contenido (Páginas) ---
         self.content = QStackedWidget()
         
-        # Instanciar Widgets
+        # Instanciar Widgets (Asegúrate de que ClientesWidget exista en tu archivo)
         self.ventas_w = VentasWidget(self)
         self.inventario_w = InventarioWidget(self)
+        self.clientes_w = ClientesWidget(self)       # <--- INSTANCIA NUEVA
         self.historial_w = HistorialWidget(self)
         self.devoluciones_w = DevolucionesWidget(self, tema=tema_inicial)
         self.corte_w = CorteCajaWidget(self, tema=tema_inicial)
-        self.usuarios_w = WidgetUsuarios (self, tema_inicial=tema_inicial)
+        self.usuarios_w = WidgetUsuarios(self, tema_inicial=tema_inicial)
         self.config_w = ConfiguracionWidget(self)
         
-        self.content.addWidget(self.ventas_w)       # 0
-        self.content.addWidget(self.inventario_w)   # 1
-        self.content.addWidget(self.historial_w)    # 2
-        self.content.addWidget(self.devoluciones_w) # 3
-        self.content.addWidget(self.corte_w)        # 4
-        self.content.addWidget(self.usuarios_w)     # 5
-        self.content.addWidget(self.config_w)       # 6
+        # Agregar al Stack EN EL MISMO ORDEN QUE EL MENÚ
+        self.content.addWidget(self.ventas_w)       # Índice 0
+        self.content.addWidget(self.inventario_w)   # Índice 1
+        self.content.addWidget(self.clientes_w)     # Índice 2 (NUEVO)
+        self.content.addWidget(self.historial_w)    # Índice 3
+        self.content.addWidget(self.devoluciones_w) # Índice 4
+        self.content.addWidget(self.corte_w)        # Índice 5
+        self.content.addWidget(self.usuarios_w)     # Índice 6
+        self.content.addWidget(self.config_w)       # Índice 7
         
-        layout_sistema.addWidget(self.content) # Agregamos contenido
+        layout_sistema.addWidget(self.content) 
 
         # 4. INICIALIZACIÓN FINAL
         aplicar_estilos(QApplication.instance(), tema_inicial)
         self.actualizar_apariencia()
         
+        # --- PERMISOS Y OCULTACIÓN DE BOTONES ---
+        # NOTA: Los índices cambiaron porque agregamos "Clientes" en la posición 2
+        
+        # Historial (Ahora es Índice 3)
         if not self.verificar_permiso("VER_HISTORIAL"):
-            self.btns_nav[2].hide() 
+            self.btns_nav[3].hide() 
             
-        # Ocultar botón de DEVOLUCIONES (Índice 3)
+        # Devoluciones (Ahora es Índice 4)
         if not self.verificar_permiso("HACER_DEVOLUCIONES"):
-            self.btns_nav[3].hide()
-
-        # Ocultar botón de CORTE DE CAJA (Índice 4)
-        if not self.verificar_permiso("HACER_CORTE"):
             self.btns_nav[4].hide()
 
-        # Ocultar USUARIOS y CONFIGURACIÓN (Solo para Admin)
+        # Corte Caja (Ahora es Índice 5)
+        if not self.verificar_permiso("HACER_CORTE"):
+            self.btns_nav[5].hide()
+
+        # Usuarios (6) y Configuración (7) - Solo Admin
         if self.usuario_actual.rol != "ADMIN":
-            self.btns_nav[5].hide() # Usuarios
-            self.btns_nav[6].hide() # Configuración
+            self.btns_nav[6].hide() 
+            self.btns_nav[7].hide() 
         
         # Ir a Ventas por defecto
         self.nav(0) 
         
     def verificar_permiso(self, permiso_requerido):
         """Verifica si el usuario actual tiene el permiso solicitado"""
-        # 1. Si es ADMIN, tiene acceso total automáticamente
         if self.usuario_actual.rol == "ADMIN":
             return True
             
-        # 2. Si es CAJERO, leemos su lista de permisos guardada
         import json
         try:
-            # El campo 'permisos' viene de la base de datos como texto '["A", "B"]'
-            # Necesitamos convertirlo a una lista real de Python
             permisos = json.loads(self.usuario_actual.permisos)
         except:
-            permisos = [] # Si falla o está vacío
+            permisos = [] 
             
-        # 3. Revisar si tiene el permiso maestro "TODO" o el específico
         if "TODO" in permisos:
             return True
             
@@ -4609,75 +4813,59 @@ class MainWindow(QMainWindow):
         self.btns_nav[i].setChecked(True)
         self.content.setCurrentIndex(i)
         
-        # Animación de entrada suave
-        w = self.content.currentWidget()
-        if 'animar_entrada' in globals():
-            animar_entrada(w)
-            
-        # Refrescar datos si entramos a Corte de Caja
-        if self.content.currentWidget() == self.corte_w:
+        # Refrescar datos si entramos a Corte o Clientes
+        w_actual = self.content.currentWidget()
+        
+        if w_actual == self.corte_w:
             self.corte_w.cargar_datos()
-    
-    # --- MÉTODO LOGOUT CORREGIDO ---
+            
+        elif w_actual == self.clientes_w:
+            # CORRECCIÓN: Usamos 'cargar_tabla' que es el nombre real en tu clase
+            self.clientes_w.cargar_tabla()
+            
     def logout(self):
-        """Cierra la ventana actual y activa la bandera para que el Main Loop reinicie."""
         reply = QMessageBox.question(self, "Salir", "¿Cerrar sesión?", 
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         
         if reply == QMessageBox.StandardButton.Yes:
-            self.cerrar_sesion_solicitado = True # <--- ESTO ES LA CLAVE
-            self.close() # Cerramos MainWindow. El código en main.py detectará la bandera True.
+            self.cerrar_sesion_solicitado = True 
+            self.close() 
 
     # --- CONFIGURACIÓN Y TEMAS ---
     def cargar_config(self):
-        """Lee la configuración usando RUTA ABSOLUTA para no perderse."""
         import os
         import json
-        
-        # 1. Calcular la ruta exacta (Igual que en main.py y SetupDialog)
         carpeta_actual = os.path.dirname(os.path.abspath(__file__))
         ruta_absoluta = os.path.join(carpeta_actual, "config.json")
         
-        # 2. Verificar si existe en esa ruta específica
         if os.path.exists(ruta_absoluta):
             try:
                 with open(ruta_absoluta, "r") as f:
-                    print(f"✅ Configuración cargada desde: {ruta_absoluta}") # Debug
                     return json.load(f)
-            except Exception as e:
-                print(f"Error cargando config: {e}")
+            except:
                 return {}
-        else:
-            print(f"⚠️ No se encontró config.json en: {ruta_absoluta}")
-            return {}
+        return {}
 
     def cambiar_tema(self, checked):
         tema = "Dark" if checked else "Light"
         self.config["tema"] = tema
         
-        # 1. Guardar preferencia
         with open("config.json", "w") as f:
+            import json
             json.dump(self.config, f)
             
-        # 2. Aplicar estilos globales
         aplicar_estilos(QApplication.instance(), tema)
         
-        # 3. Actualizar widgets específicos
+        # Actualizar temas de widgets hijos
+        if hasattr(self, 'clientes_w'): self.clientes_w.aplicar_tema(tema)
         if hasattr(self, 'corte_w'): self.corte_w.aplicar_tema(tema)
         if hasattr(self, 'devoluciones_w'): self.devoluciones_w.aplicar_tema(tema)
         if hasattr(self, 'config_w'): self.config_w.aplicar_tema(tema)
         if hasattr(self, 'historial_w'): self.historial_w.aplicar_tema(tema)
-        
-        # 4. Actualizar borde de botones menú
-        # Forzamos la recarga del estilo de los botones de navegación
-        color_hover = "#007aff" if tema == "Dark" else "#007aff"
-        color_text = "#888888"
-        # (Aquí podrías refinar colores si quisieras diferencias Dark/Light en sidebar)
+        if hasattr(self, 'usuarios_w'): self.usuarios_w.aplicar_tema(tema)
 
     def actualizar_apariencia(self):
-        """Carga el logo en el sidebar"""
         path_logo = self.config.get("logo_path", "")
-        
         if path_logo and os.path.exists(path_logo):
             pix = QPixmap(path_logo)
             scaled_sidebar = pix.scaledToWidth(180, Qt.TransformationMode.SmoothTransformation)
@@ -4686,25 +4874,6 @@ class MainWindow(QMainWindow):
         else:
             self.lbl_sidebar_logo.setText("NEXUS")
             self.lbl_sidebar_logo.setStyleSheet("font-size: 28px; font-weight: 900; color: #007aff; margin-bottom: 20px;")
-            
-    def verificar_permiso(self, permiso_requerido):
-        # 1. Recuperar permisos del usuario actual desde la DB (json string)
-        import json
-        try:
-            perms = json.loads(self.usuario_actual.permisos)
-        except:
-            perms = []
-            
-        # 2. Si es ADMIN o tiene "TODO", pase directo
-        if self.usuario_actual.rol == "ADMIN" or "TODO" in perms:
-            return True
-            
-        # 3. Verificar permiso específico
-        return permiso_requerido in perms
-
-    def aplicar_fondo_login(self):
-       
-        pass
 
 # --- BLOQUE DE EJECUCIÓN CON CAPTURA DE ERRORES ---
 if __name__ == "__main__":
